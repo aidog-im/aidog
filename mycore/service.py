@@ -115,6 +115,7 @@ from . import channels as channels_mod
 from . import checkpoint
 from . import cli
 from . import evolution
+from . import hooks as hooks_mod
 from . import scheduler
 from .assembly import build_system_stack, resolve_context_dirs
 from .loop import run_turn
@@ -526,21 +527,33 @@ class ChatService:
         if not isinstance(text, str) or not text.strip():
             return
         text = text.strip()
+        # Forum topic (car 4a-M3): a threaded message keeps ITS OWN pipeline
+        # session under "{cid}:{tid}" so two topics never share context;
+        # commands (/cron, /checkpoint, /model, ...) stay chat-level by
+        # design — their state is chat-wide. The reply threads back via
+        # message_thread_id when the update carried one (tg.send_message).
+        tid = msg.get("message_thread_id")
+        if not isinstance(tid, int) or isinstance(tid, bool):
+            tid = None
         try:
             if text.startswith("/"):
                 reply = self._command(cid, text)
             else:
-                reply = self._pipeline(cid, text)
+                skey = f"{cid}:{tid}" if tid is not None else cid
+                reply = self._pipeline(cid, text, session_key=skey)
         except Exception as e:  # noqa: BLE001 — one bad update must not kill the loop
             self.log.write("UPDATE_ERR", f"chat={redact_chat(cid)}",
                            f"err={type(e).__name__}")
             reply = self._t("err.internal")
         if reply:
-            self._send(cid, reply)
+            self._send(cid, reply, thread_id=tid)
 
-    def _send(self, chat_id: int, text: str) -> bool:
+    def _send(self, chat_id: int, text: str,
+              thread_id: int | None = None) -> bool:
         """The single Telegram outbound point (dry-run stops here; channel
-        replies go through _channel_send with the same dry-run contract)."""
+        replies go through _channel_send with the same dry-run contract).
+        `thread_id` threads the reply back into its forum topic (None =
+        plain chat reply, unchanged payload)."""
         if self.dry_run:
             preview = _scrub_paths(text)[:120]
             self.log.write("DRYRUN_SEND", f"chat={redact_chat(chat_id)}",
@@ -549,7 +562,7 @@ class ChatService:
                   f"chars={len(text)} preview={preview!r}")
             return False
         try:
-            self.tg.send_message(chat_id, text)
+            self.tg.send_message(chat_id, text, thread_id=thread_id)
             self.log.write("SEND_OK", f"chat={redact_chat(chat_id)}",
                            f"chars={len(text)}")
             return True
@@ -879,10 +892,13 @@ class ChatService:
             lines = [self._t("cmd.cron.list_head", n=len(jobs))]
             for j in jobs:
                 state = self._t("cmd.cron.done") if j.get("done") else ""
+                nf = scheduler.next_fire(j, now)
+                delta = scheduler.fmt_delta(nf, now)
                 lines.append(
                     f"  {j['id']} · {scheduler.describe(j)} · {j.get('kind')} · "
                     f"{self._t('cmd.cron.next')} "
-                    f"{scheduler.fmt_beijing(scheduler.next_fire(j, now))}"
+                    f"{scheduler.fmt_beijing(nf)}"
+                    f"{' (' + delta + ')' if delta else ''}"
                     f"{state} · {str(j.get('text', ''))[:40]}")
             return "\n".join(lines)
         if sub in ("add", "new"):
@@ -989,6 +1005,8 @@ class ChatService:
         unknown route or an honest send failure falls back to the existing
         int-origin > MYCORE_WD_CHAT > log-only chain."""
         origin = job.get("origin")
+        self._fire_hooks("cron_fire",
+                         origin if isinstance(origin, (int, str)) else None)
         if isinstance(origin, str):
             route, sep, dest = origin.partition(":")
             if sep and dest:
@@ -1207,7 +1225,21 @@ class ChatService:
                          daemon=True).start()
         return stop.set
 
-    def _pipeline(self, chat_id: int | str, text: str) -> str:
+    def _fire_hooks(self, event: str, chat_id: int | str | None = None,
+                    tool: str | None = None) -> None:
+        """Event hook (car 4a): fire the settings `hooks` block for `event`
+        on a background thread — never blocks, never raises, never echoes
+        output (mycore.hooks contract). `chat_id` is redacted here (service
+        log discipline) before it reaches the hook environment."""
+        try:
+            hooks_mod.fire(event, repo=self.repo,
+                           chat=redact_chat(chat_id) if chat_id is not None else None,
+                           tool=tool, log=self.log.write)
+        except Exception:  # noqa: BLE001 — a hook problem never breaks a turn
+            pass
+
+    def _pipeline(self, chat_id: int | str, text: str,
+                  session_key: int | str | None = None) -> str:
         """Session load -> body stack -> run_turn -> persisted delta -> reply.
 
         Returns the final reply text (honest short lines on failure); the
@@ -1215,18 +1247,28 @@ class ChatService:
         typing heartbeat covers exactly the long part (model + tools), and
         the scheduler origin is pinned for the whole turn (a `cron` tool
         call inside it records this chat as the job's delivery target).
+
+        `session_key` (car 4a-M3) overrides ONLY which session file the turn
+        reads/persists — the forum-topic key "{cid}:{tid}". Chat identity
+        (typing beat, cron origin, hooks, log lines, /model override) stays
+        `chat_id`; None = chat-level session (unchanged behavior). Cross-topic
+        context transfer is v1 out of scope: topics are isolated on purpose.
         """
         stop_beat = self._typing_heartbeat(chat_id)
         scheduler.set_origin(chat_id)   # cron tool remembers where it was asked
+        self._fire_hooks("turn_start", chat_id)
         try:
-            return self._pipeline_body(chat_id, text)
+            return self._pipeline_body(chat_id, text, session_key=session_key)
         finally:
             stop_beat()
             scheduler.clear_origin()
+            self._fire_hooks("turn_end", chat_id)
 
-    def _pipeline_body(self, chat_id: int, text: str) -> str:
+    def _pipeline_body(self, chat_id: int, text: str,
+                       session_key: int | str | None = None) -> str:
         cfg = self._model_for_chat(chat_id)
-        path = self._session_path(chat_id)
+        path = self._session_path(session_key if session_key is not None
+                                  else chat_id)
         sess = Session(path)
         history = sess.load()
         if not history and not sess.meta():        # fresh (or garbage-only) file
@@ -1248,8 +1290,11 @@ class ChatService:
             if kind == "tool_call":
                 self.log.write("TOOL", f"chat={redact_chat(chat_id)}",
                                f"name={data.get('name', '?')}")
+                self._fire_hooks("tool_call", chat_id,
+                                 tool=str(data.get("name", ""))[:64])
             elif kind == "compact":
                 self.log.write("COMPACT", f"folded={data.get('folded', 0)}")
+                self._fire_hooks("compact", chat_id)
 
         try:
             res = run_turn(messages, chat_fn, self.registry,
@@ -1257,6 +1302,7 @@ class ChatService:
         except Exception as e:  # noqa: BLE001 — run_turn never raises; belt anyway
             self.log.write("TURN_CRASH", f"chat={redact_chat(chat_id)}",
                            f"err={type(e).__name__}")
+            self._fire_hooks("error", chat_id)
             return self._t("err.internal")
 
         # Persist only this turn's new messages (identity-based: compaction

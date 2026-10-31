@@ -1,0 +1,35 @@
+# I'm AiDog
+
+> A personal embodied AI: a constitution for a personality, curated memory for a life, and a self-developed core that answers to you alone. Permanently free for any use, local-first console, Telegram-first channels.
+
+I'm AiDog is a single companion you run yourself — not a platform, not an assistant farm. Three constitutional facts: it is permanently free (no paid tier, no usage fee, no paid feature gate, ever), the console is local-first (state, memory and configuration stay on your own machine), and the core kernel is self-developed in-house rather than wrapped from a third party.
+
+## Product
+
+- Permanently free: no pricing, no paid features, no usage metering.
+- Local-first console: web UI on your own machine for chat, memory, skills, cron and channel configuration.
+- Constitution and curated memory: behavioural rules and long-term memory are versioned assets you control.
+- Skills and automations: skill packs, scheduled tasks and Telegram-driven control.
+- Bring-your-own model: model endpoints and credentials are configured by the operator.
+
+## Interfaces
+
+- Web console: streaming chat UI plus settings, memory, cron, skills and channel management.
+- Telegram bot: first-class messaging channel with streaming replies and typing indicators.
+- OpenAI-compatible API: the local console exposes `GET /v1/models` and `POST /v1/chat/completions` (streaming and non-streaming) behind a Bearer token, so OpenAI-style tooling can point at it.
+
+## Live stats
+
+- [Visits](https://aidog.im/api/visits): JSON counter returning `{"count": <integer>, "unit": "page views", "note": "approximate, includes crawlers and refreshes"}`. One increment per page load; approximate by design. Append `?format=text` for `text/plain` output (`visits: <integer>`). If the counter is not configured the endpoint answers `503` with an error object instead of a fabricated number.
+
+## Links
+
+- [Home](https://aidog.im/#home): positioning and facts.
+- [Start](https://aidog.im/#start): install and first-run commands.
+- [Skills](https://aidog.im/#skills): what the skill system does.
+- [Console](https://aidog.im/#console): the local-first web console.
+- [Models](https://aidog.im/#models): model configuration.
+- [Security](https://aidog.im/#security): credential discipline and approval gates.
+- [Architecture](https://aidog.im/#architecture): kernel / body / business layer separation.
+- [GitHub](https://github.com/aidog-im/aidog): source repository.
+- [robots.txt](https://aidog.im/robots.txt) · [Sitemap](https://aidog.im/sitemap.xml) · [manifest](https://aidog.im/manifest.webmanifest)

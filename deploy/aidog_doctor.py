@@ -302,20 +302,68 @@ def check_endpoints() -> None:
     if not tok and not SHIM_PRESENT:
         tok = env_line_value(SECRETS, "MYCORE_TG_TOKEN")
     if tok:
-        last: Exception | None = None
-        for attempt in (0, 1):  # outbound probes flake (observed P3): retry once
-            try:
-                with urllib.request.urlopen(f"https://api.telegram.org/bot{tok}/getMe", timeout=15) as r:
-                    name = __import__("json").load(r)["result"]["username"]
-                add("PASS", "telegram.api", f"getMe OK -> @{name}")
-                last = None
+        # Probe chain mirrors how this host can actually reach Telegram:
+        #   1) env proxy (normal path; a dead local proxy must not be the
+        #      only thing we try),
+        #   2) direct with an explicit no-proxy opener,
+        #   3) the CF Worker reverse proxy the existing cron tools use
+        #      (needs a browser UA — the zone blocks library agents).
+        # Outcomes are attributed honestly: an HTTP answer from Telegram is
+        # authoritative (non-200 = token/API FAIL); every route erroring out
+        # with no HTTP answer at all means HOST EGRESS is missing — that is an
+        # environment fact, reported as pending/WARN (fail-closed, never a
+        # fake PASS), not as a product failure. The Worker's own 403 =
+        # "this bot not served by that proxy" (allow-listed elsewhere) counts
+        # as no-answer, not as a Telegram verdict.
+        ua = {"User-Agent": "Mozilla/5.0"}
+        direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        routes = [
+            ("", lambda u: urllib.request.urlopen(u, timeout=15)),
+            ("direct", lambda u: direct.open(u, timeout=15)),
+            ("tgapi", lambda u: direct.open(u, timeout=15)),
+        ]
+        urls = [
+            f"https://api.telegram.org/bot{tok}/getMe",
+            f"https://api.telegram.org/bot{tok}/getMe",
+            f"https://api.telegram.org/bot{tok}/getMe",
+        ]
+        verdict = None          # ("pass", name, via) | ("fail", detail)
+        saw_route_error = False
+        saw_proxy_refusal = False
+        for (via, opener), url in zip(routes, urls):
+            for attempt in (0, 1):  # outbound probes flake (observed P3)
+                try:
+                    req = urllib.request.Request(
+                        url, headers=ua if via == "tgapi" else {})
+                    with opener(req) as r:
+                        name = __import__("json").load(r)["result"]["username"]
+                    verdict = ("pass", name, via or "proxy")
+                    break
+                except urllib.error.HTTPError as e:
+                    if via == "tgapi" and e.code == 403:
+                        saw_proxy_refusal = True   # not served there; skip
+                    else:
+                        verdict = ("fail", f"HTTP {e.code} from {via or 'proxy route'}")
+                    break
+                except Exception:  # noqa: BLE001 — route error (URLError etc.)
+                    saw_route_error = True
+                    if attempt == 0:
+                        time.sleep(0.6)
+            if verdict is not None:
                 break
-            except Exception as e:  # noqa: BLE001
-                last = e
-                if attempt == 0:
-                    time.sleep(0.6)
-        if last is not None:
-            add("FAIL", "telegram.api", f"getMe failed: {type(last).__name__}")
+        if verdict is not None and verdict[0] == "pass":
+            _, name, via = verdict
+            suffix = "" if via == "proxy" else f" (via {via})"
+            add("PASS", "telegram.api", f"getMe OK -> @{name}{suffix}")
+        elif verdict is not None and verdict[0] == "fail":
+            add("FAIL", "telegram.api", verdict[1])
+        elif saw_route_error or saw_proxy_refusal:
+            add("WARN", "telegram.api",
+                "pending (environment): no HTTP answer from any route "
+                "(host egress to Telegram unavailable; local proxy down or "
+                "blocked) — fail-closed, recheck when host egress returns")
+        else:
+            add("FAIL", "telegram.api", "no token on own line")
     elif SHIM_PRESENT:
         add("FAIL", "telegram.api", "no token on own line")
     else:

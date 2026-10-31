@@ -283,6 +283,27 @@ def fmt_beijing(epoch: float | None) -> str:
     return _bj(epoch).strftime("%Y-%m-%d %H:%M")
 
 
+def fmt_delta(target: float | None, now: float) -> str:
+    """Relative countdown to `target` — language-neutral, locale-free units
+    ('+2h13m', '+45s', '+3d4h'); '' = unknown (nothing scheduled).
+    A target already reached renders '+0s' (due now: the scheduler fires it
+    at the next tick, so the countdown floor is zero, never negative)."""
+    if target is None:
+        return ""
+    secs = int(round(target - now))
+    if secs <= 0:
+        return "+0s"
+    days, rem = divmod(secs, 86400)
+    hours, rem = divmod(rem, 3600)
+    mins, secs = divmod(rem, 60)
+    nz = [(v, u) for v, u in ((days, "d"), (hours, "h"), (mins, "m"),
+                              (secs, "s")) if v]
+    out = f"{nz[0][0]}{nz[0][1]}"
+    if len(nz) > 1:
+        out += f"{nz[1][0]}{nz[1][1]}"
+    return "+" + out
+
+
 def mark_fired(job: dict, now: float) -> None:
     """Advance the job past this fire (mutates; caller persists)."""
     if job.get("type") == "once":

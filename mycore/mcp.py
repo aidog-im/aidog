@@ -79,6 +79,22 @@ class McpError(Exception):
     """Honest transport/protocol failure (rendered as an ERROR: tool line)."""
 
 
+def _with_progress_meta(params: dict | None, rid: int,
+                        on_progress: Callable[[dict], None] | None) -> dict:
+    """MCP progress contract (car 4a-M3): when the caller wants progress,
+    stamp `_meta.progressToken` (= our request id) so the server can echo it
+    in `notifications/progress`. Without a callback the payload is exactly
+    `params or {}` — byte-identical to the pre-progress request shape."""
+    out = dict(params or {})
+    if on_progress is None:
+        return out
+    meta = out.get("_meta") if isinstance(out.get("_meta"), dict) else {}
+    meta = dict(meta)
+    meta["progressToken"] = rid
+    out["_meta"] = meta
+    return out
+
+
 # ---------------------------------------------------------------- config ----
 
 @dataclass
@@ -250,6 +266,10 @@ class Session:
         self._id = 0
         self._lock = threading.Lock()     # serializes requests (id + write)
         self.tools: list[dict] = []
+        # Progress (car 4a-M3): progressToken (our request id) -> callback.
+        # Registered for the lifetime of one request only; a sink that is
+        # gone at notification time drops honestly (never an error).
+        self._progress: dict = {}
 
     # -- transport primitives (per subclass) --
     def _send(self, msg: dict) -> None: ...
@@ -257,18 +277,25 @@ class Session:
     def _close(self) -> None: ...
 
     def request(self, method: str, params: dict | None = None,
-                timeout: float = CONNECT_TIMEOUT) -> dict:
+                timeout: float = CONNECT_TIMEOUT,
+                on_progress: Callable[[dict], None] | None = None) -> dict:
         with self._lock:
             self._id += 1
             rid = self._id
+            if on_progress is not None:
+                self._progress[rid] = on_progress
             try:
                 self._send({"jsonrpc": "2.0", "id": rid, "method": method,
-                            "params": params or {}})
+                            "params": _with_progress_meta(params, rid,
+                                                          on_progress)})
                 msg = self._recv(timeout)
             except McpError:
                 raise
             except Exception as e:  # noqa: BLE001 — transport detail -> honest class
                 raise McpError(f"{method}: {type(e).__name__}") from None
+            finally:
+                if on_progress is not None:
+                    self._progress.pop(rid, None)
         if msg.get("id") != rid:
             raise McpError(f"{method}: response id mismatch "
                            f"({msg.get('id')!r} != {rid})")
@@ -292,6 +319,35 @@ class Session:
                 raise
             except Exception as e:  # noqa: BLE001
                 raise McpError(f"{method}: {type(e).__name__}") from None
+
+    def _dispatch_notification(self, msg: dict) -> bool:
+        """One server->client notification (car 4a-M3). `notifications/`
+        `progress` routes to the callback registered for params.progressToken
+        with {progressToken, message, progress}; any other notification (or
+        a token nobody is waiting for) is dropped honestly. A raising sink
+        never fails the in-flight request. Returns True when consumed."""
+        if not isinstance(msg, dict) or msg.get("id") is not None:
+            return False
+        if msg.get("method") != "notifications/progress":
+            return False
+        params = msg.get("params") if isinstance(msg.get("params"), dict) \
+            else {}
+        token = params.get("progressToken")
+        cb = self._progress.get(token)
+        if cb is None:
+            return True                       # no waiter: dropped, not an error
+        payload = {"progressToken": token,
+                   "message": str(params.get("message") or "")[:500],
+                   "progress": (params.get("progress")
+                                if isinstance(params.get("progress"),
+                                              (int, float))
+                                and not isinstance(params.get("progress"),
+                                                   bool) else None)}
+        try:
+            cb(payload)
+        except Exception:  # noqa: BLE001 — progress must never fail a call
+            pass
+        return True
 
     def handshake(self) -> None:
         self.request("initialize", {
@@ -318,10 +374,11 @@ class Session:
                            "(pagination bound)")
         return out
 
-    def call_tool(self, name: str, args: dict) -> str:
+    def call_tool(self, name: str, args: dict,
+                  on_progress: Callable[[dict], None] | None = None) -> str:
         res = self.request("tools/call",
                            {"name": name, "arguments": args},
-                           timeout=CALL_TIMEOUT)
+                           timeout=CALL_TIMEOUT, on_progress=on_progress)
         if not isinstance(res, dict):
             raise McpError("tools/call: malformed result")
         content = res.get("content")
@@ -396,6 +453,8 @@ class StdioSession(Session):
                     q = self._pending.get(rid) if rid is not None else None
                 if q is not None:
                     q.put(msg)
+                elif rid is None:
+                    self._dispatch_notification(msg)   # progress etc. (M3)
         finally:
             with self._lock:
                 self._alive = False
@@ -427,12 +486,15 @@ class StdioSession(Session):
             raise McpError(self._dead_reason())
         return msg
 
-    def request(self, method, params=None, timeout=CONNECT_TIMEOUT) -> dict:
+    def request(self, method, params=None, timeout=CONNECT_TIMEOUT,
+                on_progress: Callable[[dict], None] | None = None) -> dict:
         with self._lock:
             self._id += 1
             rid = self._id
             q: queue.Queue = queue.Queue(maxsize=1)
             self._pending[rid] = q
+            if on_progress is not None:
+                self._progress[rid] = on_progress
         try:
             with self._lock:
                 if not self._alive:
@@ -440,7 +502,9 @@ class StdioSession(Session):
                 try:
                     self.proc.stdin.write(
                         json.dumps({"jsonrpc": "2.0", "id": rid,
-                                    "method": method, "params": params or {}})
+                                    "method": method,
+                                    "params": _with_progress_meta(
+                                        params, rid, on_progress)})
                         + "\n")
                     self.proc.stdin.flush()
                 except (OSError, ValueError) as e:
@@ -453,6 +517,7 @@ class StdioSession(Session):
         finally:
             with self._lock:
                 self._pending.pop(rid, None)
+                self._progress.pop(rid, None)
         if msg is None:
             raise McpError(f"{method}: {self._dead_reason()}")
         if msg.get("id") != rid:
@@ -530,34 +595,61 @@ class HttpSession(Session):
             raise McpError("http: no response body")
         ctype, raw = got
         self._pending_raw = None
-        return _parse_http_payload(ctype, raw)
+        # Single-shot SSE may interleave server notifications before the
+        # response: dispatch them (progress, car 4a-M3), then answer with the
+        # last id-carrying message — same net result as before when none.
+        msgs = _parse_http_messages(ctype, raw)
+        response: dict | None = None
+        for m in msgs:
+            if m.get("id") is None:
+                self._dispatch_notification(m)
+            else:
+                response = m
+        if response is None:
+            raise McpError("http: response has neither result nor error")
+        return response
 
     def _close(self) -> None:
         pass                            # stateless POSTs leave nothing open
 
 
-def _parse_http_payload(ctype: str, raw: bytes) -> dict:
+def _parse_http_messages(ctype: str, raw: bytes) -> list[dict]:
+    """All JSON-RPC messages in one HTTP response body, in order (car 4a-M3):
+    SSE -> every complete `data:` JSON object; JSON body -> the single object
+    (list form keeps both shapes uniform for the caller)."""
     text = raw.decode("utf-8", errors="replace")
     if "event-stream" in ctype:
-        # SSE: take the last complete `data:` JSON object that is a message.
+        msgs: list[dict] = []
         payload = ""
         for line in text.splitlines():
             if line.startswith("data:"):
                 payload = line[5:].strip()
-        if not payload:
+                try:
+                    obj = json.loads(payload)
+                except ValueError:
+                    continue            # partial/[DONE]-style: not a message
+                if isinstance(obj, dict):
+                    msgs.append(obj)
+        if not msgs:
             raise McpError("http: empty event-stream response")
-        try:
-            msg = json.loads(payload)
-        except ValueError:
-            raise McpError("http: event-stream data is not JSON") from None
-    else:
-        try:
-            msg = json.loads(text)
-        except ValueError:
-            raise McpError("http: response body is not JSON") from None
+        return msgs
+    try:
+        msg = json.loads(text)
+    except ValueError:
+        raise McpError("http: response body is not JSON") from None
     if not isinstance(msg, dict):
         raise McpError("http: response is not a JSON-RPC object")
-    return msg
+    return [msg]
+
+
+def _parse_http_payload(ctype: str, raw: bytes) -> dict:
+    """Legacy single-message view: the last id-carrying message (or the last
+    message) of an HTTP response body."""
+    msgs = _parse_http_messages(ctype, raw)
+    for m in reversed(msgs):
+        if m.get("id") is not None:
+            return m
+    return msgs[-1]
 
 
 def _http_post(url: str, headers: dict, body: bytes,
@@ -655,7 +747,8 @@ def attach(registry, raw: str, post: Callable | None = None) -> list[str]:
             desc = (f"[mcp:{cfg.name}] "
                     + (str(tool.get("description") or tname)[:400]))
             registry.register(reg_name, desc, schema,
-                              _make_handler(session, cfg.name, tname))
+                              _make_handler(session, cfg.name, tname,
+                                            registry))
             added += 1
         notes.append(f"mcp '{cfg.name}': connected, {added} tool(s)"
                      + (f", {skipped} filtered/skipped" if skipped else ""))
@@ -664,11 +757,21 @@ def attach(registry, raw: str, post: Callable | None = None) -> list[str]:
     return notes
 
 
-def _make_handler(session: Session, server: str, tool: str):
+def _make_handler(session: Session, server: str, tool: str,
+                   registry=None):
     def handler(**kwargs) -> str:
         from .tools import ToolError      # local: no import cycle at load time
+        sink = registry.progress_sink() if registry is not None else None
+        on_progress = None
+        if callable(sink):
+            def on_progress(payload: dict) -> None:
+                # Fixed-shape, length-bounded dict — no arbitrary long text
+                # reaches a UI sink (web truncates again at the SSE edge).
+                sink({"server": server, "tool": tool,
+                      "message": str(payload.get("message") or "")[:200],
+                      "progress": payload.get("progress")})
         try:
-            return session.call_tool(tool, kwargs)
+            return session.call_tool(tool, kwargs, on_progress=on_progress)
         except McpError as e:
             raise ToolError(f"mcp {server}/{tool}: {e}") from None
     return handler

@@ -9,6 +9,7 @@ English comments per repo i18n policy.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import urllib.error
@@ -120,6 +121,50 @@ def post_sse(path: str, doc, token: str | None,
             except ValueError:
                 continue
     return status, ct, events
+
+
+def openai_error_shape(body, msg_part: str | None = None) -> bool:
+    """True when `body` is an OpenAI error document: {error:{message:str,
+    type, code:null}} with a known type (optionally carrying `msg_part`)."""
+    err = body.get("error") if isinstance(body, dict) else None
+    if not isinstance(err, dict):
+        return False
+    if not isinstance(err.get("message"), str) or err.get("code") is not None:
+        return False
+    if err.get("type") not in ("invalid_request_error", "server_error"):
+        return False
+    return msg_part is None or msg_part in err["message"]
+
+
+def call_v1(method: str, path: str, doc=None, bearer: str | None = None,
+            timeout: int = 120):
+    """Request on the /v1 gateway: (status, content-type, parsed JSON when
+    the body is JSON, raw text for SSE streams). Long timeout: live turns."""
+    data = json.dumps(doc).encode() if doc is not None else None
+    req = urllib.request.Request(BASE + path, data=data, method=method)
+    if data is not None:
+        req.add_header("Content-Type", "application/json")
+    if bearer is not None:
+        req.add_header("Authorization", f"Bearer {bearer}")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            status, ct = r.status, r.headers.get("Content-Type", "")
+            raw = r.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        status, ct = e.code, e.headers.get("Content-Type", "")
+        raw = e.read().decode("utf-8", "replace")
+    except Exception as e:  # noqa: BLE001
+        return 0, "", f"{type(e).__name__}: {e}"
+    try:
+        return status, ct, json.loads(raw)
+    except ValueError:
+        return status, ct, raw
+
+
+def sse_data_lines(text: str) -> list[str]:
+    """All `data:` payloads of an OpenAI-style SSE body, in order."""
+    return [ln[5:].strip() for ln in text.splitlines()
+            if ln.startswith("data:")]
 
 
 def main() -> int:
@@ -561,6 +606,65 @@ def main() -> int:
         check("POST settings channels.feishu unknown subkey -> 400", s == 400,
               f"got {s} {str(body)[:160]}")
 
+    # --- car 4a-M2b: hooks settings partition — whitelist gate, schema
+    # errors, legal write + byte-consistent readback (all inside the
+    # snapshot block above so settings.json is restored afterwards). ---
+    if token:
+        s, body = post("/api/settings",
+                       {"hooks": {"turn_end": [{"cmd": ["/bin/true"]}],
+                                  "nope": [{"cmd": ["/bin/true"]}]}},
+                       token)
+        det = " ".join(str(d) for d in body.get("details", [])) \
+            if isinstance(body, dict) else ""
+        check("POST settings hooks unknown event -> 400 names whitelist",
+              s == 400 and "unknown hooks event: nope" in det and
+              "turn_start" in det and "cron_fire" in det,
+              f"got {s} {str(body)[:200]}")
+        s, body = post("/api/settings",
+                       {"hooks": {"turn_end": [{"cmd": "/bin/true"}]}}, token)
+        det = " ".join(str(d) for d in body.get("details", [])) \
+            if isinstance(body, dict) else ""
+        check("POST settings hooks cmd as string -> 400 schema error",
+              s == 400 and "cmd must be a non-empty array" in det,
+              f"got {s} {str(body)[:200]}")
+        s, body = post("/api/settings",
+                       {"hooks": {"turn_end": [{"cmd": ["/bin/true"],
+                                                 "timeout": 7}]}}, token)
+        hk_blk = body.get("settings", {}).get("hooks", {}) \
+            if isinstance(body, dict) else {}
+        ok_write = (s == 200 and isinstance(body, dict)
+                    and body.get("ok") is True
+                    and hk_blk.get("turn_end") ==
+                    [{"cmd": ["/bin/true"], "timeout": 7}])
+        readback = None
+        if ok_write:
+            try:
+                readback = json.loads(settings_path.read_text(
+                    encoding="utf-8")).get("hooks")
+            except (OSError, ValueError):
+                readback = None
+        s2, gs = get("/api/settings")
+        check("POST settings hooks legal -> 200, file + GET readback match",
+              ok_write and readback == {"turn_end":
+                                        [{"cmd": ["/bin/true"],
+                                          "timeout": 7}]}
+              and s2 == 200 and isinstance(gs, dict)
+              and gs.get("hooks", {}).get("turn_end") ==
+              [{"cmd": ["/bin/true"], "timeout": 7}],
+              f"post={s} readback={readback} get={s2} "
+              f"{str(gs.get('hooks') if isinstance(gs, dict) else gs)[:160]}")
+        slot_vals = []
+        if SECRETS.exists():
+            for _v in re.findall(r"(?m)^[A-Za-z0-9_]+=(\S[^\r\n]*)$",
+                                 SECRETS.read_text(encoding="utf-8")):
+                if len(_v.strip()) >= 6:
+                    slot_vals.append(_v.strip())
+        body_text = json.dumps(body if isinstance(body, dict) else {})
+        check("hooks settings responses never echo a slot value",
+              bool(slot_vals) and all(v not in body_text for v in slot_vals)
+              and "WEB_TOKEN" not in body_text,
+              f"n_slots={len(slot_vals)}")
+
     # --- webhook inbound gate: the test never configures a real secret.
     # Missing slot = honest 503 naming the slot; a present slot must refuse
     # a wrong/absent bearer with 401 and leak nothing either way. ---
@@ -589,6 +693,242 @@ def main() -> int:
         except OSError as e:  # noqa: BLE001
             check("settings.json restored after channels writes", False,
                   type(e).__name__)
+
+    # --- car 4a-W: OpenAI-compatible /v1 gateway + capability catalog -----
+    # Capabilities first, while secrets.env is untouched: the zero-credential
+    # assertion checks the serialized catalog against every slot value.
+    s, caps = get("/api/capabilities")
+    check("GET /api/capabilities shape",
+          s == 200 and isinstance(caps, dict)
+          and isinstance(caps.get("version"), str) and bool(caps.get("version"))
+          and isinstance(caps.get("mycore"), dict)
+          and isinstance(caps["mycore"].get("upstreams_configured"), bool)
+          and isinstance(caps["mycore"].get("mcp_servers"), dict)
+          and isinstance(caps["mycore"]["mcp_servers"].get("count"), int)
+          and isinstance(caps["mycore"]["mcp_servers"].get("names"), list)
+          and isinstance(caps.get("tools"), list)
+          and all(isinstance(t, dict) and isinstance(t.get("name"), str)
+                  and isinstance(t.get("description"), str)
+                  for t in caps.get("tools", []))
+          and isinstance(caps.get("skills"), list)
+          and all(isinstance(k, dict) and isinstance(k.get("name"), str)
+                  and isinstance(k.get("description"), str)
+                  for k in caps.get("skills", []))
+          and isinstance(caps.get("hooks"), dict)
+          and isinstance(caps["hooks"].get("events"), list)
+          and isinstance(caps.get("cron"), dict)
+          and isinstance(caps["cron"].get("jobs"), int),
+          f"got {s} {str(caps)[:200]}")
+    chb = caps.get("channels") if isinstance(caps, dict) else None
+    check("GET /api/capabilities channels = all 7 routes + status lists",
+          isinstance(chb, dict) and isinstance(chb.get("all"), list)
+          and len(chb.get("all", [])) == 7
+          and {"discord", "slack", "email", "webhook", "dingtalk",
+               "feishu", "wechat"} <= set(chb.get("all", []))
+          and isinstance(chb.get("enabled"), list)
+          and isinstance(chb.get("configured"), list)
+          and all(isinstance(x, str)
+                  for x in chb.get("enabled", []) + chb.get("configured", [])),
+          f"channels={chb}")
+    caps_text = json.dumps(caps, ensure_ascii=False) if isinstance(caps, dict) else ""
+    slot_vals = []
+    if SECRETS.exists():
+        for _key, _val in re.findall(r"(?m)^([A-Za-z0-9_]+)=(\S[^\r\n]*)$",
+                                     SECRETS.read_text(encoding="utf-8")):
+            if len(_val.strip()) >= 6:
+                slot_vals.append(_val.strip())
+    leak_keys = re.findall(r'"[^"]*(?:token|secret|password|api_key|apikey)'
+                           r'[^"]*"\s*:', caps_text, flags=re.I)
+    check("GET /api/capabilities carries zero credential material",
+          bool(caps_text) and bool(slot_vals)
+          and all(v not in caps_text for v in slot_vals)
+          and not leak_keys,
+          f"leak_keys={leak_keys} n_slots={len(slot_vals)}")
+    caps_doc = Path(__file__).resolve().parent.parent / \
+        "docs/features/capabilities.md"
+    check("capabilities feature doc exists",
+          caps_doc.is_file() and len(caps_doc.read_text(encoding="utf-8")) > 400,
+          f"{caps_doc}")
+    v1_doc = Path(__file__).resolve().parent.parent / \
+        "docs/features/openai_api_server.md"
+    v1_doc_txt = v1_doc.read_text(encoding="utf-8") \
+        if v1_doc.is_file() else ""
+    check("openai feature doc declares the approximate usage rule",
+          bool(v1_doc_txt) and "chars/4" in v1_doc_txt
+          and "approximate" in v1_doc_txt.lower(),
+          f"{v1_doc}")
+
+    # --- /v1 auth legs: the dedicated slot is driven through all three
+    # states (snapshot -> strip pre-existing line -> install a random test
+    # token -> byte-for-byte restore). The slot values never print. ---
+    v1_backup = SECRETS.read_bytes() if SECRETS.exists() else None
+    try:
+        kept_lines = []
+        if v1_backup is not None:
+            for _ln in v1_backup.decode("utf-8", "replace").splitlines():
+                if re.match(r"^OPENAI_API_TOKEN=", _ln):
+                    continue
+                kept_lines.append(_ln)
+            SECRETS.write_text(("\n".join(kept_lines) + "\n") if kept_lines
+                               else "", encoding="utf-8")
+
+        s, _ct, body = call_v1("GET", "/v1/models", None, None)
+        check("/v1/models missing slot -> 503 names OPENAI_API_TOKEN",
+              s == 503 and openai_error_shape(body, "OPENAI_API_TOKEN")
+              and "secrets.env" in str(body), f"got {s} {str(body)[:140]}")
+        s, _ct, body = call_v1("POST", "/v1/chat/completions",
+                               {"messages": [{"role": "user",
+                                              "content": "hi"}]}, None)
+        check("/v1/chat/completions missing slot -> 503 OpenAI shape",
+              s == 503 and openai_error_shape(body, "OPENAI_API_TOKEN"),
+              f"got {s} {str(body)[:140]}")
+
+        test_tok = "v1-" + os.urandom(16).hex()
+        cur = SECRETS.read_text(encoding="utf-8") if SECRETS.exists() else ""
+        if cur and not cur.endswith("\n"):
+            cur += "\n"
+        SECRETS.write_text(cur + f"OPENAI_API_TOKEN={test_tok}\n",
+                           encoding="utf-8")
+
+        s, _ct, body = call_v1("GET", "/v1/models", None, "wrong-token")
+        check("/v1/models wrong bearer -> 401 OpenAI shape, no token echo",
+              s == 401 and openai_error_shape(body, "unauthorized")
+              and isinstance(body, dict)
+              and test_tok not in json.dumps(body),
+              f"got {s} {str(body)[:140]}")
+        s, _ct, body = call_v1("POST", "/v1/chat/completions",
+                               {"messages": [{"role": "user",
+                                              "content": "hi"}]},
+                               "wrong-token")
+        check("/v1/chat wrong bearer -> 401 OpenAI shape",
+              s == 401 and openai_error_shape(body, "unauthorized"),
+              f"got {s} {str(body)[:140]}")
+
+        s, _ct, body = call_v1("GET", "/v1/models", None, test_tok)
+        v1_rows = body.get("data") if isinstance(body, dict) else None
+        check("/v1/models correct bearer -> 200 model list shape",
+              s == 200 and isinstance(body, dict)
+              and body.get("object") == "list"
+              and isinstance(v1_rows, list) and len(v1_rows) == 1
+              and isinstance(v1_rows[0], dict)
+              and v1_rows[0].get("object") == "model"
+              and isinstance(v1_rows[0].get("id"), str)
+              and bool(v1_rows[0].get("id")),
+              f"got {s} {str(body)[:160]}")
+
+        s, _ct, body = call_v1("POST", "/v1/chat/completions",
+                               {"messages": [{"role": "user",
+                                              "content": "x" * 4001}]},
+                               test_tok)
+        check("/v1/chat overlong input -> 400 OpenAI shape names the cap",
+              s == 400 and openai_error_shape(body, "4000"),
+              f"got {s} {str(body)[:140]}")
+        s, _ct, body = call_v1("POST", "/v1/chat/completions",
+                               {"messages": []}, test_tok)
+        check("/v1/chat empty messages -> 400 OpenAI shape",
+              s == 400 and openai_error_shape(body, "non-empty"),
+              f"got {s} {str(body)[:140]}")
+        s, _ct, body = call_v1("POST", "/v1/chat/completions",
+                               {"messages": [{"role": "assistant",
+                                              "content": "hi"}]}, test_tok)
+        check("/v1/chat messages not ending with user -> 400 OpenAI shape",
+              s == 400 and openai_error_shape(body, "end with a user message"),
+              f"got {s} {str(body)[:140]}")
+
+        # live non-stream turn: full completion shape; a bogus `model` id and
+        # a client `tools` array ride along (accepted + ignored, documented).
+        s, _ct, body = call_v1("POST", "/v1/chat/completions",
+                               {"model": "car4a-ignored-model",
+                                "tools": [{"type": "function",
+                                           "function": {
+                                               "name": "client_tool",
+                                               "description": "not executed",
+                                               "parameters": {"type": "object",
+                                                              "properties": {}}}}],
+                                "messages": [{"role": "user",
+                                              "content": "Reply with exactly: pong"}]},
+                               test_tok, timeout=120)
+        v1_choice = body.get("choices", [{}])[0] \
+            if isinstance(body, dict) and body.get("choices") else {}
+        check("/v1/chat non-stream live -> 200 completion shape",
+              s == 200 and isinstance(body, dict)
+              and body.get("object") == "chat.completion"
+              and str(body.get("id", "")).startswith("chatcmpl-")
+              and isinstance(body.get("created"), int)
+              and isinstance(v1_choice.get("message"), dict)
+              and v1_choice["message"].get("role") == "assistant"
+              and isinstance(v1_choice["message"].get("content"), str)
+              and bool(v1_choice["message"].get("content"))
+              and v1_choice.get("finish_reason") == "stop"
+              and v1_choice.get("index") == 0,
+              f"got {s} {str(body)[:200]}")
+        exp_model = _srv.cli.resolve_model_config().model
+        check("/v1/chat request model ignored -> configured model echoed",
+              s == 200 and isinstance(body, dict)
+              and body.get("model") == exp_model
+              and body.get("model") != "car4a-ignored-model",
+              f"got={body.get('model') if isinstance(body, dict) else None} "
+              f"expected={exp_model}")
+        v1_usage = body.get("usage") if isinstance(body, dict) else None
+        check("/v1/chat usage block present, ints, total = prompt+completion",
+              isinstance(v1_usage, dict)
+              and all(isinstance(v1_usage.get(k), int) and v1_usage.get(k) >= 0
+                      for k in ("prompt_tokens", "completion_tokens",
+                                "total_tokens"))
+              and v1_usage.get("total_tokens")
+              == v1_usage.get("prompt_tokens", -1)
+              + v1_usage.get("completion_tokens", -2),
+              f"usage={v1_usage}")
+        check("usage numbers match the doc-declared chars/4 heuristic",
+              "chars/4" in v1_doc_txt
+              and isinstance(v1_usage, dict)
+              and v1_usage.get("prompt_tokens", 0) > 0,
+              f"usage={v1_usage}")
+
+        # live stream leg: chunk frames in order, terminal finish chunk, DONE.
+        s, ct, body = call_v1("POST", "/v1/chat/completions",
+                              {"stream": True,
+                               "messages": [{"role": "user",
+                                             "content": "Reply with exactly: stream-ok"}]},
+                              test_tok, timeout=120)
+        data_lines = sse_data_lines(body) if isinstance(body, str) else []
+        chunks = []
+        for _dl in data_lines:
+            if _dl == "[DONE]":
+                chunks.append(_dl)
+                continue
+            try:
+                chunks.append(json.loads(_dl))
+            except ValueError:
+                chunks.append(None)
+        first = chunks[0] if chunks else None
+        frames = [c for c in chunks if isinstance(c, dict)]
+        check("/v1/chat stream -> SSE chunk frame order ending in DONE",
+              s == 200 and str(ct).startswith("text/event-stream")
+              and isinstance(first, dict)
+              and first.get("object") == "chat.completion.chunk"
+              and isinstance(first.get("id"), str) and bool(first.get("id"))
+              and any(isinstance(c.get("choices"), list) and c["choices"]
+                      and c["choices"][0].get("finish_reason") == "stop"
+                      for c in frames)
+              and any(isinstance(c.get("choices"), list) and c["choices"]
+                      and isinstance(c["choices"][0].get("delta"), dict)
+                      and c["choices"][0]["delta"].get("content")
+                      for c in frames)
+              and bool(chunks) and chunks[-1] == "[DONE]",
+              f"got {s} ct={ct} frames={len(chunks)} first={str(first)[:80]}")
+    finally:
+        if v1_backup is not None:
+            SECRETS.write_bytes(v1_backup)
+        elif SECRETS.exists():
+            try:
+                SECRETS.unlink()
+            except OSError:
+                pass
+    after = SECRETS.read_bytes() if SECRETS.exists() else None
+    check("secrets.env restored byte-for-byte after /v1 tests",
+          after == v1_backup,
+          f"changed={after != v1_backup}")
 
     print(f"\n{len(PASS)} pass · {len(FAIL)} fail")
     if FAIL:

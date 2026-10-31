@@ -49,6 +49,31 @@ delegate(
    ...
 ```
 
+## Per-task model selection (car 4a-M3)
+
+Each `tasks` item is a plain string **or** an object `{task, model}`:
+
+```
+delegate(tasks = ["summarize this log",
+                  {task: "draft the changelog entry", model: "big-model"}])
+```
+
+Rules (no silent fallback, ever):
+
+- `model` must appear in the settings whitelist `web/settings.json`
+  `mycore.models` (the same list the console `/model` picker reads — one
+  source of truth). Unknown id → that task alone returns
+  `[i/N] error: model '…' is not in the mycore.models whitelist (…)`;
+  siblings still run.
+- Settings carry **no** `mycore.models` list → an explicit not-configured
+  error block (the task does not silently inherit the default model).
+- The override swaps the model **name only** on the turn's own connection —
+  base URL and credentials stay the bound parent's (`bind_turn` path);
+  sub-agents never read credentials.
+- Malformed entries (object without a non-empty `task`, non-string `model`)
+  are honest `ERROR:` refusals at validation time; the legacy string-only
+  form is unchanged.
+
 ## Not in scope (honest)
 
 - No cross-task data sharing (tasks are independent by design).

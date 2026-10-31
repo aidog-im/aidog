@@ -613,6 +613,13 @@ async function evoReflect() {
 
 /* --------------------------------------------------------------- chat ---- */
 let chatBusy = false;
+/* Prompt queue (car 4a-M3, client-only — the server still runs one turn at
+   a time): submissions during a streamed turn wait in an editable bar above
+   the input; the bar drains FIFO when the current turn finishes. Max 5. */
+const CHAT_QUEUE_MAX = 5;
+let chatQueue = [];
+let chatQPending = false;        // head item in its dispatch flash (pending)
+let chatProgEl = null, chatProgTimer = 0;   // MCP progress status line
 
 function chatNote(kind, text) {
   const el = document.getElementById("chatMsg");
@@ -649,6 +656,115 @@ function chatToolLine(name) {   // tool activity as its own line above the live 
   log.scrollTop = log.scrollHeight;
 }
 
+/* --- prompt queue bar: injected above the form (index.html untouched) --- */
+function chatQueueBar() {
+  let bar = document.getElementById("chatQueue");
+  if (bar) return bar;
+  const form = document.querySelector(".chat-form");
+  if (!form || !form.parentNode) return null;      // view not rendered
+  bar = document.createElement("div");
+  bar.id = "chatQueue";                            // new DOM id (M3, additive)
+  bar.className = "chat-queue";
+  bar.hidden = true;
+  bar.style.cssText = "display:flex;flex-direction:column;gap:4px;" +
+    "margin:6px 0 0;padding:0;font-size:12px;";
+  form.parentNode.insertBefore(bar, form);
+  return bar;
+}
+
+function chatQueueRender() {
+  const bar = chatQueueBar();
+  if (!bar) return;
+  bar.textContent = "";
+  bar.hidden = chatQueue.length === 0;
+  chatQueue.forEach((text, i) => {
+    const row = document.createElement("div");
+    const pending = chatQPending && i === 0;
+    row.style.cssText = "display:flex;align-items:center;gap:8px;" +
+      "border:1px solid var(--line-solid);border-radius:8px;" +
+      "padding:4px 8px;background:" + (pending ? "var(--blue-wash)" : "#fff") + ";" +
+      "opacity:" + (pending ? ".75" : "1") + ";";
+    const label = document.createElement("span");
+    label.style.cssText = "flex:1;min-width:0;overflow:hidden;" +
+      "text-overflow:ellipsis;white-space:nowrap;color:var(--muted);";
+    label.textContent = (pending ? "⏳ " : (i + 1) + ". ") + text;
+    row.appendChild(label);
+    const mk = (txt, fn) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = txt;
+      b.style.cssText = "border:1px solid var(--line);background:#fff;" +
+        "border-radius:6px;padding:2px 8px;font-size:11px;cursor:pointer;" +
+        "color:var(--text);";
+      b.addEventListener("click", fn);
+      return b;
+    };
+    if (!pending) {
+      row.appendChild(mk(t("chat.qEdit", "Edit"), () => {
+        const input = document.getElementById("chatInput");
+        chatQueue.splice(i, 1);
+        chatQueueRender();
+        if (input) { input.value = text; input.focus(); }
+      }));
+      row.appendChild(mk(t("chat.qCancel", "Cancel"), () => {
+        chatQueue.splice(i, 1);
+        chatQueueRender();
+      }));
+    }
+    bar.appendChild(row);
+  });
+}
+
+function chatQueueNext(flash) {
+  /* Dispatch the head item when idle. `flash` shows its brief pending state
+     before the turn starts (queued dispatches); an immediate submission
+     (queue was empty, turn idle) goes straight out — zero added latency. */
+  if (chatBusy || chatQPending || !chatQueue.length) return;
+  const start = () => {
+    const text = chatQueue.shift();
+    chatQPending = false;
+    chatQueueRender();
+    chatTurn(text);
+  };
+  if (flash) {
+    chatQPending = true;
+    chatQueueRender();
+    setTimeout(start, 150);
+  } else {
+    start();
+  }
+}
+
+/* --- MCP progress status line (car 4a-M3): transient, self-cleaning --- */
+function chatProgressClear() {
+  clearTimeout(chatProgTimer);
+  if (chatProgEl) { chatProgEl.remove(); chatProgEl = null; }
+}
+
+function chatProgress(data) {
+  const log = document.getElementById("chatLog");
+  if (!log) return;
+  if (!chatProgEl || !chatProgEl.isConnected) {
+    document.getElementById("chatEmpty")?.remove();
+    chatProgEl = document.createElement("div");
+    chatProgEl.className = "chat-progress";
+    chatProgEl.style.cssText = "font-size:11px;color:var(--muted);" +
+      "font-family:Consolas,monospace;padding:2px 4px;" +
+      "transition:opacity .35s ease;";
+    log.insertBefore(chatProgEl, log.lastElementChild);
+  }
+  const who = [data.server, data.tool].filter(Boolean).join("/");
+  const msg = data.message ? " · " + data.message : "";
+  const num = typeof data.progress === "number" ? " · " + data.progress : "";
+  chatProgEl.textContent = "◌ " + who + msg + num;   // bounded server fields only
+  log.scrollTop = log.scrollHeight;
+  clearTimeout(chatProgTimer);
+  chatProgTimer = setTimeout(() => {        // fade then drop after 2s idle
+    if (chatProgEl) chatProgEl.style.opacity = "0";
+    chatProgTimer = setTimeout(chatProgressClear, 380);
+  }, 2000);
+}
+
 async function loadChatHistory() {
   try {
     const h = await fetch("/api/chat/history").then(r => r.json());
@@ -659,16 +775,34 @@ async function loadChatHistory() {
   } catch (e) { /* empty state stays */ }
 }
 
-async function chatSend() {
+function chatSend() {
+  /* Input stays ENABLED while streaming (car 4a-M3): submissions made
+     during a turn join the editable queue bar; a free submission dispatches
+     immediately. Queue order == submission order (the server is serial). */
   const input = document.getElementById("chatInput");
   const text = input.value.trim();
-  if (!text || chatBusy) return;
+  if (!text) return;
   const token = localStorage.getItem(TOKEN_KEY) || "";
   if (!token) { chatNote("err", t("chat.needToken", "access token required (set it in Settings)")); return; }
   chatNote("", "");
   input.value = "";
+  if (chatBusy) {
+    if (chatQueue.length >= CHAT_QUEUE_MAX) {
+      chatNote("err", t("chat.qFull", "queue is full (5) — wait for the current turn"));
+      input.value = text;             // not accepted: hand the text back
+      return;
+    }
+    chatQueue.push(text);
+    chatQueueRender();
+    return;
+  }
+  chatQueue.push(text);
+  chatQueueNext(false);
+}
+
+async function chatTurn(text) {
+  const input = document.getElementById("chatInput");
   chatBusy = true;
-  input.disabled = true;
   chatBadge(true);
   chatBubble("user", text);
   const bubble = chatBubble("assistant", "");
@@ -683,12 +817,16 @@ async function chatSend() {
       log.scrollTop = log.scrollHeight;
     } else if (ev === "tool") {
       chatToolLine(data.name || "?");
+    } else if (ev === "progress") {
+      chatProgress(data);
     } else if (ev === "done") {
+      chatProgressClear();
       meta = data;
     } else if (ev === "error") {
       chatNote("err", t("chat.err", "stream failed — retry"));
     }
   };
+  const token = localStorage.getItem(TOKEN_KEY) || "";
   try {
     const res = await fetch("/api/chat", {
       method: "POST",
@@ -735,10 +873,12 @@ async function chatSend() {
     if (!acc) bubble.remove();
   } finally {
     bubble.classList.remove("pending");
+    chatProgressClear();
     chatBusy = false;
-    input.disabled = false;
     input.focus();
     chatBadge(false);
+    chatQueueRender();
+    if (chatQueue.length) chatQueueNext(true);   // drain FIFO with a pending flash
   }
 }
 

@@ -667,12 +667,15 @@ def test_checkpoint() -> None:
 
 
 def test_modeltier() -> None:
-    """Car 1-D4: multi-upstream failover (Tier C v1) — spec parsing, error
-    classification, the attempt chain, no-replay-after-first-byte, config
-    precedence. Fully offline (scripted transports), zero real keys."""
+    """Car 1-D4 + 4a-M1: multi-upstream failover (Tier C v1+v2) — spec
+    parsing, error classification, the attempt chain, no-replay-after-first-
+    byte, config precedence; v2 adds credential-pool rotation, per-key
+    health/cooldown with capacity backoff, and prompt-cache signals.
+    Fully offline (scripted transports, fake clocks), zero real keys."""
     import os
     from mycore import cli as _cli
     from mycore import modeltier as mt
+    mt.reset_health()   # v2: shared cooldown state must start clean here
 
     # --- spec parsing + classification (policy module) ---
     ups = mt.parse_upstreams("http://a.example/v1|KEY_A|model-a, "
@@ -830,6 +833,7 @@ def test_modeltier() -> None:
               and "Authorization" not in captured[1][1])
 
         # --- streaming: failover before the first byte, never after ---
+        mt.reset_health()  # v2: failures recorded above must not cool the primary here
         s_calls: list[str] = []
 
         def stream_ok(url, headers, payload, timeout, on_line):
@@ -872,6 +876,354 @@ def test_modeltier() -> None:
         os.environ.pop("TIER_KEY_B", None)
         if saved_plain_key is not None:
             os.environ["MODEL_API_KEY"] = saved_plain_key
+
+    # ============ car 4a-M1: Tier C v2 (modeltier v2) =============
+    # Credential pools, per-key health/capacity backoff, prompt-cache
+    # signals. Cooldown checks inject their own clock; the process-shared
+    # registry is reset around the single check that must observe it.
+    mt.reset_health()
+
+    # --- v2 pool parsing: commas inside key_env must NOT break entries ---
+    pool = mt.parse_upstreams(
+        "http://pool-a.example/v1|PK1,PK2,PK3|pm, https://pool-b.example/v1|PK4")
+    check("tier v2: multi-slot pool parses, entries still split at scheme",
+          len(pool) == 2 and pool[0].key_slots() == ("PK1", "PK2", "PK3")
+          and pool[0].key_env == "PK1,PK2,PK3" and pool[0].model == "pm"
+          and pool[1].key_slots() == ("PK4",)
+          and pool[1].base_url == "https://pool-b.example/v1")
+    pool_bad = True
+    for spec in ("http://pb.example/v1|K 1", "http://pb.example/v1|K1,,K2",
+                 "http://pb.example/v1|K1,", "http://pb.example/v1|,K1",
+                 "http://pb.example/v1|K1,9BAD"):
+        try:
+            mt.parse_upstreams(spec)
+            pool_bad = False
+        except ValueError:
+            pass
+    check("tier v2: invalid pool slot names rejected", pool_bad)
+    try:
+        mt.parse_upstreams(",".join(
+            f"http://pb{i}.example/v1|PK{i}" for i in
+            range(mt.MAX_UPSTREAMS + 1)))
+        entry_cap_v2 = False
+    except ValueError:
+        entry_cap_v2 = True
+    check("tier v2: entry count cap still enforced with pools", entry_cap_v2)
+    try:
+        mt.parse_upstreams("http://pb.example/v1|" + ",".join(
+            f"PK{i}" for i in range(mt.MAX_KEY_SLOTS + 1)))
+        slot_cap = False
+    except ValueError:
+        slot_cap = True
+    check("tier v2: pool slot count capped", slot_cap)
+    check("tier v2: units() = one (endpoint, slot) pair per pool entry",
+          [u[1] for u in ModelConfig(base_url="http://u1.example/v1",
+                                     api_key_env="UK1,UK2").units()]
+          == ["UK1", "UK2"]
+          and ModelConfig().units()[0][1] == "MODEL_API_KEY")
+
+    # --- v2 auth rotation / capacity fail-fast (scripted transports) ---
+    os.environ["ROT_P1"] = "sk-RP1-secret"
+    os.environ["ROT_P2"] = "sk-RP2-secret"
+    os.environ["ROT_B"] = "sk-RB-secret"
+    os.environ["EX_P1"] = "sk-EX1-secret"
+    os.environ["EX_P2"] = "sk-EX2-secret"
+    os.environ["EX_B"] = "sk-EXB-secret"
+    os.environ["CAP_P1"] = "sk-CAP1-secret"
+    os.environ["CAP_P2"] = "sk-CAP2-secret"
+    os.environ["CAP_B"] = "sk-CAPB-secret"
+    os.environ["CD_K1"] = "sk-CD1-secret"
+    os.environ["CD_K2"] = "sk-CD2-secret"
+    try:
+        rot_calls: list[tuple[str, str]] = []
+
+        def rot_transport(url, headers, payload, timeout):
+            auth = headers.get("Authorization", "")
+            rot_calls.append((url, auth))
+            if url.startswith("http://rot-p.example"):
+                if auth.endswith("RP1-secret"):
+                    raise ModelError("HTTP 401 unauthorized")
+                return json.dumps(fake_response(text="pool ok"))
+            return json.dumps(fake_response(text="rot backup ok"))
+
+        cfg_rot = ModelConfig(
+            base_url="http://rot-p.example/v1", model="m-rot",
+            api_key_env="ROT_P1,ROT_P2",
+            upstreams=mt.parse_upstreams("http://rot-b.example/v1|ROT_B"))
+        doc = ChatClient(cfg_rot, transport=rot_transport,
+                         health=mt.HealthRegistry(now=lambda: 5000.0)).chat(
+            [{"role": "user", "content": "hi"}])
+        check("tier v2: 401 rotates to the next pool key on the same endpoint",
+              first_choice_text(doc) == "pool ok" and len(rot_calls) == 2
+              and rot_calls[0][0] == rot_calls[1][0]
+              and rot_calls[0][1] == "Bearer sk-RP1-secret"
+              and rot_calls[1][1] == "Bearer sk-RP2-secret")
+        check("tier v2: slot VALUES read from env per attempt (describe shows names only)",
+              "sk-" not in cfg_rot.describe()
+              and "ROT_P1,ROT_P2" in cfg_rot.describe())
+
+        ex_calls: list[tuple[str, str]] = []
+
+        def ex_transport(url, headers, payload, timeout):
+            ex_calls.append((url, headers.get("Authorization", "")))
+            if url.startswith("http://ex-p.example"):
+                raise ModelError("HTTP 403 forbidden")
+            return json.dumps(fake_response(text="ex backup ok"))
+
+        cfg_ex = ModelConfig(
+            base_url="http://ex-p.example/v1", api_key_env="EX_P1,EX_P2",
+            upstreams=mt.parse_upstreams("http://ex-b.example/v1|EX_B"))
+        doc = ChatClient(cfg_ex, transport=ex_transport,
+                         health=mt.HealthRegistry(now=lambda: 1.0)).chat(
+            [{"role": "user", "content": "x"}])
+        check("tier v2: pool exhausted -> endpoint fails over onward",
+              first_choice_text(doc) == "ex backup ok"
+              and [u for u, _ in ex_calls]
+              == ["http://ex-p.example/v1/chat/completions"] * 2
+                 + ["http://ex-b.example/v1/chat/completions"])
+        check("tier v2: every pool key attempted exactly once per call",
+              len(ex_calls) == 3 and ex_calls[0][1] != ex_calls[1][1]
+              and ex_calls[1][1] == "Bearer sk-EX2-secret"
+              and ex_calls[2][1] == "Bearer sk-EXB-secret")
+
+        cap_calls: list[str] = []
+
+        def cap_transport(url, headers, payload, timeout):
+            cap_calls.append(url)
+            if url.startswith("http://cap-p.example"):
+                raise ModelError("HTTP 503 unavailable")
+            return json.dumps(fake_response(text="cap backup ok"))
+
+        cfg_cap = ModelConfig(
+            base_url="http://cap-p.example/v1", api_key_env="CAP_P1,CAP_P2",
+            upstreams=mt.parse_upstreams("http://cap-b.example/v1|CAP_B"))
+        doc = ChatClient(cfg_cap, transport=cap_transport,
+                         health=mt.HealthRegistry(now=lambda: 1.0)).chat(
+            [{"role": "user", "content": "x"}])
+        check("tier v2: capacity error does NOT rotate keys (endpoint fail-fast kept)",
+              len(cap_calls) == 2
+              and cap_calls[0].startswith("http://cap-p.example/v1/")
+              and cap_calls[1].startswith("http://cap-b.example/v1/"))
+
+        def all401(url, headers, payload, timeout):
+            raise ModelError("HTTP 401 unauthorized")
+
+        try:
+            ChatClient(cfg_ex, transport=all401,
+                       health=mt.HealthRegistry(now=lambda: 1.0)).chat(
+                [{"role": "user", "content": "x"}])
+            check("tier v2: auth-dead chain raises at exhaustion", False)
+        except ModelError as e:
+            check("tier v2: auth-exhausted error has no slot names, no key material",
+                  "sk-" not in str(e) and "EX_P" not in str(e)
+                  and "EX_B" not in str(e), str(e))
+
+        # --- v2 per-key health: cooldown skip, honest note ---
+        t_now = {"t": 1000.0}
+        reg_cd = mt.HealthRegistry(now=lambda: t_now["t"])
+        cd_calls: list[str] = []
+
+        def cd_transport(url, headers, payload, timeout):
+            cd_calls.append(url)
+            if url.startswith("http://cd1.example"):
+                raise ModelError("HTTP 503 unavailable")
+            return json.dumps(fake_response(text="cd ok"))
+
+        cfg_cd = ModelConfig(
+            base_url="http://cd1.example/v1", api_key_env="CD_K1",
+            upstreams=mt.parse_upstreams("http://cd2.example/v1|CD_K2"))
+        client_cd = ChatClient(cfg_cd, transport=cd_transport, health=reg_cd)
+        client_cd.chat([{"role": "user", "content": "1"}])   # cd1 fail (1)
+        client_cd.chat([{"role": "user", "content": "2"}])   # cd1 fail (2) -> cool
+        cd_calls.clear()
+        doc = client_cd.chat([{"role": "user", "content": "3"}])
+        check("tier v2: 2 consecutive failures cool the key; cooled one skipped",
+              cd_calls == ["http://cd2.example/v1/chat/completions"]
+              and first_choice_text(doc) == "cd ok")
+        id_cd1 = mt.HealthRegistry.identity("http://cd1.example/v1", "CD_K1")
+        check("tier v2: cooldown reported honestly (endpoint + slot, zero key material)",
+              reg_cd.cooling(id_cd1) and "cd1.example" in reg_cd.note()
+              and "CD_K1" in reg_cd.note() and "sk-" not in reg_cd.note())
+
+        # --- v2 escalation ladder + success-clears (isolated clock) ---
+        t_esc = {"t": 0.0}
+        reg_esc = mt.HealthRegistry(now=lambda: t_esc["t"])
+        id_esc = mt.HealthRegistry.identity("http://esc.example/v1", "ESC_K")
+
+        def two_fails():
+            reg_esc.record_failure(id_esc)
+            reg_esc.record_failure(id_esc)
+
+        two_fails()
+        r1 = reg_esc.remaining(id_esc)
+        t_esc["t"] = 31.0
+        two_fails()
+        r2 = reg_esc.remaining(id_esc)
+        t_esc["t"] = 92.0
+        two_fails()
+        r3 = reg_esc.remaining(id_esc)
+        t_esc["t"] = 213.0
+        two_fails()
+        r4 = reg_esc.remaining(id_esc)
+        t_esc["t"] = 454.0
+        two_fails()
+        r5 = reg_esc.remaining(id_esc)
+        check("tier v2: cooldown escalates 30s/60s/120s/240s, capped at 300s",
+              (r1, r2, r3, r4, r5) == (30.0, 60.0, 120.0, 240.0, 300.0),
+              f"{r1},{r2},{r3},{r4},{r5}")
+        reg_esc.record_success(id_esc)
+        check("tier v2: one success clears failures, cooldown and escalation",
+              reg_esc.remaining(id_esc) == 0.0 and reg_esc.note() == "")
+
+        # --- v2 all-cooling: least cold still attempted, never silent ---
+        t_all = {"t": 0.0}
+        reg_all = mt.HealthRegistry(now=lambda: t_all["t"])
+        id_u1 = mt.HealthRegistry.identity("http://cold1.example/v1", "CL_K1")
+        id_u2 = mt.HealthRegistry.identity("http://cold2.example/v1", "CL_K2")
+        reg_all.record_failure(id_u1)
+        reg_all.record_failure(id_u1)              # cold1 cooling until 30
+        t_all["t"] = 10.0
+        reg_all.record_failure(id_u2)
+        reg_all.record_failure(id_u2)              # cold2 cooling until 40
+        cfg_all = ModelConfig(
+            base_url="http://cold1.example/v1", api_key_env="CL_K1",
+            upstreams=mt.parse_upstreams("http://cold2.example/v1|CL_K2"))
+        all_calls: list[str] = []
+
+        def least_cold_ok(url, headers, payload, timeout):
+            all_calls.append(url)
+            if url.startswith("http://cold1.example"):
+                return json.dumps(fake_response(text="least cold served"))
+            raise ModelError("transport failure: URLError")
+
+        doc = ChatClient(cfg_all, transport=least_cold_ok,
+                         health=reg_all).chat([{"role": "user", "content": "x"}])
+        check("tier v2: whole chain cooling -> LEAST cold endpoint still attempted",
+              all_calls == ["http://cold1.example/v1/chat/completions"]
+              and first_choice_text(doc) == "least cold served")
+
+        reg_dead = mt.HealthRegistry(now=lambda: t_all["t"])
+        reg_dead.record_failure(id_u1)
+        reg_dead.record_failure(id_u1)
+        reg_dead.record_failure(id_u2)
+        reg_dead.record_failure(id_u2)
+        all_calls.clear()
+
+        def all_dead(url, headers, payload, timeout):
+            all_calls.append(url)
+            raise ModelError("transport failure: URLError")
+
+        try:
+            ChatClient(cfg_all, transport=all_dead, health=reg_dead).chat(
+                [{"role": "user", "content": "x"}])
+            check("tier v2: all-cooling attempt still raises honestly", False)
+        except ModelError:
+            check("tier v2: all-cooling attempt still raises honestly (1 attempt)",
+                  len(all_calls) == 1)
+    finally:
+        for var in ("ROT_P1", "ROT_P2", "ROT_B", "EX_P1", "EX_P2", "EX_B",
+                    "CAP_P1", "CAP_P2", "CAP_B", "CD_K1", "CD_K2"):
+            os.environ.pop(var, None)
+
+    # --- v2 surfacing: shared registry -> describe()/health_note() ---
+    mt.reset_health()
+    id_sh = mt.HealthRegistry.identity("http://sh.example/v1", "SH_K")
+    mt.SHARED_HEALTH.record_failure(id_sh)
+    mt.SHARED_HEALTH.record_failure(id_sh)
+    cfg_sh = ModelConfig(base_url="http://sh.example/v1", api_key_env="SH_K")
+    cool_desc = cfg_sh.describe()
+    check("tier v2: cooling surfaces in describe()/health_note(), scoped per config",
+          "cooling" in cool_desc
+          and "http://sh.example/v1|SH_K" in mt.health_note()
+          and "cooling" in mt.health_note()
+          and "cooling" not in ModelConfig().describe())
+    check("tier v2: health surfacing carries no key material",
+          "sk-" not in cool_desc and "sk-" not in mt.health_note())
+    mt.reset_health()
+
+    # --- v2 prompt-cache signals: pass-through only, never fabricated ---
+    def cache_oai(url, headers, payload, timeout):
+        return json.dumps({
+            "choices": [{"message": {"role": "assistant", "content": "cached"},
+                         "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 3,
+                      "prompt_tokens_details": {"cached_tokens": 9}}})
+
+    doc = ChatClient(ModelConfig(), transport=cache_oai,
+                     health=mt.HealthRegistry()).chat(
+        [{"role": "user", "content": "x"}])
+    check("tier v2: prompt_tokens_details.cached_tokens passed through",
+          doc["usage"]["cached_tokens"] == 9
+          and doc["usage"]["prompt_tokens"] == 12)
+
+    def cache_alt(url, headers, payload, timeout):
+        return json.dumps({
+            "choices": [{"message": {"role": "assistant", "content": "alt"},
+                         "finish_reason": "stop"}],
+            "usage": {"input_tokens": 6, "cache_read_input_tokens": 4}})
+
+    doc = ChatClient(ModelConfig(), transport=cache_alt,
+                     health=mt.HealthRegistry()).chat(
+        [{"role": "user", "content": "x"}])
+    check("tier v2: cache_read_input_tokens passed through",
+          doc["usage"]["cached_tokens"] == 4)
+
+    def usage_no_detail(url, headers, payload, timeout):
+        return json.dumps({
+            "choices": [{"message": {"role": "assistant", "content": "u"},
+                         "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 1}})
+
+    doc = ChatClient(ModelConfig(), transport=usage_no_detail,
+                     health=mt.HealthRegistry()).chat(
+        [{"role": "user", "content": "x"}])
+    check("tier v2: no provider cache count -> none invented",
+          "cached_tokens" not in doc["usage"])
+
+    doc = ChatClient(ModelConfig(),
+                     transport=lambda u, h, p, t: json.dumps(
+                         fake_response(text="plain")),
+                     health=mt.HealthRegistry()).chat(
+        [{"role": "user", "content": "x"}])
+    check("tier v2: no usage block -> no usage key added", "usage" not in doc)
+
+    sfr = _chunk(finish="stop")
+    sfr["usage"] = {"prompt_tokens": 8,
+                    "prompt_tokens_details": {"cached_tokens": 5}}
+    sbody = _sse_body(_chunk(content="hi "), sfr)
+
+    def stream_cache(url, headers, payload, timeout, on_line):
+        for ln in sbody.splitlines(keepends=True):
+            on_line(ln)
+        return sbody
+
+    doc = ChatClient(ModelConfig(), stream_transport=stream_cache,
+                     health=mt.HealthRegistry()).chat(
+        [{"role": "user", "content": "x"}], on_delta=lambda s: None)
+    check("tier v2: streamed final-chunk usage cache count surfaced",
+          doc.get("usage", {}).get("cached_tokens") == 5)
+
+    # --- v2 prompt-cache premise: deterministic system prefix ---
+    from mycore.assembly import build_system_stack, stack_digest
+
+    with tempfile.TemporaryDirectory() as td:
+        cons = Path(td) / "SOUL.md"
+        cons.write_text("# test constitution\n" + "clause line\n" * 30,
+                        encoding="utf-8")
+        mem = Path(td) / "MEMORY_curated.md"
+        mem.write_text("curated facts for the prompt\n", encoding="utf-8")
+        s1 = build_system_stack(constitution_path=cons, memory_paths=(mem,),
+                                learned_path=None, context_dirs=())
+        s2 = build_system_stack(constitution_path=cons, memory_paths=(mem,),
+                                learned_path=None, context_dirs=())
+        b1 = json.dumps(s1, ensure_ascii=False).encode("utf-8")
+        b2 = json.dumps(s2, ensure_ascii=False).encode("utf-8")
+        check("tier v2: identical inputs -> byte-identical system prefix",
+              b1 == b2 and len(b1) > 0)
+        check("tier v2: stack digest stable across identical builds",
+              len(s1) == len(s2) and stack_digest(s1) == stack_digest(s2))
+
+    mt.reset_health()
 
 
 def test_loop_budget() -> None:
@@ -1305,12 +1657,15 @@ def test_watchdog() -> None:
 
 class FakeTgTransport:
     """Offline Telegram transport: scripted getUpdates batches + recorded sends.
-    `actions` records sendChatAction heartbeats [(chat_id_str, action)]."""
+    `actions` records sendChatAction heartbeats [(chat_id_str, action)].
+    `send_threads` records message_thread_id per sendMessage (None = none)
+    (car 4a-M3, topic isolation)."""
 
     def __init__(self, updates=None):
         self.updates = list(updates or [])
         self.sends = []            # [(chat_id_str, text)] in call order
         self.actions = []          # [(chat_id_str, action)] typing heartbeats
+        self.send_threads = []     # [thread_id_str_or_None] aligned with sends
         self.polls = 0
 
     def __call__(self, url, payload, timeout):
@@ -1320,6 +1675,7 @@ class FakeTgTransport:
             form = up.parse_qs(payload.decode("utf-8"))
             self.sends.append((form.get("chat_id", [""])[0],
                                form.get("text", [""])[0]))
+            self.send_threads.append(form.get("message_thread_id", [None])[0])
             return json.dumps({"ok": True, "result": {"message_id": 1}})
         if method == "sendChatAction":
             import urllib.parse as up
@@ -1335,13 +1691,16 @@ class FakeTgTransport:
         return json.dumps({"ok": True, "result": {}})
 
 
-def mk_update(update_id, uid, chat_id, text):
-    """A Telegram-style message update (offline fixture)."""
-    return {"update_id": update_id,
-            "message": {"message_id": 1,
-                        "from": {"id": uid, "is_bot": False, "first_name": "x"},
-                        "chat": {"id": chat_id, "type": "private"},
-                        "date": 0, "text": text}}
+def mk_update(update_id, uid, chat_id, text, thread_id=None):
+    """A Telegram-style message update (offline fixture). `thread_id` adds
+    message_thread_id (forum topic) — None keeps the plain-chat shape."""
+    msg = {"message_id": 1,
+           "from": {"id": uid, "is_bot": False, "first_name": "x"},
+           "chat": {"id": chat_id, "type": "private"},
+           "date": 0, "text": text}
+    if thread_id is not None:
+        msg["message_thread_id"] = thread_id
+    return {"update_id": update_id, "message": msg}
 
 
 def test_service() -> None:
@@ -1997,6 +2356,21 @@ def test_scheduler() -> None:
 
     NOW = _dt(2026, 10, 20, 22, 0, tzinfo=sch.BEIJING).timestamp()
 
+    # --- relative countdown (language-neutral, no locale keys) ---
+    check("cron: fmt_delta minutes",
+          sch.fmt_delta(NOW + 45, NOW) == "+45s")
+    check("cron: fmt_delta hours+minutes",
+          sch.fmt_delta(NOW + 2 * 3600 + 13 * 60, NOW) == "+2h13m")
+    check("cron: fmt_delta crosses midnight (days)",
+          sch.fmt_delta(NOW + 2 * 86400 + 3 * 3600 + 5 * 60, NOW)
+          == "+2d3h", sch.fmt_delta(NOW + 2 * 86400 + 3 * 3600
+                                     + 5 * 60, NOW))
+    check("cron: fmt_delta overdue -> +0s (due now, fires next tick)",
+          sch.fmt_delta(NOW - 90, NOW) == "+0s")
+    check("cron: fmt_delta exact -> +0s", sch.fmt_delta(NOW, NOW) == "+0s")
+    check("cron: fmt_delta unknown (done/no next) -> empty",
+          sch.fmt_delta(None, NOW) == "")
+
     # --- due matrix: daily ---
     jobs = []
     d = sch.create_job(jobs, "daily 09:10", "stretch", now=NOW - 3600)
@@ -2205,6 +2579,8 @@ def test_scheduler() -> None:
             check("cron: /cron list shows id + spec + preview",
                   jid in out and "daily 09:10" in out and "drink water" in out,
                   str(out))
+            check("cron: /cron list row carries a relative countdown",
+                  "(" + "+" in out and ")" in out, str(out))
             out = cmd("/cron add prompt weekly fri 08:00 :: weekly digest")
             jobs_now = sch.load_jobs(reg_path)
             check("cron: /cron add prompt kind",
@@ -2855,6 +3231,199 @@ def test_subagent() -> None:
               and "[1/2 · model_error" in folded
               and "second ok" in folded, folded[:200])
 
+        # 6) per-task model selection (car 4a-M3): string | {task, model},
+        #    settings mycore.models whitelist, honest per-task error blocks.
+        class ModelChat:
+            """Parent -> one delegate call; sub calls record the model kwarg."""
+            def __init__(self, delegate_args: dict):
+                self.delegate_args = delegate_args
+                self.parent_calls = 0
+                self.sub_kw: list[dict] = []
+
+            def chat(self, messages, tools=None, **kw):
+                if messages and messages[0].get("role") == "system" \
+                        and messages[0].get("content") == subagent.SYSTEM_LINE:
+                    self.sub_kw.append(dict(kw))
+                    return fake_response(
+                        text=f"done:{messages[-1]['content'][:20]}")
+                self.parent_calls += 1
+                if self.parent_calls == 1:
+                    return fake_response(calls=[("delegate",
+                                                 self.delegate_args)])
+                return fake_response(text="parent final")
+
+        saved_allowed = subagent._allowed_models
+        try:
+            # 6a) dict form, model inside the whitelist -> model kwarg flows
+            subagent._allowed_models = lambda: ["big-model", "fast-model"]
+            mc = ModelChat({"tasks": [{"task": "alpha work",
+                                       "model": "big-model"}]})
+            msgs = [{"role": "user", "content": "go"}]
+            res = run_turn(msgs, mc.chat, reg)
+            tool_txt = "\n".join(m.get("content") or "" for m in msgs
+                                 if m.get("role") == "tool")
+            check("d6: m3 dict form accepted + result folded",
+                  res.stop == "final" and "done:alpha work" in tool_txt
+                  and "[1/1" in tool_txt, f"{res.stop} {tool_txt[:160]}")
+            check("d6: m3 model kwarg delivered to the sub-agent call",
+                  len(mc.sub_kw) == 1
+                  and mc.sub_kw[0].get("model") == "big-model",
+                  str(sorted(mc.sub_kw[0])) if mc.sub_kw else "no sub call")
+
+            # 6b) model outside the whitelist -> honest per-task error block,
+            #     never a silent fallback to the default model
+            mc = ModelChat({"tasks": ["plain task",
+                                      {"task": "other work",
+                                       "model": "unknown-model"}]})
+            msgs = [{"role": "user", "content": "go"}]
+            res = run_turn(msgs, mc.chat, reg)
+            tool_txt = "\n".join(m.get("content") or "" for m in msgs
+                                 if m.get("role") == "tool")
+            check("d6: m3 whitelist miss -> that task's error block",
+                  res.stop == "final"
+                  and "[2/2] error:" in tool_txt
+                  and "not in the mycore.models whitelist" in tool_txt
+                  and "unknown-model" in tool_txt,
+                  tool_txt[:300])
+            check("d6: m3 whitelist miss never calls the model for it",
+                  all(k.get("model") != "unknown-model" for k in mc.sub_kw)
+                  and len(mc.sub_kw) == 1,
+                  str([sorted(k) for k in mc.sub_kw]))
+
+            # 6c) settings without a models list -> honest not-configured
+            subagent._allowed_models = lambda: None
+            mc = ModelChat({"tasks": [{"task": "solo work",
+                                       "model": "big-model"}]})
+            msgs = [{"role": "user", "content": "go"}]
+            res = run_turn(msgs, mc.chat, reg)
+            tool_txt = "\n".join(m.get("content") or "" for m in msgs
+                                 if m.get("role") == "tool")
+            check("d6: m3 no models list -> not-configured error block",
+                  res.stop == "final"
+                  and "[1/1] error:" in tool_txt
+                  and "mycore.models is not configured" in tool_txt
+                  and mc.sub_kw == [], tool_txt[:300])
+
+            # 6d) parallel three mixed forms: string + dict(in) + dict(out)
+            subagent._allowed_models = lambda: ["fast-model"]
+            mc = ModelChat({"tasks": ["gamma string",
+                                      {"task": "delta dict-in",
+                                       "model": "fast-model"},
+                                      {"task": "epsilon dict-out",
+                                       "model": "nope-model"}]})
+            msgs = [{"role": "user", "content": "go"}]
+            res = run_turn(msgs, mc.chat, reg)
+            tool_txt = "\n".join(m.get("content") or "" for m in msgs
+                                 if m.get("role") == "tool")
+            check("d6: m3 mixed parallel: all three blocks present",
+                  res.stop == "final"
+                  and all(f"[{i}/3" in tool_txt for i in (1, 2, 3))
+                  and "done:gamma string" in tool_txt
+                  and "done:delta dict-in" in tool_txt
+                  and "[3/3] error:" in tool_txt,
+                  tool_txt[:400])
+            check("d6: m3 mixed parallel: exactly one model override used",
+                  len(mc.sub_kw) == 2
+                  and [k.get("model") for k in mc.sub_kw].count("fast-model")
+                  == 1
+                  and all(k.get("model") != "nope-model"
+                          for k in mc.sub_kw),
+                  str([k.get("model") for k in mc.sub_kw]))
+
+            # 6e) malformed dict entries -> honest ERROR (validation guard)
+            for bad, why in (([{"model": "x"}], "dict without task"),
+                             ([{"task": ""}], "dict empty task"),
+                             ([{"task": "t", "model": 42}], "model not str")):
+                r = reg.dispatch("delegate", {"tasks": bad})
+                check(f"d6: m3 guard {why} -> ERROR",
+                      r.startswith("ERROR:"), r[:90])
+
+            # 6f) legacy string-only form unchanged (zero regression)
+            mc = ModelChat({"tasks": ["only strings", "second string"]})
+            msgs = [{"role": "user", "content": "go"}]
+            res = run_turn(msgs, mc.chat, reg)
+            tool_txt = "\n".join(m.get("content") or "" for m in msgs
+                                 if m.get("role") == "tool")
+            check("d6: m3 string-only regression: no model kwarg injected",
+                  res.stop == "final"
+                  and all("model" not in k for k in mc.sub_kw)
+                  and len(mc.sub_kw) == 2
+                  and all(f"[{i}/2 · final" in tool_txt for i in (1, 2)),
+                  f"kw={[sorted(k) for k in mc.sub_kw]} {tool_txt[:160]}")
+        finally:
+            subagent._allowed_models = saved_allowed
+
+
+def test_result_compression() -> None:
+    """Car 4a-M3: tool-output compression tier — identical-line folding,
+    blank-run collapse, honest `[compressed ...]` note, threshold, and the
+    unchanged 24000-char truncation fallback."""
+    from mycore import tools as T
+
+    # 1) identical-line folding with count
+    src = "alpha\nbeta\nbeta\nbeta\ngamma"
+    out = T.compress_output(src)
+    check("cmp: consecutive identical lines fold with count",
+          out == "alpha\nbeta\n... [×2 identical lines]\ngamma", out)
+
+    # 2) trailing whitespace + 3+ blank runs collapse (note carries ratios)
+    src = ("row   \n\n\n\n\n" + "x\n" * 5
+           + "tail\t\n")
+    big = ("head line\n\n\n" + "same line\n" * 8 + "tail line\n") * 60
+    big = big * 4                     # well above the 6000-char threshold
+    fin = T.finalize_result(big)
+    check("cmp: compression note present with before->after counts",
+          f"[compressed {len(big)}→" in fin
+          and fin.count("compressed") == 1, fin[-160:])
+    after = int(fin.split("→")[-1].split(" ")[0])
+    body = fin[:fin.rfind("\n... [compressed")]
+    check("cmp: after-count matches the compressed body length",
+          after == len(body) and after < len(big),
+          f"after={after} body={len(body)} big={len(big)}")
+    check("cmp: identical run inside compressed body folded",
+          "... [×7 identical lines]" in fin, fin[:200])
+    del src, out
+
+    # 3) idempotent: compressing an already-compressed body changes nothing
+    again = T.compress_output(fin.split("\n... [compressed")[0])
+    check("cmp: compress is idempotent",
+          T.compress_output(again) == again, again[:120])
+
+    # 4) below threshold -> untouched, no note
+    small = "a\n" + "b   \n" * 50
+    check("cmp: below threshold never compressed",
+          T.finalize_result(small) == small
+          and "compressed" not in T.finalize_result(small),
+          T.finalize_result(small)[:80])
+
+    # 5) truncation fallback: compressible but still >24000 -> truncates
+    unique = "".join(f"line number {i} payload {i * 7919}   \n"
+                     for i in range(3000))
+    assert len(unique) > T.MAX_RESULT_CHARS
+    fin2 = T.finalize_result(unique)
+    check("cmp: over-cap output truncated (regression)",
+          f"... [truncated at {T.MAX_RESULT_CHARS} chars]" in fin2
+          and len(fin2) <= T.MAX_RESULT_CHARS + 400, str(len(fin2)))
+    check("cmp: truncation preserves the compression note",
+          "[compressed " in fin2
+          and fin2.index("[compressed ") < fin2.index("[truncated at "),
+          fin2[-200:])
+    # ... and an incompressible over-cap body still truncates (no note)
+    raw_over = "".join(f"line number {i} payload {i * 7919}\n"
+                       for i in range(3000))
+    fin3 = T.finalize_result(raw_over)
+    check("cmp: incompressible over-cap body truncates without a note",
+          "[compressed " not in fin3
+          and f"[truncated at {T.MAX_RESULT_CHARS} chars]" in fin3,
+          fin3[-140:])
+
+    # 6) empty / single line never raise, never mark
+    check("cmp: empty body unchanged",
+          T.finalize_result("") == "" and T.compress_output("") == "")
+    check("cmp: single line unchanged",
+          T.finalize_result("one line") == "one line"
+          and T.compress_output("one line") == "one line")
+
 
 def test_execute_code() -> None:
     """Car 2-D7: steps folding + one-shot Python with the helper API."""
@@ -3065,6 +3634,21 @@ for line in sys.stdin:
     elif method == "tools/call":
         p = msg.get("params") or {}
         if p.get("name") == "search_things":
+            tok = ((p.get("_meta") or {}).get("progressToken"))
+            if tok is not None:
+                for i in (1, 2):
+                    send({"jsonrpc":"2.0",
+                          "method":"notifications/progress",
+                          "params":{"progressToken":tok,
+                                    "message":"step %d of 2" % i,
+                                    "progress":i}})
+                send({"jsonrpc":"2.0",
+                      "method":"notifications/progress",
+                      "params":{"progressToken":"gone-token",
+                                "message":"stale","progress":9}})
+                send({"jsonrpc":"2.0",
+                      "method":"notifications/message",
+                      "params":{"level":"info","data":"unrelated"}})
             send({"jsonrpc":"2.0","id":rid,"result":{
                 "content":[{"type":"text",
                             "text":"found: " + str(p.get("arguments"))}],
@@ -3099,6 +3683,60 @@ for line in sys.stdin:
         r = reg.dispatch("mcp_demo_search_things", {"q": "msg"})
         check("mcp: tools/call round trip",
               r.startswith("found: ") and "msg" in r, r[:120])
+
+        # --- car 4a-M3: progress notifications -> bound registry sink ---
+        seen_prog: list[dict] = []
+        reg.bind_progress(seen_prog.append)
+        r = reg.dispatch("mcp_demo_search_things", {"q": "prog"})
+        check("mcp: call still succeeds with a progress sink",
+              r.startswith("found: "), r[:80])
+        check("mcp: progress callbacks received for the live token",
+              len(seen_prog) == 2
+              and [p["progress"] for p in seen_prog] == [1, 2]
+              and seen_prog[0]["message"] == "step 1 of 2"
+              and all(p["server"] == "demo"
+                      and p["tool"] == "search_things"
+                      for p in seen_prog), str(seen_prog))
+        check("mcp: stale token + foreign notification dropped silently",
+              len(seen_prog) == 2, str(seen_prog))
+        check("mcp: payload shape is fixed and bounded",
+              all(set(p) == {"server", "tool", "message", "progress"}
+                  and len(p["message"]) <= 200
+                  and (p["progress"] is None
+                       or isinstance(p["progress"], (int, float)))
+                  for p in seen_prog), str(seen_prog[:1]))
+        reg.bind_progress(None)
+        seen_prog.clear()
+        r = reg.dispatch("mcp_demo_search_things", {"q": "unbound"})
+        check("mcp: unbound sink = zero progress callbacks, call fine",
+              r.startswith("found: ") and seen_prog == [],
+              f"{r[:60]} {seen_prog}")
+
+        # unit: _with_progress_meta only stamps when a callback exists
+        check("mcp: progress meta stamped iff callback bound",
+              mcp._with_progress_meta({"a": 1}, 5, None) == {"a": 1}
+              and mcp._with_progress_meta(None, 5, print) ==
+              {"_meta": {"progressToken": 5}}
+              and mcp._with_progress_meta({"_meta": {"x": 2}}, 5, print) ==
+              {"_meta": {"x": 2, "progressToken": 5}},
+              str(mcp._with_progress_meta({"a": 1}, 5, None)))
+        # unit: a raising sink never fails the in-flight call
+        sess = reg.mcp_sessions[0]
+
+        def _boom(payload):
+            raise RuntimeError("x")
+
+        sess._progress[42] = _boom
+        check("mcp: raising progress sink swallowed",
+              sess._dispatch_notification(
+                  {"method": "notifications/progress",
+                   "params": {"progressToken": 42, "progress": 1}}) is True)
+        sess._progress.pop(42, None)
+        # unit: no waiter -> consumed but not routed
+        check("mcp: unknown token consumed without a callback",
+              sess._dispatch_notification(
+                  {"method": "notifications/progress",
+                   "params": {"progressToken": 777, "progress": 1}}) is True)
         # close child now (atexit would also do it)
         for s in getattr(reg, "mcp_sessions", []):
             s.close()
@@ -3158,6 +3796,38 @@ for line in sys.stdin:
     s2 = mcp.HttpSession(hcfg, post=post_sse)
     check("mcp http: sse parsed", s2.request("ping") == {"sse": 1},
           str(s2.request.__doc__))
+
+    # HTTP progress: SSE interleaves notifications before the response
+    got_prog: list[dict] = []
+
+    def post_sse_prog(url, headers, body, timeout):
+        req = json.loads(body)
+        tok = ((req.get("params") or {}).get("_meta") or {}) \
+            .get("progressToken")
+        parts = []
+        if tok is not None:
+            parts.append("event: message\ndata: " + json.dumps(
+                {"jsonrpc": "2.0", "method": "notifications/progress",
+                 "params": {"progressToken": tok, "message": "halfway",
+                            "progress": 0.5}}) + "\n\n")
+        parts.append("event: message\ndata: " + json.dumps(
+            {"jsonrpc": "2.0", "id": req["id"], "result": {"ok": 2}})
+            + "\n\n")
+        return 200, {"content-type": "text/event-stream"}, \
+            "".join(parts).encode()
+
+    sp_http = mcp.HttpSession(hcfg, post=post_sse_prog)
+    check("mcp http: progress routed, response still answered",
+          sp_http.request("tools/call", {"name": "t"},
+                          on_progress=got_prog.append) == {"ok": 2}
+          and len(got_prog) == 1
+          and got_prog[0]["message"] == "halfway"
+          and got_prog[0]["progress"] == 0.5
+          and got_prog[0]["progressToken"] is not None, str(got_prog))
+    got_prog.clear()
+    check("mcp http: no callback -> no meta stamp, notification dropped",
+          sp_http.request("ping") == {"ok": 2} and got_prog == [],
+          str(got_prog))
 
     def post_session(url, headers, body, timeout):
         return 200, {"content-type": "application/json",
@@ -4481,6 +5151,762 @@ def test_channels_domestic() -> None:
         shutil.rmtree(state, True)
 
 
+def test_hooks() -> None:
+    """Car 4a event hooks: settings schema validation + real background
+    execution — hermetic (temp repo dirs, never production data/)."""
+    from mycore import hooks as hk
+
+    # ---------------- batch A: validate_hooks schema/whitelist/bounds ------
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        (tdp / "web").mkdir()
+
+        clean, errs = hk.validate_hooks({"turn_end": [{"cmd": ["/bin/true"]}]}, tdp)
+        check("hooks: legal entry accepted, timeout default filled",
+              not errs and clean.get("turn_end") ==
+              [{"cmd": ["/bin/true"], "timeout": hk.DEFAULT_TIMEOUT}],
+              f"errs={errs} clean={clean}")
+
+        _, errs = hk.validate_hooks({"nope": [{"cmd": ["/bin/true"]}]}, tdp)
+        check("hooks: unknown event refused, error names the whitelist",
+              len(errs) == 1 and "unknown hooks event" in errs[0]
+              and "turn_start" in errs[0] and "cron_fire" in errs[0],
+              str(errs))
+
+        _, errs = hk.validate_hooks({"turn_end": {"cmd": ["/bin/true"]}}, tdp)
+        check("hooks: event value must be a list",
+              any("must be a list" in e for e in errs), str(errs))
+
+        _, errs = hk.validate_hooks({"turn_end": [{"cmd": "/bin/true"}]}, tdp)
+        check("hooks: cmd as string refused",
+              any("cmd must be a non-empty array" in e for e in errs), str(errs))
+
+        _, errs = hk.validate_hooks({"turn_end": [{"cmd": []}]}, tdp)
+        check("hooks: empty cmd refused",
+              any("cmd must be a non-empty array" in e for e in errs), str(errs))
+
+        _, errs = hk.validate_hooks(
+            {"turn_end": [{"cmd": ["/bin/true"], "timeout": 0}]}, tdp)
+        _, errs2 = hk.validate_hooks(
+            {"turn_end": [{"cmd": ["/bin/true"], "timeout": 31}]}, tdp)
+        _, errs3 = hk.validate_hooks(
+            {"turn_end": [{"cmd": ["/bin/true"], "timeout": "5"}]}, tdp)
+        check("hooks: timeout bounds 1..30 + integer type enforced",
+              any("timeout must be an integer in 1..30" in e for e in errs)
+              and any("timeout must be an integer in 1..30" in e for e in errs2)
+              and any("timeout must be an integer in 1..30" in e for e in errs3),
+              f"{errs} {errs2} {errs3}")
+
+        _, errs = hk.validate_hooks(
+            {"turn_end": [{"cmd": ["definitely-not-a-real-binary-xyz"]}]}, tdp)
+        check("hooks: missing argv[0] refused at write time",
+              any("cmd[0] not found" in e for e in errs), str(errs))
+
+        _, errs = hk.validate_hooks(
+            {"turn_end": [{"cmd": ["/bin/true"], "shell": True}]}, tdp)
+        check("hooks: unknown hook key refused",
+              any("unknown key" in e and "shell" in e for e in errs), str(errs))
+
+        _, errs = hk.validate_hooks(
+            {"turn_end": ["not-an-object"]}, tdp)
+        check("hooks: non-object hook entry refused",
+              any("must be an object" in e for e in errs), str(errs))
+
+        # relative path-shaped argv[0] resolves against the repo root
+        (tdp / "scripts").mkdir()
+        (tdp / "scripts" / "hook.sh").write_text("#!/bin/sh\nexit 0\n",
+                                                  encoding="utf-8")
+        clean, errs = hk.validate_hooks(
+            {"turn_end": [{"cmd": ["scripts/hook.sh"]}]}, tdp)
+        check("hooks: relative argv[0] resolves against repo root",
+              not errs and clean["turn_end"][0]["cmd"][0] == "scripts/hook.sh",
+              f"errs={errs}")
+
+        missing, merrs = hk.load_hooks(tdp)  # no web/settings.json written yet
+        check("hooks: load_hooks fail-soft on missing settings",
+              missing == {} and merrs == [], f"{missing} {merrs}")
+
+        check("hooks: fire on unknown event returns None without reading config",
+              hk.fire("not_an_event", repo=tdp) is None)
+
+    # ---------------- batch B: real background execution, fail isolation ---
+    import threading
+    import time as _time
+
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        (tdp / "web").mkdir()
+        out1 = tdp / "out1.txt"
+        out2 = tdp / "out2.txt"
+        drop = tdp / "dropped.txt"
+        marker = "HOOKSECRET-d0-not-echo-9x7"
+        envdump = tdp / "env.json"
+        sleep_s = 1.5
+        cfg = {
+            "turn_end": [
+                {"cmd": [sys.executable, "-c",
+                         "import sys,time;time.sleep(float(sys.argv[2]));"
+                         "open(sys.argv[1],'w').write('first')",
+                         str(out1), str(sleep_s)], "timeout": 10},
+                {"cmd": [sys.executable, "-c",
+                         "import sys;open(sys.argv[1],'w').write('second')",
+                         str(out2)], "timeout": 10},
+            ],
+            "tool_call": [
+                {"cmd": [sys.executable, "-c",
+                         "import json,os,sys;"
+                         "open(sys.argv[1],'w').write(json.dumps(dict(os.environ)))",
+                         str(envdump)], "timeout": 10},
+            ],
+            "error": [
+                {"cmd": [sys.executable, "-c",
+                         "import sys;print('" + marker + "');"
+                         "sys.stderr.write('" + marker + "');sys.exit(3)"],
+                 "timeout": 10},
+            ],
+            "compact": [
+                {"cmd": [sys.executable, "-c",
+                         "import sys,time;time.sleep(30)",
+                         "ignored"], "timeout": 1},
+            ],
+            "turn_start": [
+                {"cmd": [sys.executable, "-c",
+                         "import sys;open(sys.argv[1],'w').write(sys.argv[2])",
+                         str(drop), "x; touch " + str(tdp / "pwned.txt")],
+                 "timeout": 10},
+            ],
+        }
+        (tdp / "web" / "settings.json").write_text(
+            json.dumps({"hooks": cfg}), encoding="utf-8")
+
+        parent_secret = "PARENT-SECRET-env-should-not-cross-42"
+        os.environ["AIDOG_HOOK_FAKESECRET"] = parent_secret
+        logs: list[str] = []
+
+        def collect(*parts):
+            logs.append(" ".join(str(p) for p in parts if p))
+
+        try:
+            # --- background: fire returns while the hook is still running ---
+            t0 = _time.monotonic()
+            th = hk.fire("turn_end", repo=tdp, log=collect)
+            returned_in = _time.monotonic() - t0
+            check("hooks: fire returns a live thread without blocking",
+                  isinstance(th, threading.Thread) and th.is_alive()
+                  and returned_in < 0.5, f"returned_in={returned_in:.3f}s")
+            th.join(timeout=15)
+            joined_ok = not th.is_alive()
+            order_ok = (out1.is_file() and out2.is_file()
+                        and out1.read_text() == "first"
+                        and out2.read_text() == "second"
+                        and out1.stat().st_mtime <= out2.stat().st_mtime)
+            check("hooks: both hooks executed sequentially in order",
+                  joined_ok and order_ok,
+                  f"joined={joined_ok} out1={out1.exists()} out2={out2.exists()}")
+
+            # --- env whitelist: child sees hook vars + PATH, never parent env ---
+            th = hk.fire("tool_call", repo=tdp, chat="id:6789",
+                         tool="read_file", log=collect)
+            if th:
+                th.join(timeout=15)
+            child_env = (json.loads(envdump.read_text(encoding="utf-8"))
+                         if envdump.is_file() else {})
+            check("hooks: child env carries event/chat/tool, PATH; parent "
+                  "secret never crosses",
+                  child_env.get("AIDOG_HOOK_EVENT") == "tool_call"
+                  and child_env.get("AIDOG_HOOK_CHAT") == "id:6789"
+                  and child_env.get("AIDOG_HOOK_TOOL") == "read_file"
+                  and "PATH" in child_env
+                  and "AIDOG_HOOK_FAKESECRET" not in child_env,
+                  str(sorted(child_env))[:160])
+
+            # --- failure isolation: exit!=0 -> one HOOK_FAIL, never raises ---
+            before = len(logs)
+            th = hk.fire("error", repo=tdp, log=collect)
+            check("hooks: failing hook still returns a thread (no raise)",
+                  isinstance(th, threading.Thread))
+            if th:
+                th.join(timeout=15)
+            fail_lines = [ln for ln in logs[before:] if "HOOK_FAIL" in ln]
+            check("hooks: non-zero exit logged as HOOK_FAIL exit:3",
+                  len(fail_lines) == 1 and "exit:3" in fail_lines[0]
+                  and "turn_end" not in "".join(fail_lines),
+                  str(fail_lines))
+            check("hooks: hook output with fake secret never reaches logs",
+                  all(marker not in ln for ln in logs),
+                  [ln for ln in logs if marker in ln][:2])
+
+            # --- timeout kills the child, one HOOK_FAIL timeout line ---
+            before = len(logs)
+            t0 = _time.monotonic()
+            th = hk.fire("compact", repo=tdp, log=collect)
+            if th:
+                th.join(timeout=10)
+            dur = _time.monotonic() - t0
+            fail_lines = [ln for ln in logs[before:] if "HOOK_FAIL" in ln]
+            check("hooks: timeout hook killed at 1s, logged timeout:1s",
+                  th is not None and not th.is_alive() and dur < 5
+                  and len(fail_lines) == 1 and "timeout:1s" in fail_lines[0],
+                  f"dur={dur:.1f}s {fail_lines}")
+
+            # --- argv is literal: shell metacharacters never execute ---
+            th = hk.fire("turn_start", repo=tdp, log=collect)
+            if th:
+                th.join(timeout=15)
+            got = drop.read_text() if drop.is_file() else ""
+            check("hooks: no shell — metacharacters stay literal, no side file",
+                  got.startswith("x; touch ") and not (tdp / "pwned.txt").exists()
+                  and not Path(str(tdp / "pwned.txt")).exists(),
+                  f"got={got!r}")
+        finally:
+            os.environ.pop("AIDOG_HOOK_FAKESECRET", None)
+
+
+def test_acp() -> None:
+    """Car 4a ACP v1 stdio server: handshake/version gate, session lifecycle,
+    update frame order, fs proxy request-response, cancel, timeout honesty,
+    EOF/bad-input robustness — offline (fake chat injection, zero network)."""
+    import threading
+    import time as _t
+    from mycore.acp import AcpServer
+
+    def jreq(i, method, params=None):
+        return json.dumps({"jsonrpc": "2.0", "id": i, "method": method,
+                           "params": params if params is not None else {}})
+
+    def jnote(method, params):
+        return json.dumps({"jsonrpc": "2.0", "method": method,
+                           "params": params})
+
+    def run_acp(lines, chat=None, fs_timeout=6.0):
+        frames, logs = [], []
+        src = lines(frames) if callable(lines) else lines
+        srv = AcpServer(lines=src, write=frames.append, chat=chat,
+                        fs_timeout=fs_timeout,
+                        log=lambda m: logs.append(m))
+        rc = srv.serve()
+        return rc, frames, logs
+
+    def wait_for(pred, timeout=8.0):
+        end = _t.monotonic() + timeout
+        while _t.monotonic() < end:
+            hit = pred()
+            if hit:
+                return hit
+            _t.sleep(0.02)
+        return pred()
+
+    def result_for(frames, rid):
+        return next((f for f in frames
+                     if f.get("id") == rid and
+                     ("result" in f or "error" in f)), None)
+
+    def init_line(i, fs=False, pv=1):
+        caps = {"fs": {"readTextFile": True, "writeTextFile": True}} \
+            if fs else {}
+        return jreq(i, "initialize",
+                    {"protocolVersion": pv,
+                     "clientInfo": {"name": "suite", "version": "1"},
+                     "clientCapabilities": caps})
+
+    version = (REPO / "VERSION").read_text(encoding="utf-8").strip()
+
+    # ---------------- batch A: static request/response framing -------------
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        rc, frames, logs = run_acp([
+            init_line(101),
+            jreq(102, "session/new", {"cwd": str(tdp)}),
+            jreq(103, "session/prompt",
+                 {"sessionId": "no-such",
+                  "prompt": [{"type": "text", "text": "hi"}]}),
+            jreq(104, "session/prompt", {"sessionId": "s1"}),
+            jreq(105, "session/prompt",
+                 {"sessionId": "s1", "prompt": {"type": "text"}}),
+            jreq(106, "session/prompt",
+                 {"sessionId": "s1", "prompt": [{"type": "image"}]}),
+        ])
+        r101 = result_for(frames, 101)
+        caps = r101.get("result", {}).get("agentCapabilities", {}) \
+            if r101 else {}
+        info = r101.get("result", {}).get("agentInfo", {}) if r101 else {}
+        check("acp: initialize handshake — v1, no loadSession, agentInfo=aidog",
+              rc == 0 and r101 is not None and
+              r101["result"].get("protocolVersion") == 1 and
+              caps.get("loadSession") is False and
+              caps.get("promptCapabilities", {}).get("image") is False and
+              info.get("name") == "aidog" and info.get("version") == version,
+              str(r101)[:200])
+
+        r102 = result_for(frames, 102)
+        check("acp: session/new returns sessionId",
+              r102 is not None and isinstance(
+                  r102.get("result", {}).get("sessionId"), str),
+              str(r102)[:160])
+
+        r103 = result_for(frames, 103)
+        check("acp: prompt on unknown session -> -32002",
+              r103 is not None and r103.get("error", {}).get("code") == -32002,
+              str(r103)[:160])
+        r104 = result_for(frames, 104)
+        check("acp: prompt params not an array -> -32602",
+              r104 is not None and r104.get("error", {}).get("code") == -32602,
+              str(r104)[:160])
+        r105 = result_for(frames, 105)
+        check("acp: prompt without text blocks -> -32602",
+              r105 is not None and r105.get("error", {}).get("code") == -32602,
+              str(r105)[:160])
+
+        check("acp: every output frame is a JSON-RPC 2.0 object",
+              all(isinstance(f, dict) and f.get("jsonrpc") == "2.0" and
+                  ("method" in f or "id" in f) for f in frames),
+              str(frames[:3])[:200])
+
+    # ---------------- batch A2: version gate, bad input, method routing ----
+    rc, frames, logs = run_acp([
+        init_line(101, pv=2),
+        init_line(102, pv="1"),
+        "{this is not json",
+        "42",
+        jreq(103, "initialize", "not-an-object"),
+        init_line(104),
+        jreq(105, "session/does-not-exist", {}),
+    ])
+    e101 = result_for(frames, 101)
+    check("acp: protocolVersion 2 rejected with -32602 naming the version",
+          e101 is not None and e101.get("error", {}).get("code") == -32602
+          and "protocol version" in e101["error"].get("message", ""),
+          str(e101)[:200])
+    e102 = result_for(frames, 102)
+    check("acp: non-integer protocolVersion rejected",
+          e102 is not None and e102.get("error", {}).get("code") == -32602,
+          str(e102)[:160])
+    parse_errs = [f for f in frames if f.get("error", {}).get("code") == -32700]
+    check("acp: bad JSON line -> -32700, loop survives",
+          len(parse_errs) == 1 and result_for(frames, 104) is not None,
+          str(parse_errs)[:160])
+    inv = [f for f in frames if f.get("error", {}).get("code") == -32600]
+    check("acp: non-object JSON line -> -32600",
+          len(inv) == 1 and "42" not in json.dumps(inv), str(inv)[:160])
+    e103 = result_for(frames, 103)
+    check("acp: initialize with non-object params -> -32602",
+          e103 is not None and e103.get("error", {}).get("code") == -32602,
+          str(e103)[:160])
+    e105 = result_for(frames, 105)
+    check("acp: unknown method -> -32601",
+          e105 is not None and e105.get("error", {}).get("code") == -32601,
+          str(e105)[:160])
+    check("acp: EOF exits cleanly (rc=0, no exception)", rc == 0, f"rc={rc}")
+
+    # ---------------- batch A3: session/new validation ---------------------
+    rc, frames, logs = run_acp([
+        init_line(101),
+        jreq(102, "session/new", {}),
+        jreq(103, "session/new", {"cwd": "relative/dir"}),
+        jreq(104, "session/new",
+             {"cwd": "/tmp", "additionalDirectories": ["rel"]}),
+    ])
+    check("acp: session/new requires an absolute cwd (-32602 x2)",
+          result_for(frames, 102) is not None and
+          result_for(frames, 102).get("error", {}).get("code") == -32602 and
+          result_for(frames, 103).get("error", {}).get("code") == -32602,
+          f"{result_for(frames, 102)} {result_for(frames, 103)}")
+    check("acp: additionalDirectories must be absolute (-32602)",
+          result_for(frames, 104) is not None and
+          result_for(frames, 104).get("error", {}).get("code") == -32602,
+          str(result_for(frames, 104))[:160])
+
+    # ---------------- batch B: prompt flow, update frame order, cancel -----
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        (tdp / "f.txt").write_text("alpha line\nbeta line\n", encoding="utf-8")
+
+        # --- full prompt: fake chat, streaming chunks before the result ----
+        sc = ScriptedChat([fake_response(text="Hello from agent.")])
+
+        def gen_prompt(frames):
+            yield init_line(101)
+            yield jreq(102, "session/new", {"cwd": str(tdp)})
+            yield jreq(103, "session/prompt",
+                       {"sessionId": "s1",
+                        "prompt": [{"type": "text", "text": "hi"}]})
+            wait_for(lambda: result_for(frames, 103))
+
+        rc, frames, logs = run_acp(gen_prompt, chat=sc.chat)
+        updates = [f for f in frames if f.get("method") == "session/update"]
+        chunks = [f for f in updates
+                  if f["params"]["update"].get("sessionUpdate") ==
+                  "agent_message_chunk"]
+        rid103 = next((i for i, f in enumerate(frames)
+                       if f.get("id") == 103 and "result" in f), None)
+        r103 = result_for(frames, 103)
+        check("acp: prompt full flow — chunk frames then stopReason end_turn",
+              rc == 0 and sc.calls == 1 and r103 is not None and
+              r103["result"].get("stopReason") == "end_turn" and
+              bool(chunks) and rid103 is not None and
+              all(frames.index(c) < rid103 for c in chunks),
+              f"chunks={len(chunks)} r103={r103}")
+        check("acp: chunk carries sessionId + text + messageId",
+              bool(chunks) and
+              chunks[0]["params"].get("sessionId") == "s1" and
+              chunks[0]["params"]["update"].get("content", {}).get("text") ==
+              "Hello from agent." and
+              isinstance(chunks[0]["params"]["update"].get("messageId"), str),
+              str(chunks[:1])[:200])
+
+        # --- tool flow: local read, tool_call -> tool_call_update -> chunk --
+        sc2 = ScriptedChat([
+            fake_response(calls=[("read_file", {"path": str(tdp / "f.txt")})]),
+            fake_response(text="read done"),
+        ])
+
+        def gen_tool(frames):
+            yield init_line(101)
+            yield jreq(102, "session/new", {"cwd": str(tdp)})
+            yield jreq(103, "session/prompt",
+                       {"sessionId": "s1",
+                        "prompt": [{"type": "text", "text": "read it"}]})
+            wait_for(lambda: result_for(frames, 103))
+
+        rc, frames, logs = run_acp(gen_tool, chat=sc2.chat)
+        ups = [f for f in frames if f.get("method") == "session/update"]
+        kind_seq = [f["params"]["update"].get("sessionUpdate") for f in ups]
+        r103 = result_for(frames, 103)
+        check("acp: tool frames ordered tool_call -> tool_call_update -> "
+              "chunk before result",
+              r103 is not None and
+              r103["result"].get("stopReason") == "end_turn" and
+              kind_seq[:3] == ["tool_call", "tool_call_update",
+                               "agent_message_chunk"] and
+              ups[0]["params"]["update"].get("kind") == "read" and
+              ups[1]["params"]["update"].get("status") == "completed",
+              f"seq={kind_seq} {str(ups[:2])[:200]}")
+
+        # --- session/cancel mid-prompt -> stopReason cancelled --------------
+        entered = threading.Event()
+        release = threading.Event()
+
+        def blocking_chat(messages=None, tools=None, **kw):
+            entered.set()
+            release.wait(6)
+            return fake_response(text="late reply")
+
+        def gen_cancel(frames):
+            yield init_line(101)
+            yield jreq(102, "session/new", {"cwd": str(tdp)})
+            yield jreq(103, "session/prompt",
+                       {"sessionId": "s1",
+                        "prompt": [{"type": "text", "text": "hi"}]})
+            wait_for(entered.is_set)
+            yield jnote("session/cancel", {"sessionId": "s1"})
+            release.set()
+            wait_for(lambda: result_for(frames, 103))
+
+        rc, frames, logs = run_acp(gen_cancel, chat=blocking_chat)
+        r103 = result_for(frames, 103)
+        check("acp: session/cancel mid-prompt -> stopReason cancelled",
+              rc == 0 and r103 is not None and
+              r103["result"].get("stopReason") == "cancelled",
+              f"r103={r103} logs={logs[-2:]}")
+        # cancel for an unknown session is ignored, never crashes
+        rc, frames, logs = run_acp([
+            init_line(101),
+            jnote("session/cancel", {"sessionId": "ghost"}),
+        ])
+        check("acp: cancel for unknown session ignored (clean EOF)",
+              rc == 0 and not any(
+                  f.get("error") for f in frames), str(logs))
+
+    # ---------------- batch C: fs proxy request-response, timeout, EOF -----
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        src = tdp / "f.txt"
+        src.write_text("hello fs\nsecond line\n", encoding="utf-8")
+        dst = tdp / "out.txt"
+
+        # --- fs read proxy: agent asks client, client answers, tool sees it --
+        sc = ScriptedChat([
+            fake_response(calls=[("read_file", {"path": str(src)})]),
+            fake_response(text="proxy read done"),
+        ])
+
+        def gen_fs_read(frames):
+            yield init_line(101, fs=True)
+            yield jreq(102, "session/new", {"cwd": str(tdp)})
+            yield jreq(103, "session/prompt",
+                       {"sessionId": "s1",
+                        "prompt": [{"type": "text", "text": "read"}]})
+            req = wait_for(lambda: next((f for f in frames if
+                                         f.get("method") ==
+                                         "fs/read_text_file"), None))
+            if req is not None:
+                yield json.dumps({"jsonrpc": "2.0", "id": req["id"],
+                                  "result": {"content": "hello fs\nsecond line\n"}})
+            wait_for(lambda: result_for(frames, 103))
+
+        rc, frames, logs = run_acp(gen_fs_read, chat=sc.chat)
+        fs_req = next((f for f in frames if
+                       f.get("method") == "fs/read_text_file"), None)
+        ups = [f for f in frames if f.get("method") == "session/update"]
+        r103 = result_for(frames, 103)
+        check("acp: fs/read_text_file request -> client answer -> completed "
+              "tool_call_update",
+              fs_req is not None and
+              fs_req["params"].get("sessionId") == "s1" and
+              fs_req["params"].get("path") == str(src) and
+              fs_req["params"].get("line") == 1 and
+              r103 is not None and
+              r103["result"].get("stopReason") == "end_turn" and
+              len(ups) >= 2 and
+              ups[1]["params"]["update"].get("status") == "completed" and
+              "hello fs" in json.dumps(ups[1]["params"]["update"]),
+              f"req={fs_req} ups={str(ups[:2])[:240]}")
+
+        # --- fs write proxy: client receives fs/write_text_file ------------
+        sc2 = ScriptedChat([
+            fake_response(calls=[("write_file", {"path": str(dst),
+                                                  "content": "written via proxy"})]),
+            fake_response(text="proxy write done"),
+        ])
+
+        def gen_fs_write(frames):
+            yield init_line(101, fs=True)
+            yield jreq(102, "session/new", {"cwd": str(tdp)})
+            yield jreq(103, "session/prompt",
+                       {"sessionId": "s1",
+                        "prompt": [{"type": "text", "text": "write"}]})
+            req = wait_for(lambda: next((f for f in frames if
+                                         f.get("method") ==
+                                         "fs/write_text_file"), None))
+            if req is not None:
+                yield json.dumps({"jsonrpc": "2.0", "id": req["id"],
+                                  "result": {}})
+            wait_for(lambda: result_for(frames, 103))
+
+        rc, frames, logs = run_acp(gen_fs_write, chat=sc2.chat)
+        w_req = next((f for f in frames if
+                      f.get("method") == "fs/write_text_file"), None)
+        r103 = result_for(frames, 103)
+        check("acp: fs/write_text_file request carries content, result end_turn",
+              w_req is not None and
+              w_req["params"].get("path") == str(dst) and
+              w_req["params"].get("content") == "written via proxy" and
+              r103 is not None and
+              r103["result"].get("stopReason") == "end_turn" and
+              not dst.exists(),   # local FS untouched — the client owns it
+              f"req={w_req} r103={r103}")
+
+        # --- client refuses the fs request -> honest tool error, turn lives -
+        sc3 = ScriptedChat([
+            fake_response(calls=[("read_file", {"path": str(src)})]),
+            fake_response(text="recovered"),
+        ])
+
+        def gen_fs_refuse(frames):
+            yield init_line(101, fs=True)
+            yield jreq(102, "session/new", {"cwd": str(tdp)})
+            yield jreq(103, "session/prompt",
+                       {"sessionId": "s1",
+                        "prompt": [{"type": "text", "text": "read"}]})
+            req = wait_for(lambda: next((f for f in frames if
+                                         f.get("method") ==
+                                         "fs/read_text_file"), None))
+            if req is not None:
+                yield json.dumps({"jsonrpc": "2.0", "id": req["id"],
+                                  "error": {"code": -32000,
+                                            "message": "denied by user"}})
+            wait_for(lambda: result_for(frames, 103))
+
+        rc, frames, logs = run_acp(gen_fs_refuse, chat=sc3.chat)
+        ups = [f for f in frames if f.get("method") == "session/update"]
+        r103 = result_for(frames, 103)
+        check("acp: client refusal -> failed tool_call_update, turn continues",
+              r103 is not None and
+              r103["result"].get("stopReason") == "end_turn" and
+              len(ups) >= 2 and
+              ups[1]["params"]["update"].get("status") == "failed" and
+              "denied by user" in json.dumps(ups[1]["params"]["update"]),
+              f"ups={str(ups[:2])[:240]}")
+
+        # --- client never answers -> timeout honesty, no hang --------------
+        sc4 = ScriptedChat([
+            fake_response(calls=[("read_file", {"path": str(src)})]),
+            fake_response(text="timed out but alive"),
+        ])
+
+        def gen_fs_timeout(frames):
+            yield init_line(101, fs=True)
+            yield jreq(102, "session/new", {"cwd": str(tdp)})
+            yield jreq(103, "session/prompt",
+                       {"sessionId": "s1",
+                        "prompt": [{"type": "text", "text": "read"}]})
+            wait_for(lambda: result_for(frames, 103), timeout=12.0)
+
+        t0 = _t.monotonic()
+        rc, frames, logs = run_acp(gen_fs_timeout, chat=sc4.chat,
+                                   fs_timeout=1.0)
+        elapsed = _t.monotonic() - t0
+        ups = [f for f in frames if f.get("method") == "session/update"]
+        r103 = result_for(frames, 103)
+        check("acp: unanswered fs request times out honestly, no deadlock",
+              rc == 0 and elapsed < 8 and r103 is not None and
+              r103["result"].get("stopReason") == "end_turn" and
+              len(ups) >= 2 and
+              ups[1]["params"]["update"].get("status") == "failed" and
+              "no response from the client" in
+              json.dumps(ups[1]["params"]["update"]),
+              f"elapsed={elapsed:.1f}s ups={str(ups[:2])[:200]}")
+
+        # --- EOF while a prompt is still in flight -> bounded clean exit ----
+        entered2 = threading.Event()
+
+        def slow_chat(messages=None, tools=None, **kw):
+            entered2.set()
+            _t.sleep(0.4)
+            return fake_response(text="after eof")
+
+        def gen_eof_mid(frames):
+            yield init_line(101)
+            yield jreq(102, "session/new", {"cwd": str(tdp)})
+            yield jreq(103, "session/prompt",
+                       {"sessionId": "s1",
+                        "prompt": [{"type": "text", "text": "hi"}]})
+            wait_for(entered2.is_set)   # prompt worker running, then EOF
+
+        t0 = _t.monotonic()
+        rc, frames, logs = run_acp(gen_eof_mid, chat=slow_chat)
+        elapsed = _t.monotonic() - t0
+        check("acp: stdin EOF mid-prompt exits cleanly and bounded",
+              rc == 0 and elapsed < 12, f"rc={rc} elapsed={elapsed:.1f}s")
+
+    # ---------------- batch D: real process framing (stdio -> JSON-RPC) ----
+    import subprocess
+    proc_in = "\n".join([
+        init_line(1, fs=True),
+        "{broken json",
+        jreq(2, "session/new", {"cwd": str(REPO)}),
+        jreq(3, "session/unknown", {}),
+    ]) + "\n"
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "mycore.acp"],
+            input=proc_in, capture_output=True, text=True,
+            timeout=30, cwd=str(REPO))
+        out_lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+        parsed = []
+        bad = []
+        for ln in out_lines:
+            try:
+                doc = json.loads(ln)
+            except ValueError:
+                bad.append(ln)
+                continue
+            if not (isinstance(doc, dict) and doc.get("jsonrpc") == "2.0"):
+                bad.append(ln)
+            else:
+                parsed.append(doc)
+        check("acp process: stdout carries only JSON-RPC 2.0 frames",
+              proc.returncode == 0 and bool(parsed) and not bad,
+              f"rc={proc.returncode} bad={bad[:2]}")
+        ids = {d.get("id") for d in parsed if "result" in d or "error" in d}
+        check("acp process: handshake/new/unknown-method answered, parse "
+              "error answered, logs stay on stderr",
+              {1, 2, 3} <= ids and
+              any(d.get("error", {}).get("code") == -32700 for d in parsed) and
+              "[acp]" in proc.stderr,
+              f"ids={sorted(x for x in ids if isinstance(x, int))} "
+              f"stderr={proc.stderr[:120]!r}")
+    except subprocess.TimeoutExpired:
+        check("acp process: stdio run bounded", False, "timeout 30s")
+
+
+def test_tg_topics() -> None:
+    """Car 4a-M3: forum-topic isolation — {cid}:{tid} pipeline sessions,
+    threaded replies, chat-level commands, plain-chat zero regression.
+    Offline (fake transport); no live TG E2E is re-run for this feature."""
+    from mycore.service import ChatService
+    from mycore.tg import POLL_BOT_ENV
+    import os as _os
+
+    saved_tok = _os.environ.get(POLL_BOT_ENV)
+    _os.environ[POLL_BOT_ENV] = "topic-bot-TEST-token"
+    try:
+        class EchoChat:
+            """Echoes the last user text; records the session history seen."""
+            def __init__(self):
+                self.seen: list[list[dict]] = []
+
+            def chat(self, messages, tools=None, **kw):
+                self.seen.append([dict(m) for m in messages])
+                return fake_response(text="echo:"
+                                     + str(messages[-1]["content"])[:20])
+
+        with tempfile.TemporaryDirectory() as td:
+            fake = FakeTgTransport()
+            echo = EchoChat()
+            svc = ChatService(Path(td), frozenset({111}), transport=fake,
+                              chat=echo.chat)
+            uid, cid = 111, 555001
+
+            # --- 1) no thread: zero regression (chat-level session, no field)
+            svc.handle_update(mk_update(1, uid, cid, "plain hello"))
+            check("topic: plain chat reply has no message_thread_id",
+                  fake.send_threads == [None], str(fake.send_threads))
+            check("topic: plain chat session stays {cid}.jsonl",
+                  (Path(td) / "sessions" / f"{cid}.jsonl").is_file())
+
+            # --- 2) threaded message -> {cid}:{tid} session + threaded reply
+            svc.handle_update(mk_update(2, uid, cid, "topic A alpha",
+                                        thread_id=7))
+            check("topic: threaded reply carries message_thread_id",
+                  fake.send_threads[-1] == "7", str(fake.send_threads))
+            check("topic: threaded session key is {cid}:{tid}",
+                  (Path(td) / "sessions" / f"{cid}:7.jsonl").is_file()
+                  and not (Path(td) / "sessions" / f"{cid}.7.jsonl").exists(),
+                  str(list((Path(td) / "sessions").iterdir())))
+
+            # --- 3) second topic isolated: separate session, no cross-talk
+            svc.handle_update(mk_update(3, uid, cid, "topic B beta",
+                                        thread_id=8))
+            hist_a = [m["content"] for m in echo.seen[-2]
+                      if m["role"] == "user"]
+            hist_b = [m["content"] for m in echo.seen[-1]
+                      if m["role"] == "user"]
+            check("topic: two topics keep independent sessions",
+                  "topic A alpha" in hist_a and "topic B beta" in hist_b
+                  and "topic A alpha" not in hist_b
+                  and (Path(td) / "sessions" / f"{cid}:8.jsonl").is_file(),
+                  f"a={hist_a} b={hist_b}")
+            check("topic: reply threads to its own topic",
+                  fake.send_threads[-1] == "8", str(fake.send_threads))
+
+            # --- 4) commands stay chat-level even inside a topic
+            svc.handle_update(mk_update(4, uid, cid, "/help", thread_id=7))
+            check("topic: command reply still threads back to the topic",
+                  fake.send_threads[-1] == "7", str(fake.send_threads))
+            sess_files = sorted(p.name for p in
+                                (Path(td) / "sessions").glob("*.jsonl"))
+            check("topic: command never opens a topic session",
+                  sess_files == [f"{cid}.jsonl", f"{cid}:7.jsonl",
+                                 f"{cid}:8.jsonl"], str(sess_files))
+
+            # --- 5) non-int thread field is ignored (chat-level session)
+            svc.handle_update(mk_update(5, uid, cid, "odd thread",
+                                        thread_id="nope"))
+            check("topic: non-int message_thread_id treated as absent",
+                  fake.send_threads[-1] is None
+                  and echo.seen[-1] is not None, str(fake.send_threads))
+            # the turn above went to the CHAT session (no thread in reply)
+            check("topic: odd-thread message lands in chat-level session",
+                  not (Path(td) / "sessions" / f"{cid}:nope.jsonl").exists(),
+                  str(list((Path(td) / "sessions").iterdir())))
+    finally:
+        if saved_tok is None:
+            _os.environ.pop(POLL_BOT_ENV, None)
+        else:
+            _os.environ[POLL_BOT_ENV] = saved_tok
+
+
 def main() -> int:
     test_model()
     test_registry_and_tools()
@@ -4504,11 +5930,15 @@ def main() -> int:
     test_typing()
     test_wd_locale()
     test_subagent()
+    test_result_compression()
     test_execute_code()
     test_mcp()
     test_channels()
     test_channels_service()
     test_channels_domestic()
+    test_hooks()
+    test_acp()
+    test_tg_topics()
     print(f"\n{len(PASS)} pass · {len(FAIL)} fail")
     if FAIL:
         print("failed: " + ", ".join(FAIL))

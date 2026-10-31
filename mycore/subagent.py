@@ -27,6 +27,7 @@ Stdlib only; English comments (repo i18n policy).
 """
 from __future__ import annotations
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
@@ -46,6 +47,26 @@ SYSTEM_LINE = ("You are an isolated sub-agent of the main assistant. "
                "concise, factual, ready for the parent to use.")
 
 
+def _allowed_models() -> list[str] | None:
+    """Whitelist for per-task model selection (car 4a-M3): the
+    web/settings.json `mycore.models` list (non-empty strings), None = not
+    configured. Read lazily like service.ChatService._allowed_models so the
+    console list and this gate can never disagree; no env precedence (a
+    credential-free name list, settings-only on purpose)."""
+    try:
+        from . import cli  # local import: keeps the module graph acyclic
+        stored = json.loads((cli.REPO / "web" / "settings.json")
+                            .read_text(encoding="utf-8"))
+        mc = stored.get("mycore") if isinstance(stored, dict) else None
+        raw = mc.get("models") if isinstance(mc, dict) else None
+        if isinstance(raw, list):
+            out = [m for m in raw if isinstance(m, str) and m]
+            return out or None
+    except (OSError, ValueError, AttributeError, ImportError):
+        pass
+    return None
+
+
 def _select(registry: ToolRegistry, wanted: list[str]) -> list[str]:
     """Resolve the sub-agent tool set: read-only default + caller-named
     extras. Raises ToolError with an honest message on an unknown name or a
@@ -63,11 +84,21 @@ def _select(registry: ToolRegistry, wanted: list[str]) -> list[str]:
 
 
 def _one(task: str, idx: int, total: int, sub_registry: ToolRegistry,
-         chat: Callable[..., dict], budget: int | None) -> str:
+         chat: Callable[..., dict], budget: int | None,
+         model: str | None = None) -> str:
     """Run one sub-agent turn. Never raises; every outcome is a labelled
-    block so the parent sees exactly which task produced what."""
+    block so the parent sees exactly which task produced what. `model`
+    (validated against the settings whitelist by the caller) overrides the
+    model NAME only — the wrapped callable injects `model=` into the same
+    chat connection, so base URL and credentials stay the turn's own."""
     messages = [{"role": "system", "content": SYSTEM_LINE},
                 {"role": "user", "content": task}]
+    if model:
+        base = chat
+
+        def chat(**kw):  # noqa: E306 — deliberate keyword-only override
+            kw["model"] = model
+            return base(**kw)
     try:
         res = run_turn(messages, chat, sub_registry,
                        max_iters=SUB_MAX_ITERS, budget_chars=budget)
@@ -87,17 +118,35 @@ def run_tasks(tasks: list, registry: ToolRegistry, extra_tools: list | None,
               chat: Callable[..., dict] | None, budget: int | None) -> str:
     """Validate + fan out up to MAX_PARALLEL tasks in parallel, fold the
     results. Raises ToolError for caller mistakes (validation), never for a
-    sub-agent's runtime outcome."""
+    sub-agent's runtime outcome. A task entry is a plain string or an object
+    `{"task": str, "model": str}`; a model outside the settings
+    `mycore.models` whitelist (or a missing whitelist) becomes that TASK's
+    honest `[i/N] error:` block — siblings still run, no silent fallback."""
     if not isinstance(tasks, list) or not tasks:
-        raise ToolError("tasks must be a non-empty array of task strings")
+        raise ToolError("tasks must be a non-empty array of task strings "
+                        "or {task, model} objects")
     if len(tasks) > MAX_PARALLEL:
         raise ToolError(f"at most {MAX_PARALLEL} tasks per call "
                         f"(got {len(tasks)})")
-    clean: list[str] = []
+    clean: list[tuple[str, str | None]] = []
     for i, t in enumerate(tasks, 1):
-        if not isinstance(t, str) or not t.strip():
+        model = None
+        if isinstance(t, str):
+            if not t.strip():
+                raise ToolError(f"task {i} must be a non-empty string")
+        elif isinstance(t, dict):
+            text = t.get("task")
+            if not isinstance(text, str) or not text.strip():
+                raise ToolError(f"task {i} needs a non-empty 'task' string")
+            model = t.get("model")
+            if model is not None and (not isinstance(model, str)
+                                      or not model.strip()):
+                raise ToolError(f"task {i}: 'model' must be a non-empty "
+                                "string when present")
+            t = text
+        else:
             raise ToolError(f"task {i} must be a non-empty string")
-        clean.append(t)
+        clean.append((t.strip(), model.strip() if model else None))
     if chat is None:
         raise ToolError("no model connection bound to this turn "
                         "(delegate is only available inside a run_turn)")
@@ -109,11 +158,29 @@ def run_tasks(tasks: list, registry: ToolRegistry, extra_tools: list | None,
     if non_str:
         raise ToolError("tools entries must be tool-name strings")
     sub_registry = registry.select(names)
+    allowed = _allowed_models() if any(m for _, m in clean) else None
+    plan: list[tuple[int, str, str | None, str | None]] = []
+    for i, (text, model) in enumerate(clean, 1):
+        why = None
+        if model:
+            if not allowed:
+                why = ("mycore.models is not configured in settings — "
+                       f"cannot select model {model!r} for this task")
+            elif model not in allowed:
+                why = (f"model {model!r} is not in the mycore.models "
+                       f"whitelist ({', '.join(allowed)}) — no silent "
+                       "fallback")
+        plan.append((i, text, model, why))
     total = len(clean)
+
+    def _run(item: tuple[int, str, str | None, str | None]) -> str:
+        i, text, model, why = item
+        if why:
+            return f"[{i}/{total}] error: {why}"
+        return _one(text, i, total, sub_registry, chat, budget, model)
+
     if total == 1:
-        return _one(clean[0], 1, 1, sub_registry, chat, budget)
+        return _run(plan[0])
     with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL, total)) as pool:
-        parts = list(pool.map(
-            lambda it: _one(it[1], it[0], total, sub_registry, chat, budget),
-            enumerate(clean, 1)))
+        parts = list(pool.map(_run, plan))
     return "\n\n".join(parts)

@@ -5,6 +5,10 @@
 #   bash deploy/deploy_site.sh          # deploy + ensure domains/DNS + verify
 #   bash deploy/deploy_site.sh --check  # verify only (no deploy, no writes)
 #
+# Also idempotently keeps the visit counter alive (docs/features/site_visibility.md):
+# ensures KV namespace "aidog-site-visits" + VISITS binding on the Pages project
+# before uploading, so site/functions/api/visits.js can increment on /api/visits.
+#
 # Credential slots (secrets.env, values never echoed):
 #   AIDOG_CF_API_TOKEN   Pages edit + zone read (wrangler + Pages domains API)
 #   AIDOG_CF_DNS_TOKEN   zone DNS read/write (record ensure)
@@ -44,9 +48,57 @@ cfjson() { # cfjson METHOD URL [token] [body]
 }
 
 if [ "$CHECK_ONLY" -eq 0 ]; then
+  # ---- 0) ensure KV counter namespace + Pages binding (idempotent) ---------
+  # Namespace title fixed; binding = VISITS on both environments so the
+  # Pages Function sees env.VISITS. Missing permission => WARN + continue:
+  # /api/visits then honestly answers 503 and verify reports it as pending.
+  KV_TITLE=aidog-site-visits
+  kvid=$(cfjson GET "$API/accounts/$AIDOG_CF_ACCOUNT_ID/storage/kv/namespaces" \
+    | python3 -c 'import json,sys
+for ns in (json.load(sys.stdin).get("result") or []):
+    if ns.get("title")=="aidog-site-visits": print(ns["id"]); break' 2>/dev/null || true)
+  if [ -z "$kvid" ]; then
+    resp=$(cfjson POST "$API/accounts/$AIDOG_CF_ACCOUNT_ID/storage/kv/namespaces" \
+      "$AIDOG_CF_API_TOKEN" "{\"title\":\"$KV_TITLE\"}")
+    kvid=$(printf '%s' "$resp" | python3 -c 'import json,sys
+d=json.load(sys.stdin); print(d["result"]["id"] if d.get("success") else "")' 2>/dev/null || true)
+    [ -n "$kvid" ] && echo "DEPLOY_SITE: KV namespace created ($KV_TITLE)"
+  else
+    echo "DEPLOY_SITE: KV namespace reused ($KV_TITLE)"
+  fi
+  if [ -z "$kvid" ]; then
+    echo "DEPLOY_SITE: WARN KV namespace ensure failed — token likely lacks Workers KV Storage:Edit; /api/visits will stay pending" >&2
+  else
+    proj=$(cfjson GET "$API/accounts/$AIDOG_CF_ACCOUNT_ID/pages/projects/$PROJECT")
+    need=$(printf '%s' "$proj" | python3 -c 'import json,sys
+d=json.load(sys.stdin); kvid=sys.argv[1]
+dc=(d.get("result") or {}).get("deployment_configs") or {}
+ok=all((((dc.get(e) or {}).get("kv_namespaces") or {}).get("VISITS") or {}).get("namespace_id")==kvid for e in ("production","preview"))
+print("no" if ok else "yes")' "$kvid" 2>/dev/null || echo unknown)
+    if [ "$need" = "yes" ]; then
+      body=$(printf '%s' "$proj" | python3 -c 'import json,sys
+d=json.load(sys.stdin); kvid=sys.argv[1]
+dc=(d.get("result") or {}).get("deployment_configs") or {}
+for e in ("production","preview"):
+    cfg=dc.setdefault(e, {})
+    cfg["kv_namespaces"]={**(cfg.get("kv_namespaces") or {}), "VISITS": {"namespace_id": kvid}}
+print(json.dumps({"deployment_configs": dc}))' "$kvid")
+      out=$(cfjson PATCH "$API/accounts/$AIDOG_CF_ACCOUNT_ID/pages/projects/$PROJECT" \
+        "$AIDOG_CF_API_TOKEN" "$body")
+      ok=$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("success"))' 2>/dev/null || echo parse_error)
+      echo "DEPLOY_SITE: KV binding VISITS -> $kvid ensure ($ok)"
+      [ "$ok" = "True" ] || echo "DEPLOY_SITE: WARN binding patch result=$ok — /api/visits may stay pending" >&2
+    else
+      echo "DEPLOY_SITE: KV binding VISITS already -> $kvid"
+    fi
+  fi
+
   # ---- 1) upload site/ -----------------------------------------------------
   command -v wrangler >/dev/null || die "wrangler not installed"
-  wrangler pages deploy site/ --project-name "$PROJECT" --branch main
+  # Pages Functions are resolved as <cwd>/functions by `wrangler pages deploy`,
+  # so run it from site/ where functions/api/visits.js lives (site/functions is
+  # on wrangler's static-asset IGNORE_LIST, so the code is not uploaded twice).
+  ( cd site && wrangler pages deploy . --project-name "$PROJECT" --branch main )
   echo "DEPLOY_SITE: site/ uploaded"
 
   # ---- 2) ensure Pages custom domains (idempotent) -------------------------
@@ -93,9 +145,11 @@ PY
 fi
 
 # ---- 4) verify public endpoints -------------------------------------------
+# pget URL OUTFILE -> http status (always via direct connection, no proxy)
+pget() { curl -s --noproxy '*' --max-time 25 -o "$2" -w '%{http_code}' "$1" 2>/dev/null || true; }
 fail=0
 for url in https://aidog.im/ https://www.aidog.im/; do
-  code=$(curl -s -o /tmp/deploy_site_check.html -w '%{http_code}' --max-time 25 "$url" || echo 000)
+  code=$(pget "$url" /tmp/deploy_site_check.html)
   if [ "$code" = "200" ] && grep -q "<title>I'm AiDog" /tmp/deploy_site_check.html; then
     echo "DEPLOY_SITE: VERIFY OK $url (200, title I'm AiDog)"
   else
@@ -105,8 +159,66 @@ for url in https://aidog.im/ https://www.aidog.im/; do
 done
 # assets reachable over the real domain
 for a in assets/style.css assets/main.js i18n/en.json; do
-  code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "https://aidog.im/$a" || echo 000)
+  code=$(pget "https://aidog.im/$a" /tmp/deploy_site_asset)
   [ "$code" = "200" ] || { echo "DEPLOY_SITE: asset FAIL /$a (http $code)" >&2; fail=1; }
 done
+
+# --- AI-readable surface: llms.txt / robots.txt / sitemap / manifest / icons
+llms_code=$(pget https://aidog.im/llms.txt /tmp/deploy_site_llms.txt)
+if [ "$llms_code" = "200" ] && head -n 1 /tmp/deploy_site_llms.txt | grep -qx "# I'm AiDog"; then
+  echo "DEPLOY_SITE: VERIFY OK /llms.txt (200, H1 '# I'm AiDog')"
+else
+  echo "DEPLOY_SITE: VERIFY FAIL /llms.txt (http $llms_code, H1 mismatch or missing)" >&2
+  fail=1
+fi
+for a in robots.txt sitemap.xml manifest.webmanifest assets/icons/icon-512.png assets/icons/apple-touch-icon.png; do
+  code=$(pget "https://aidog.im/$a" /tmp/deploy_site_asset)
+  if [ "$code" = "200" ]; then
+    echo "DEPLOY_SITE: VERIFY OK /$a (200)"
+  else
+    echo "DEPLOY_SITE: VERIFY FAIL /$a (http $code)" >&2
+    fail=1
+  fi
+done
+# manifest must parse as JSON
+code=$(pget https://aidog.im/manifest.webmanifest /tmp/deploy_site_manifest.json)
+if [ "$code" = "200" ]; then
+  python3 -c 'import json,sys; d=json.load(open("/tmp/deploy_site_manifest.json")); assert d["name"] and d["icons"]' \
+    || { echo "DEPLOY_SITE: VERIFY FAIL /manifest.webmanifest (invalid JSON)" >&2; fail=1; }
+fi
+
+# --- visit counter: 200 + increment, or honest 503 (pending, not a failure) -
+v1=$(pget "https://aidog.im/api/visits" /tmp/deploy_site_v1.json)
+v2=$(pget "https://aidog.im/api/visits" /tmp/deploy_site_v2.json)
+if [ "$v1" = "200" ] && [ "$v2" = "200" ]; then
+  if python3 - /tmp/deploy_site_v1.json /tmp/deploy_site_v2.json <<'PYV'
+import json, sys
+a = json.load(open(sys.argv[1])); b = json.load(open(sys.argv[2]))
+assert isinstance(a.get("count"), int) and a.get("unit") == "page views", a
+assert isinstance(b.get("count"), int) and b.get("unit") == "page views", b
+assert b["count"] > a["count"], (a, b)
+PYV
+  then
+    echo "DEPLOY_SITE: VERIFY OK /api/visits (200, count increments)"
+  else
+    echo "DEPLOY_SITE: VERIFY FAIL /api/visits (200 but shape/increment wrong)" >&2
+    fail=1
+  fi
+  vt=$(curl -s --noproxy '*' --max-time 25 "https://aidog.im/api/visits?format=text" 2>/dev/null || true)
+  case "$vt" in
+    visits:*) echo "DEPLOY_SITE: VERIFY OK /api/visits?format=text (text/plain)" ;;
+    *) echo "DEPLOY_SITE: VERIFY FAIL /api/visits?format=text (got: ${vt:0:40})" >&2; fail=1 ;;
+  esac
+elif [ "$v1" = "503" ] && python3 - /tmp/deploy_site_v1.json <<'PYV' 2>/dev/null
+import json, sys
+assert json.load(open(sys.argv[1])).get("error"), "503 without error field"
+PYV
+then
+  echo "DEPLOY_SITE: PENDING /api/visits (503 counter not configured — KV binding not active; not a failure)"
+else
+  echo "DEPLOY_SITE: VERIFY FAIL /api/visits (http v1=$v1 v2=$v2)" >&2
+  fail=1
+fi
+
 [ "$fail" -eq 0 ] && echo "DEPLOY_SITE: ALL VERIFIED"
 exit "$fail"

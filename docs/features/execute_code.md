@@ -47,3 +47,23 @@ execute_code(code = "print(read('data.txt')[:200])", timeout = 30)
 `steps` is the token-saver for known tool sequences (the folded multi-step
 win); `code` covers computed/looped work that a fixed step
 list cannot express, with the helper API keeping roots + checkpoints intact.
+
+## Tool-output compression tier (car 4a-M3, registry-wide)
+
+Every tool result passes `tools.finalize_result` before it reaches the model
+(affects all tools, not only `execute_code`):
+
+1. **above 6000 chars** → a compression pass first: trailing whitespace per
+   line, runs of 3+ blank lines collapsed to one, and consecutive identical
+   lines folded to `first line` + `... [×N identical lines]` (markers
+   themselves never re-fold, so the pass is idempotent);
+2. the result now carries one honest single-line note when anything
+   changed — `... [compressed {before}→{after} chars]` (same style as the
+   truncation marker, never a silent shrink);
+3. **still >24000 chars** → the existing hard cap applies unchanged
+   (`... [truncated at 24000 chars]`, appended after the compression note);
+   below the cap nothing else changes.
+
+Whitespace/echo folding only — no content line is invented or dropped
+beyond exact duplicates; empty and single-line bodies pass through
+untouched; results at or under the threshold are byte-identical to before.

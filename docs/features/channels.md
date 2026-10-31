@@ -155,3 +155,31 @@ credentials** and is not claimed anywhere in the product surface.
   validation, webhook gates, settings restore).
 - E2E script: `tmp/e2e_channels.py` (8 checks, restores settings/secrets
   byte-for-byte; tmp/ is gitignored).
+
+## 8. Telegram forum-topic isolation (car 4a-M3)
+
+A Telegram **forum topic** message carries `message_thread_id`; `handle_update`
+reads it (int only — a string/bool field is treated as absent):
+
+- **Pipeline sessions are topic-scoped**: a non-command message in topic `T`
+  of chat `C` runs over the session file `C:T.jsonl` (`session_key` on
+  `_pipeline`; `C.jsonl` stays the chat-level file). Two topics of the same
+  chat never share context — deliberate isolation, **cross-topic context
+  transfer is v1 out of scope** (documented boundary: copy what you need
+  into the new topic yourself).
+- **Commands stay chat-level**: `/cron`, `/checkpoint`, `/model`, … key on
+  the plain chat id even when invoked inside a topic — their state (jobs,
+  snapshots, model overrides) is chat-wide by design.
+- **Replies thread back**: `_send(cid, text, thread_id=T)` adds
+  `message_thread_id` to `sendMessage` (commands included — the answer lands
+  where the question was asked); `None` omits the field entirely, so plain
+  chats are byte-identical to the pre-topic payload.
+- Everything chat-wide is unchanged: typing heartbeat, cron origin, hooks
+  and log lines keep the numeric chat id.
+
+**Verification**: offline only — `mycore/tests/run::test_tg_topics` drives a
+fake transport (`mk_update(..., thread_id=)` + recorded
+`message_thread_id`): threaded reply payload, `C:T` session isolation across
+two topics, commands not opening a topic session, non-int thread field
+ignored, plain-chat zero regression. **No live TG E2E was re-run for this
+feature** (offline suite is the evidence, per the car-4a scope decision).

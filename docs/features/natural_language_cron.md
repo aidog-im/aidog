@@ -68,7 +68,14 @@ delivery but never duplicates one.
 ## 4. Surfaces
 
 - **Telegram** (allowlist-gated like every command):
-  - `/cron` — list (`id · spec · kind · next <BJ> · text[:40]`, `(done)` marker)
+  - `/cron` — list (`id · spec · kind · next <BJ> (+Δ) · text[:40]`, `(done)`
+    marker). The relative countdown (car 4a-M3) is a language-neutral suffix
+    appended after the absolute time — `(+2h13m)`, `(+45s)`, `(+3d4h)`,
+    two units max, largest first; a job already due renders `(+0s)` (the
+    scheduler fires it at the next tick, so the floor is zero, never
+    negative) and a done/no-next job renders no countdown. Format lives in
+    `scheduler.fmt_delta` — deliberately **locale-free** (unit letters only,
+    no `cmd.cron.*` keys added); the absolute Beijing time stays primary.
   - `/cron add [message|prompt] <spec> :: <text>` — create; stamps this chat
     as the job's origin
   - `/cron del <id>` — remove

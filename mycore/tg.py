@@ -137,16 +137,23 @@ class TgClient:
         """Read-only identity probe (safe alongside a live poller)."""
         return self._call("getMe")
 
-    def send_message(self, chat_id: str | int, text: str) -> dict:
+    def send_message(self, chat_id: str | int, text: str,
+                     thread_id: int | None = None) -> dict:
         """Stateless send — safe alongside a live poller. Text capped at 4096
-        (Telegram's limit) with an honest truncation marker."""
+        (Telegram's limit) with an honest truncation marker.
+        `thread_id` (forum topic) rides as `message_thread_id` when given —
+        None omits the field entirely, so non-topic chats are byte-identical
+        to the pre-topic payload."""
         if not chat_id:
             raise TgError("chat_id is required")
         if not isinstance(text, str) or not text.strip():
             raise TgError("text is required")
         if len(text) > 4096:
             text = text[:4090] + " …[truncated]"
-        return self._call("sendMessage", {"chat_id": chat_id, "text": text})
+        payload: dict = {"chat_id": chat_id, "text": text}
+        if thread_id is not None:
+            payload["message_thread_id"] = thread_id
+        return self._call("sendMessage", payload)
 
     def send_chat_action(self, chat_id: str | int, action: str = "typing") -> dict:
         """Stateless 'typing…' indicator (safe alongside a live poller).

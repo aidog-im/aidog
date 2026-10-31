@@ -242,6 +242,24 @@
     }
   }
   tick(); setInterval(tick, 1000);
+  /* --------------------------------------------- visits counter --- */
+  /* Footer page-view counter: GET /api/visits once per page load. Every
+     load counts (refreshes and crawlers included — approximate by design).
+     If the endpoint is missing, fails, or returns a non-numeric count, the
+     whole block stays hidden: never render a fabricated number. */
+  var vw = document.getElementById("visitsWrap");
+  var vc = document.getElementById("visits");
+  if (vw && vc) {
+    fetch("/api/visits", { cache: "no-store" })
+      .then(function (r) { if (!r.ok) throw new Error("http " + r.status); return r.json(); })
+      .then(function (d) {
+        if (!d || typeof d.count !== "number") throw new Error("bad shape");
+        vc.textContent = String(d.count);
+        vw.hidden = false;
+      })
+      .catch(function () { vw.hidden = true; });
+  }
+
   var yr = document.getElementById("year");
   if (yr) yr.textContent = String(new Date().getFullYear());
 })();

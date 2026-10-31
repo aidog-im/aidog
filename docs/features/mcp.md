@@ -42,9 +42,33 @@ Precedence: env `MYCORE_MCP` (raw JSON) > settings `web/settings.json`
   can never deadlock the pipe), dead-server reason includes exit code + stderr
   tail.
 - **HTTP** (Streamable HTTP single-shot): one POST per message, response read
-  as `application/json` **or** `text/event-stream` (last `data:` JSON object);
-  `Mcp-Session-Id` response header captured and replayed on later requests;
-  HTTP ≥400 and JSON-RPC `error` objects surface as honest `ERROR:` lines.
+  as `application/json` **or** `text/event-stream` (all `data:` JSON objects
+  parsed in order); `Mcp-Session-Id` response header captured and replayed on
+  later requests; HTTP ≥400 and JSON-RPC `error` objects surface as honest
+  `ERROR:` lines.
+
+## Progress (car 4a-M3)
+
+When the caller passes an `on_progress` callback to `call_tool`/`request`, the
+request stamps `_meta.progressToken` (= our JSON-RPC id) and the session
+dispatches incoming `notifications/progress` messages whose token matches:
+`{progressToken, message (≤500 chars), progress (number|null)}`. The stdio
+reader thread routes id-less notifications to this path; the HTTP transport
+parses interleaved notifications from the same single-shot SSE body before
+the response arrives. Delivery chain: session → tool handler (fixed shape,
+`{server, tool, message ≤200, progress}`) → `registry.bind_progress(fn)` —
+same binding style as `bind_turn` — → web console `progress` SSE frame
+(`_run_chat_turn`), rendered as a transient status line in the chat stream
+(2s fade, cleared on `done`).
+
+Honest boundaries:
+
+- no callback bound → no `_meta` stamp at all (request byte-identical to the
+  pre-progress shape), unknown/stale tokens drop silently, a raising sink is
+  swallowed — progress can never fail a tool call;
+- **Telegram does not receive progress** (single-send reply model — there is
+  no channel for incremental status); it stays a web-console-only event;
+- unrelated notifications (`notifications/message`, …) are ignored.
 
 ## Lifecycle (fail-soft)
 
@@ -73,3 +97,8 @@ which tools the model can *see*; they are not a sandbox. Calls time out after
 A stdio MCP server exposing `add_numbers(a, b)` was connected through
 `MYCORE_MCP`; a real model turn called `mcp_e2e_add_numbers(17, 25)` and
 reported **42**.
+
+Progress evidence is unit-level (`mycore/tests/run.py`): a fake stdio server
+emits `notifications/progress` (+ a stale token and a foreign notification)
+and the bound registry sink must receive exactly the live-token frames; the
+HTTP interleaved-SSE case is asserted with an injected `post` (no sockets).

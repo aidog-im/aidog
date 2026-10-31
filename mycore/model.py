@@ -9,10 +9,12 @@ read from the environment at call time and NEVER echoed: not in logs, not in
 reprs, not in exception messages, not in argv (the transport is urllib inside
 this process — nothing secret ever reaches `ps`).
 
-Failover (car 1-D4, mycore.modeltier): when the config carries upstreams the
-attempt runs primary-first through the chain — one attempt per upstream
-(same-URL fail-fast), payload-class errors fail immediately, and a failure
-after the first streamed delta is NEVER replayed (no duplicate output).
+Failover (car 1-D4 -> 4a-M1, mycore.modeltier v2): when the config carries
+upstreams the attempt runs primary-first through the FLATTENED unit list —
+one (endpoint, key slot) pair at a time, credential pools rotating on auth
+errors (401/403), payload-class errors failing immediately, cooling units
+skipped (least-cold fallback when the whole chain cools), and a failure
+after the first streamed delta NEVER replayed (no duplicate output).
 
 `transport` is injectable so tests run fully offline with a scripted fake.
 English comments per repo i18n policy.
@@ -26,7 +28,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Callable
 
-from .modeltier import Upstream, is_failover_class
+from .modeltier import (HealthRegistry, SHARED_HEALTH, Upstream,  # noqa: F401
+                        health_note, is_auth_class, is_failover_class)
 
 DEFAULT_TIMEOUT = 120.0
 
@@ -58,7 +61,8 @@ class ModelConfig:
 
     def chain(self) -> tuple[tuple[str, str, str], ...]:
         """Ordered attempts: primary first, then each upstream. Every entry is
-        (base_url, key_env, model) with defaults already resolved; key VALUES
+        (base_url, key_env, model) with defaults already resolved; key_env is
+        the RAW slot field (possibly a comma-separated pool) and key VALUES
         are read from the environment per attempt inside ChatClient."""
         out = [(self.base_url, self.api_key_env, self.model)]
         for u in self.upstreams:
@@ -66,14 +70,32 @@ class ModelConfig:
                         u.model or self.model))
         return tuple(out)
 
+    def units(self) -> tuple[tuple[str, str, str], ...]:
+        """Flattened v2 attempt units: one (base_url, key_slot, model) per
+        credential-pool slot, pools expanded in configured order. The attempt
+        loop runs over these; health/cooldown identity = endpoint + slot."""
+        out: list[tuple[str, str, str]] = []
+        for base_url, key_env, model in self.chain():
+            slots = tuple(s for s in (key_env or "").split(",") if s) or ("",)
+            for slot in slots:
+                out.append((base_url, slot, model))
+        return tuple(out)
+
     def describe(self) -> str:
-        """Safe-to-log summary: presence of a key, never its value."""
-        has_key = bool(os.environ.get(self.api_key_env))
+        """Safe-to-log summary: presence of a key, never its value. v2 appends
+        the process-shared cooldown state scoped to THIS config's units —
+        URLs + slot names only, so the zero-echo rule holds."""
+        has_key = any(os.environ.get(s) for s in
+                      (self.api_key_env or "").split(",") if s)
         out = (f"{self.base_url} model={self.model} "
                f"key[{self.api_key_env}]={'set' if has_key else 'unset'} "
                f"upstreams={len(self.upstreams)}")
         if self.upstreams_note:
             out += f" upstreams-invalid: {self.upstreams_note}"
+        cool = health_note([HealthRegistry.identity(u[0], u[1])
+                            for u in self.units()])
+        if cool:
+            out += f" {cool}"
         return out
 
 
@@ -150,7 +172,9 @@ class _SseAssembler:
       arguments) into `choices[0].message.tool_calls`;
     - other SSE fields (event:, id:, retry:, comments) are ignored; a
       non-JSON `data:` line is counted, never raised (honest empty result
-      if nothing usable arrived).
+      if nothing usable arrived);
+    - a `usage` block (some providers attach it to the final chunk) is kept
+      and passed through — including prompt-cache hit counts (v2 signal).
     """
 
     def __init__(self, on_delta: Callable[[str], None]) -> None:
@@ -159,6 +183,7 @@ class _SseAssembler:
         self.tools: dict[int, dict] = {}    # index -> {id, name, args parts}
         self.finish: str | None = None
         self.meta: dict = {}
+        self.usage: dict | None = None
         self.chunks = 0
         self.done = False
         self.bad = 0
@@ -200,6 +225,9 @@ class _SseAssembler:
 
     def _chunk(self, chunk: dict) -> None:
         self.chunks += 1
+        usage = chunk.get("usage")
+        if isinstance(usage, dict) and not self.usage:
+            self.usage = usage            # e.g. final-chunk usage (v2 signal)
         for key in ("id", "model", "created"):
             if key in chunk and key not in self.meta:
                 self.meta[key] = chunk[key]
@@ -245,33 +273,84 @@ class _SseAssembler:
         if calls:
             msg["tool_calls"] = calls
         finish = self.finish or ("tool_calls" if calls else "stop")
-        return {
+        doc = {
             "id": self.meta.get("id", ""),
             "object": "chat.completion",
             "created": self.meta.get("created", 0),
             "model": self.meta.get("model", ""),
             "choices": [{"index": 0, "message": msg, "finish_reason": finish}],
         }
+        if self.usage is not None:
+            doc["usage"] = self.usage
+        return surface_cached_tokens(doc)
 
 
 class ChatClient:
     def __init__(self, cfg: ModelConfig | None = None,
                  transport: Transport | None = None,
-                 stream_transport: StreamTransport | None = None) -> None:
+                 stream_transport: StreamTransport | None = None,
+                 health: HealthRegistry | None = None) -> None:
         self.cfg = cfg or ModelConfig()
         self.transport = transport or _urllib_transport
         self.stream_transport = stream_transport or _urllib_stream_transport
+        # Health/cooldown state defaults to the process-shared registry so a
+        # per-turn client still honors cooldowns across turns; tests inject
+        # an isolated HealthRegistry (usually with a fake clock).
+        self.health = health if health is not None else SHARED_HEALTH
+
+    def _candidates(self) -> tuple[tuple[str, str, str], ...]:
+        """v2 attempt units in chain order, cooling units skipped. When the
+        WHOLE chain cools, only the LEAST cold unit is kept — a call must
+        never degrade into a silent zero-attempt stop."""
+        units = self.cfg.units()
+        if not units:
+            return ()
+
+        def ident(u: tuple[str, str, str]) -> str:
+            return HealthRegistry.identity(u[0], u[1])
+
+        cooling = [u for u in units if self.health.cooling(ident(u))]
+        if not cooling:
+            return units
+        if len(cooling) == len(units):
+            least = min(units, key=lambda u: self.health.remaining(ident(u)))
+            return (least,)
+        return tuple(u for u in units if not self.health.cooling(ident(u)))
+
+    @staticmethod
+    def _next_unit(units: tuple[tuple[str, str, str], ...], i: int,
+                   message: str, failover: bool) -> int | None:
+        """Index of the next unit to try, or None to raise here.
+
+        fatal (payload-class) -> never fails over. auth (401/403) -> the very
+        next unit: pool rotation when it belongs to the SAME endpoint, plain
+        failover when the pool is exhausted. any other failover-class error ->
+        the whole endpoint fails at once (v1 same-endpoint fail-fast kept for
+        capacity/transport errors — its untried pool keys are NOT rotated)."""
+        if not failover:
+            return None
+        j = i + 1
+        if j >= len(units):
+            return None
+        if is_auth_class(message):
+            return j                    # rotate in-pool or cross endpoints
+        while j < len(units) and units[j][0] == units[i][0]:
+            j += 1
+        return j if j < len(units) else None
 
     def chat(self, messages: list[dict], tools: list[dict] | None = None,
              **opts) -> dict:
         """One completion. Returns the parsed `chat.completions` JSON object.
 
-        Failover (car 1-D4): the configured chain runs primary-first, one
-        attempt per upstream (same-URL fail-fast). Payload-class errors
-        (HTTP 400/405/413/415/422) raise at once — every upstream would
-        reject the same request — and a failure after the first streamed
-        delta raises without replay (no duplicated output). A single-endpoint
-        config behaves exactly as before.
+        Failover (v2): candidates run primary-first over flattened
+        (endpoint, key slot) units — each unit at most once per call, auth
+        errors rotating the credential pool inside the endpoint, cooling
+        units skipped (least-cold fallback when everything cools), payload-
+        class errors (HTTP 400/405/413/415/422) raising at once, and a
+        failure after the first streamed delta raised without replay (no
+        duplicated output). A single-endpoint config behaves exactly as
+        before. Health successes/failures feed the injected (default:
+        process-shared) HealthRegistry.
 
         `opts.on_delta`, when callable, requests streaming: the payload gains
         `stream: true`, each content piece is passed to it as it arrives, and
@@ -281,34 +360,45 @@ class ChatClient:
         full text — never an error, never a fake.
 
         Raises ModelError with safe context only (status codes / exception
-        class names / endpoint URLs); the API key never enters the exception
-        chain.
+        class names / endpoint URLs); neither API keys nor key slot names
+        enter the exception chain.
         """
         on_delta = opts.get("on_delta")
-        chain = self.cfg.chain()
+        units = self._candidates()
         emitted = [False]
 
         def _delta(piece: str) -> None:
             emitted[0] = True
             on_delta(piece)
 
+        delta_fn = _delta if callable(on_delta) else None
         failed_from: str | None = None
         last: ModelError | None = None
-        for idx, (base_url, key_env, model) in enumerate(chain):
+        i = 0
+        while i < len(units):
+            base_url, key_slot, model = units[i]
+            ident = HealthRegistry.identity(base_url, key_slot)
             try:
-                return self._attempt(base_url, key_env, model, messages,
-                                     tools, opts,
-                                     _delta if callable(on_delta) else None)
+                doc = self._attempt(base_url, key_slot, model, messages,
+                                    tools, opts, delta_fn)
+                self.health.record_success(ident)
+                return doc
             except ModelError as e:
                 last = e
+                failover = is_failover_class(str(e))
+                if failover:
+                    self.health.record_failure(ident)
                 if emitted[0]:
-                    raise                      # strategy 5: no replay mid-stream
-                if idx + 1 >= len(chain) or not is_failover_class(str(e)):
-                    if failed_from is not None:
+                    raise              # strategy 5: no replay mid-stream
+                nxt = self._next_unit(units, i, str(e), failover)
+                if nxt is None:
+                    if failed_from is not None and failed_from != base_url:
                         raise ModelError(
                             f"{e} [failover: {failed_from} -> {base_url}]") from None
                     raise
-                failed_from = base_url         # next upstream; this one is done
+                if units[nxt][0] != base_url:
+                    failed_from = base_url   # crossing to a different endpoint
+                i = nxt
         raise last if last is not None else ModelError("no upstream to attempt")
 
     def _headers(self, base_url: str, key_env: str) -> dict:
@@ -371,10 +461,34 @@ class ChatClient:
             raise ModelError("response is not JSON") from None
         if not isinstance(doc, dict) or "choices" not in doc:
             raise ModelError("response missing 'choices'")
-        return doc
+        return surface_cached_tokens(doc)
 
     def __repr__(self) -> str:  # defensive: no accidental key surfacing
         return f"ChatClient({self.cfg.describe()})"
+
+
+def surface_cached_tokens(doc: dict) -> dict:
+    """Prompt-cache signal pass-through (v2): when the PROVIDER reports cache
+    hits we copy them into the extended field `usage["cached_tokens"]` —
+    `prompt_tokens_details.cached_tokens` shape, or the
+    `usage["cache_read_input_tokens"]` shape. Nothing is invented: no usage
+    block, no cached count. We never SEND cache directives ourselves
+    (`cache_control` injection is out of v2 scope — see modeltier docstring).
+    Mutates and returns `doc` (parse-side normalization only)."""
+    usage = doc.get("usage")
+    if not isinstance(usage, dict):
+        return doc
+    if type(usage.get("cached_tokens")) is int:
+        return doc
+    val = None
+    details = usage.get("prompt_tokens_details")
+    if isinstance(details, dict) and type(details.get("cached_tokens")) is int:
+        val = details["cached_tokens"]
+    elif type(usage.get("cache_read_input_tokens")) is int:
+        val = usage["cache_read_input_tokens"]
+    if val is not None and val >= 0:
+        usage["cached_tokens"] = val
+    return doc
 
 
 def first_choice_text(doc: dict) -> str | None:

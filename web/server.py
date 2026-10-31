@@ -36,6 +36,13 @@ Routes:
   POST /api/channels/send       -> Bearer WEB_TOKEN; {route, target, text}
                                    -> {ok} (200) | {error, details} (400) |
                                    {ok:false, error} (409/502/503)
+  GET  /v1/models               -> OpenAI-style model list (Bearer gate on the
+                                   dedicated OPENAI_API_TOKEN slot)
+  POST /v1/chat/completions     -> OpenAI-style completion over the same agent
+                                   loop as /api/chat (stream + non-stream,
+                                   stateless, no client-side tool execution)
+  GET  /api/capabilities        -> read-only capability catalog (tools, skills,
+                                   channels, hooks, cron; no auth, no secrets)
   GET  /api/chat/history        -> current console session (read, loopback)
   GET  /api/voice               -> voice engine capability (edge-tts presence)
   POST /api/say                 -> synthesize speech -> audio/mpeg (cached,
@@ -75,7 +82,7 @@ if str(REPO) in sys.path:
     sys.path.remove(str(REPO))
 sys.path.insert(0, str(REPO))
 from lib import i18n  # noqa: E402
-from mycore import cli, evolution, mcp, modeltier  # noqa: E402  (config + MCP grammar)
+from mycore import cli, evolution, hooks, mcp, modeltier  # noqa: E402  (config + MCP/ hooks grammar)
 from mycore.assembly import build_system_stack, resolve_context_dirs  # noqa: E402
 from mycore.loop import run_turn  # noqa: E402
 from mycore.model import ChatClient  # noqa: E402
@@ -180,7 +187,7 @@ DEFAULT_SETTINGS: dict = {
 }
 ALLOWED_TOP = ("language", "refresh_sec", "sound", "voice_volume",
                "alert_preview", "currency", "fx_rate", "mycore", "usage",
-               "evolution", "channels")
+               "evolution", "channels", "hooks")
 USAGE_KEYS = ("metrics_url", "pricing_config", "log_dir")
 MYCORE_KEYS = ("base_url", "model", "context_dirs", "upstreams", "mcp")
 MYCORE_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$")
@@ -698,6 +705,13 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
         errors.extend(evo_errors)
         if clean_evo:
             clean["evolution"] = clean_evo
+    if "hooks" in patch:
+        # Event hooks partition (car 4a): schema + argv[0] existence live in
+        # mycore.hooks — one source of truth for write validation and load.
+        clean_hooks, hook_errors = hooks.validate_hooks(patch["hooks"])
+        errors.extend(hook_errors)
+        if clean_hooks:
+            clean["hooks"] = clean_hooks
     return clean, errors
 
 
@@ -1602,6 +1616,145 @@ def channel_routes() -> tuple[str, ...]:
     return _SEND_ROUTES_FALLBACK
 
 
+# ------------------------------------------------- car 4a-W /v1 + catalog --
+
+
+def _approx_tokens(chars: int) -> int:
+    """Declared approximate token count = ceil(chars/4). We run no tokenizer:
+    this is a documented heuristic (docs/features/openai_api_server.md),
+    never a claim of exactness."""
+    return (chars + 3) // 4 if chars > 0 else 0
+
+
+def _usage_block(prompt_chars: int, completion_chars: int) -> dict:
+    """OpenAI `usage` built from the chars/4 approximation (both sides);
+    total is always the exact sum of the two reported integers."""
+    p = _approx_tokens(prompt_chars)
+    c = _approx_tokens(completion_chars)
+    return {"prompt_tokens": p, "completion_tokens": c, "total_tokens": p + c}
+
+
+def _openai_content_text(content) -> str | None:
+    """OpenAI content value -> plain text: a string passes; an array of
+    {type:'text', text} parts is concatenated; anything else (multimodal
+    parts) is not representable on this path (None)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [p.get("text") for p in content
+                 if isinstance(p, dict) and isinstance(p.get("text"), str)]
+        return "".join(parts) if parts else None
+    return None
+
+
+def _fold_openai_messages(messages) -> tuple[str, list[dict], str]:
+    """Fold a request `messages` array into (client_system, history, input).
+    Rules (feature doc):
+      * the array must be non-empty and END with a user message carrying
+        text — that message is this turn's input;
+      * client "system" messages concatenate into one supplementary line
+        appended AFTER our own system stack;
+      * earlier user/assistant messages become request history, in order;
+      * other roles (tool/function) and unrepresentable contents are dropped
+        — v1 carries no client-side tool transcripts.
+    ValueError messages are vetted: they never echo request content."""
+    if not isinstance(messages, list) or not messages:
+        raise ValueError("messages must be a non-empty array")
+    for m in messages:
+        if not isinstance(m, dict) or not isinstance(m.get("role"), str):
+            raise ValueError("each message must be an object with a string role")
+    last = messages[-1]
+    if last.get("role") != "user":
+        raise ValueError("messages must end with a user message")
+    text = _openai_content_text(last.get("content"))
+    if text is None or not text.strip():
+        raise ValueError("the final user message must carry non-empty text")
+    sys_parts: list[str] = []
+    history: list[dict] = []
+    for m in messages[:-1]:
+        role = m.get("role")
+        body = _openai_content_text(m.get("content"))
+        if not body:
+            continue
+        if role == "system":
+            if body.strip():
+                sys_parts.append(body.strip())
+        elif role in ("user", "assistant"):
+            history.append({"role": role, "content": body})
+    return "\n\n".join(sys_parts), history, text.strip()
+
+
+def collect_capabilities() -> dict:
+    """GET /api/capabilities — read-only capability catalog (same no-auth
+    contract as /api/status). Every field is a name/count/boolean derived
+    from config presence: no credential value, no token-bearing URL, nothing
+    from secrets.env ever serializes here (the smoke asserts it)."""
+    settings = load_settings()
+    try:
+        cfg = cli.resolve_model_config()
+        model, upstreams_ok = cfg.model, bool(getattr(cfg, "upstreams", ()))
+    except Exception as e:  # noqa: BLE001 — catalog must not fail the console
+        sys.stderr.write(f"capabilities model config failed err={type(e).__name__}\n")
+        model, upstreams_ok = None, False
+    # MCP: server NAMES + count only (config carries urls/env-slot refs —
+    # the parse is ours; the catalog never echoes the raw config).
+    mcp_block: dict = {"count": 0, "names": []}
+    try:
+        servers = mcp.parse_config(mcp.raw_config(REPO))
+        mcp_block = {"count": len(servers), "names": [s.name for s in servers]}
+    except ValueError:
+        mcp_block["count"] = 0
+        mcp_block["names"] = []
+        mcp_block["note"] = "mcp config invalid"  # honest, reason-free
+    # Tools: names + descriptions from the live registry schema.
+    try:
+        fns = [f.get("function", {}) for f in build_registry().schema()]
+        tools = [{"name": f.get("name", ""), "description": f.get("description", "")}
+                 for f in fns if isinstance(f, dict)]
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write(f"capabilities tools failed err={type(e).__name__}\n")
+        tools = []
+    # Skills: frontmatter records (read, never executed) — same source as
+    # the console gallery.
+    skills = [{"name": s.get("name", ""), "description": s.get("desc", "")}
+              for s in collect_skills().get("skills", [])
+              if isinstance(s, dict)]
+    # Channels: enabled/configured NAME lists only — configured() consults
+    # slot presence; no slot value is read into this payload.
+    rows = collect_channels().get("channels")
+    rows = rows if isinstance(rows, list) else []
+    channels = {
+        "all": list(channel_routes()),
+        "enabled": [r.get("name") for r in rows
+                    if isinstance(r, dict) and r.get("enabled")],
+        "configured": [r.get("name") for r in rows
+                       if isinstance(r, dict) and r.get("configured")],
+    }
+    # Hooks: configured events from the settings hooks block (absent block =
+    # empty list — honest before the event-hooks car lands).
+    hooks = settings.get("hooks")
+    events = (sorted(k for k, v in hooks.items()
+                     if isinstance(v, list) and v)
+              if isinstance(hooks, dict) else [])
+    # Cron: registry size from the scheduler state file (absent/corrupt = 0).
+    try:
+        from mycore import scheduler as _scheduler
+        jobs = len(_scheduler.load_jobs(_scheduler.default_jobs_path()))
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write(f"capabilities cron failed err={type(e).__name__}\n")
+        jobs = 0
+    return {
+        "version": VERSION,
+        "mycore": {"model": model, "upstreams_configured": upstreams_ok,
+                   "mcp_servers": mcp_block},
+        "tools": tools,
+        "skills": skills,
+        "channels": channels,
+        "hooks": {"events": events, "count": len(events)},
+        "cron": {"jobs": jobs},
+    }
+
+
 # ----------------------------------------------------------------- server ----
 
 MIME = {
@@ -1670,6 +1823,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(collect_voice())
         if path == "/api/channels":
             return self._json(collect_channels())
+        if path == "/v1/models":
+            return self._handle_openai_models()
+        if path == "/api/capabilities":
+            return self._json(collect_capabilities())
         if path.startswith("/static/i18n/"):
             return self._locale_pack(path[len("/static/i18n/"):])
         if path.startswith("/static/"):
@@ -1696,6 +1853,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_channel_webhook()
         if path == "/api/channels/send":
             return self._handle_channel_send()
+        if path == "/v1/chat/completions":
+            return self._handle_openai_chat()
         return self._json({"error": "not found"}, 404)
 
     # ------------------------------------------------------ evolution legs ---
@@ -1850,6 +2009,8 @@ class Handler(BaseHTTPRequestHandler):
         contract as the TG pipeline), or {action:'clear'} to archive.
 
         Events: meta {model} · delta {text} · tool {name, ok} ·
+                progress {server, tool, message, progress} (MCP progress,
+                message truncated to 200 chars — never long free text) ·
                 done {text, stop, iterations, tool_calls} · error {error}.
         `done` always carries the authoritative final text — deltas are only
         a live preview the browser replaces wholesale.
@@ -1915,8 +2076,23 @@ class Handler(BaseHTTPRequestHandler):
             if alive[0]:
                 alive[0] = self._sse("delta", {"text": piece})
 
+        def on_mcp_progress(payload: dict) -> None:
+            """MCP progress -> one bounded SSE frame (car 4a-M3). Truncate
+            again at this edge: a sink must never forward long free text."""
+            if not alive[0]:
+                return
+            prog = payload.get("progress")
+            alive[0] = self._sse("progress", {
+                "server": str(payload.get("server") or "")[:64],
+                "tool": str(payload.get("tool") or "")[:64],
+                "message": str(payload.get("message") or "")[:200],
+                "progress": (prog if isinstance(prog, (int, float))
+                             and not isinstance(prog, bool) else None)})
+
+        registry = build_registry()
+        registry.bind_progress(on_mcp_progress)
         chat_fn = ChatClient(cfg).chat
-        res = run_turn(messages, chat_fn, build_registry(),
+        res = run_turn(messages, chat_fn, registry,
                        on_event=on_event if alive[0] else None,
                        budget_chars=chat_budget(), on_delta=on_delta)
 
@@ -1931,6 +2107,221 @@ class Handler(BaseHTTPRequestHandler):
         return self._sse("done", {"text": res.text, "stop": res.stop,
                                   "iterations": res.iterations,
                                   "tool_calls": res.tool_calls})
+
+    # ------------------------------------------------- OpenAI v1 gateway ---
+    def _openai_error(self, code: int, message: str, type_: str) -> None:
+        """OpenAI-shaped error body: {error:{message,type,code}}. Callers pass
+        vetted messages only — a secrets slot value never reaches one."""
+        self._json({"error": {"message": message, "type": type_, "code": None}},
+                   code)
+
+    def _require_openai_token(self) -> bool:
+        """Bearer gate for /v1/* on the DEDICATED slot OPENAI_API_TOKEN (own
+        secrets.env line, same contract as CHANNEL_WEBHOOK_SECRET): missing
+        slot = 503 naming the slot, wrong/absent bearer = 401, the value is
+        never echoed to any response, log line, or exception."""
+        token = read_env_slot("OPENAI_API_TOKEN")
+        if not token:
+            self._openai_error(503, "OPENAI_API_TOKEN not configured in secrets.env",
+                               "server_error")
+            return False
+        auth = self.headers.get("Authorization", "")
+        provided = auth[7:] if auth.startswith("Bearer ") else ""
+        if not provided or not hmac.compare_digest(provided.encode(),
+                                                   token.encode()):
+            self._openai_error(401, "unauthorized", "invalid_request_error")
+            return False
+        return True
+
+    def _read_openai_body(self) -> dict | None:
+        """Body read with OpenAI-shaped refusals (None = already answered)."""
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._openai_error(400, "invalid JSON body", "invalid_request_error")
+            return None
+        if length <= 0:
+            self._openai_error(400, "invalid JSON body", "invalid_request_error")
+            return None
+        if length > MAX_BODY:
+            self._openai_error(413, f"body too large (max {MAX_BODY} bytes)",
+                               "invalid_request_error")
+            return None
+        try:
+            doc = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            self._openai_error(400, "invalid JSON body", "invalid_request_error")
+            return None
+        if not isinstance(doc, dict):
+            self._openai_error(400, "body must be a JSON object",
+                               "invalid_request_error")
+            return None
+        return doc
+
+    @staticmethod
+    def _openai_prepare(client_system: str, history: list[dict], text: str):
+        """Build the one-turn message list: OUR system stack first (same
+        build_system_stack as /api/chat), then the client system line, the
+        folded request history, and this turn's user input. Stateless: no
+        Session file is opened or written on this path."""
+        cfg = cli.resolve_model_config()
+        messages = build_system_stack(context_dirs=resolve_context_dirs())
+        if client_system:
+            messages.append({"role": "system", "content": client_system})
+        messages.extend(history)
+        messages.append({"role": "user", "content": text})
+        prompt_chars = sum(len(str(m.get("content") or "")) for m in messages)
+        return cfg, messages, prompt_chars
+
+    @staticmethod
+    def _openai_run(cfg, messages, on_delta=None):
+        """One turn over the shared agent loop — same ChatClient, same tool
+        registry, same compaction budget as /api/chat. run_turn never raises
+        for model/tool failures (model_error arrives via TurnResult.stop)."""
+        return run_turn(messages, ChatClient(cfg).chat, build_registry(),
+                        budget_chars=chat_budget(), on_delta=on_delta)
+
+    def _handle_openai_models(self) -> None:
+        """GET /v1/models — one entry: the actually configured model. `created`
+        is the product build time (VERSION mtime), not a provenance claim
+        about any upstream model."""
+        if not self._require_openai_token():
+            return
+        try:
+            model = cli.resolve_model_config().model
+        except Exception as e:  # noqa: BLE001 — internals stay server-side
+            sys.stderr.write(f"v1 models config failed err={type(e).__name__}\n")
+            return self._openai_error(502, "internal", "server_error")
+        try:
+            created = int((REPO / "VERSION").stat().st_mtime)
+        except OSError:
+            created = 0
+        self._json({"object": "list",
+                    "data": [{"id": model, "object": "model",
+                              "created": created, "owned_by": "local"}]})
+
+    def _handle_openai_chat(self) -> None:
+        """POST /v1/chat/completions — OpenAI chat shape over our agent loop.
+        Stateless gateway: the request's messages fold into ONE turn (rules in
+        _fold_openai_messages) and nothing persists to any Session file.
+        Accepted-and-ignored request fields (feature doc): client `tools` are
+        never executed (our agent uses its own registry), the `model` id is
+        echoed back as the configured model, sampling params are unused.
+        Usage numbers are the declared chars/4 approximation — no tokenizer,
+        never claimed exact."""
+        if not self._require_openai_token():
+            return
+        doc = self._read_openai_body()
+        if doc is None:
+            return
+        try:
+            client_system, history, text = _fold_openai_messages(doc.get("messages"))
+        except ValueError as e:
+            return self._openai_error(400, str(e), "invalid_request_error")
+        if len(text) > CHAT_MAX_CHARS:
+            return self._openai_error(400,
+                                      f"text too long (max {CHAT_MAX_CHARS} chars)",
+                                      "invalid_request_error")
+        try:
+            cfg, messages, prompt_chars = self._openai_prepare(client_system,
+                                                               history, text)
+        except Exception as e:  # noqa: BLE001 — internals stay server-side
+            sys.stderr.write(f"v1 turn setup failed err={type(e).__name__}\n")
+            return self._openai_error(502, "internal", "server_error")
+        if doc.get("stream") is True:
+            return self._v1_stream(cfg, messages, prompt_chars,
+                                   doc.get("stream_options"))
+        try:
+            res = self._openai_run(cfg, messages)
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(f"v1 turn failed err={type(e).__name__}\n")
+            return self._openai_error(502, "internal", "server_error")
+        if res.stop == "model_error":
+            return self._openai_error(502, res.text or "model call failed",
+                                      "server_error")
+        created = int(time.time())
+        cid = "chatcmpl-" + hashlib.sha1(
+            f"{created}:{prompt_chars}".encode()).hexdigest()[:24]
+        self._json({
+            "id": cid,
+            "object": "chat.completion",
+            "created": created,
+            "model": cfg.model,
+            "choices": [{"index": 0,
+                         "message": {"role": "assistant", "content": res.text},
+                         "finish_reason": "stop" if res.stop == "final"
+                                          else "length"}],
+            "usage": _usage_block(prompt_chars, len(res.text)),
+        })
+
+    def _v1_data(self, payload: str) -> bool:
+        """One OpenAI SSE `data:` frame (no event: lines — that is the /v1
+        dialect). False = the client went away."""
+        try:
+            self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+            self.wfile.flush()
+            return True
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return False
+
+    def _v1_stream(self, cfg, messages, prompt_chars: int,
+                   stream_options) -> None:
+        """`\"stream\": true` leg — chat.completion.chunk frames: a role
+        chunk, content chunks from the live preview, a finish_reason chunk
+        (then an optional choices=[] usage chunk when
+        stream_options.include_usage), then `data: [DONE]`. A model failure
+        surfaces as one {"error": …} frame — never an exception, never a
+        raise through the stream."""
+        self._sse_start()
+        created = int(time.time())
+        cid = "chatcmpl-" + hashlib.sha1(
+            f"{created}:{len(messages)}".encode()).hexdigest()[:24]
+        include_usage = (isinstance(stream_options, dict)
+                         and bool(stream_options.get("include_usage")))
+        alive = [True]
+
+        def emit(choices, usage=None) -> bool:
+            if not alive[0]:
+                return False
+            frame = {"id": cid, "object": "chat.completion.chunk",
+                     "created": created, "model": cfg.model,
+                     "choices": choices}
+            if usage is not None:
+                frame["usage"] = usage
+            alive[0] = self._v1_data(json.dumps(frame, ensure_ascii=False))
+            return alive[0]
+
+        emit([{"index": 0, "delta": {"role": "assistant", "content": ""},
+               "finish_reason": None}])
+
+        def on_delta(piece: str) -> None:
+            if alive[0]:
+                emit([{"index": 0, "delta": {"content": piece},
+                       "finish_reason": None}])
+
+        try:
+            res = self._openai_run(cfg, messages, on_delta=on_delta)
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(f"v1 stream turn failed err={type(e).__name__}\n")
+            if alive[0]:
+                self._v1_data(json.dumps({"error": {"message": "internal",
+                                                     "type": "server_error",
+                                                     "code": None}}))
+                self._v1_data("[DONE]")
+            return
+        if not alive[0]:
+            return  # client disconnected; the turn just finishes server-side
+        if res.stop == "model_error":
+            self._v1_data(json.dumps({"error": {
+                "message": res.text or "model call failed",
+                "type": "server_error", "code": None}}))
+            self._v1_data("[DONE]")
+            return
+        emit([{"index": 0, "delta": {},
+               "finish_reason": "stop" if res.stop == "final" else "length"}])
+        if include_usage:
+            emit([], usage=_usage_block(prompt_chars, len(res.text)))
+        self._v1_data("[DONE]")
 
     def _require_webhook_secret(self) -> bool:
         """Bearer gate for the inbound webhook route: the secret lives in its

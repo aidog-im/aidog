@@ -32,6 +32,7 @@ REPO = Path(__file__).resolve().parent.parent
 
 DEFAULT_ALLOWED_ROOTS = (str(REPO), tempfile.gettempdir())
 MAX_RESULT_CHARS = 24000          # tool output cap (context budget discipline)
+COMPRESS_THRESHOLD = 6000         # results above this compress first (car 4a-M3)
 BASH_TIMEOUT = 120
 
 
@@ -56,6 +57,9 @@ class ToolRegistry:
         # turn entry (service turns run sequentially), read during dispatch.
         self._turn_chat: Callable[..., dict] | None = None
         self._turn_budget: int | None = None
+        # Progress sink (car 4a-M3): web binds an SSE emitter per turn;
+        # MCP tool handlers read it during their own call window only.
+        self._progress_sink: Callable[[dict], None] | None = None
 
     def register(self, name: str, description: str, parameters: dict,
                  handler: Callable[..., str]) -> None:
@@ -82,6 +86,17 @@ class ToolRegistry:
     def turn_binding(self) -> tuple[Callable[..., dict] | None, int | None]:
         """(chat, budget) of the active turn — None/None outside run_turn."""
         return self._turn_chat, self._turn_budget
+
+    def bind_progress(self, fn: Callable[[dict], None] | None) -> None:
+        """Bind the progress sink for MCP tool calls (car 4a-M3, mirrors
+        bind_turn). fn(payload) receives {server, tool, message, progress}
+        dicts; None unbinds. TG never binds one (single-send model, see
+        docs/features/mcp.md)."""
+        self._progress_sink = fn
+
+    def progress_sink(self) -> Callable[[dict], None] | None:
+        """Currently bound progress sink (None = not bound)."""
+        return self._progress_sink
 
     def names(self) -> list[str]:
         return sorted(self._tools)
@@ -111,9 +126,7 @@ class ToolRegistry:
             return f"ERROR: {type(e).__name__} in '{name}'"
         if not isinstance(result, str):
             result = str(result)
-        if len(result) > MAX_RESULT_CHARS:
-            result = result[:MAX_RESULT_CHARS] + f"\n... [truncated at {MAX_RESULT_CHARS} chars]"
-        return result
+        return finalize_result(result)
 
 
 # ------------------------------------------------------------ path safety ---
@@ -334,6 +347,71 @@ def _http_fetch(url: str, timeout: int = 20,
     return text if len(text) <= max_chars else text[:max_chars] + "\n... [truncated]"
 
 
+def compress_output(text: str) -> str:
+    """Whitespace-preserving compression pass (car 4a-M3), applied to tool
+    results above COMPRESS_THRESHOLD before the hard truncation cap:
+
+      * strip trailing whitespace on every line;
+      * runs of 3+ consecutive blank lines collapse to one blank line;
+      * a run of k identical non-empty lines renders as the first line plus
+        `... [×N identical lines]` where N = k-1 (the collapsed duplicates);
+        marker lines (starting `... [`) never fold — the pass is idempotent.
+
+    Purely lossless-in-meaning whitespace/echo folding: no content line is
+    invented or dropped beyond exact duplicates."""
+    lines = [ln.rstrip() for ln in text.split("\n")]
+    # 1) blank runs: three or more consecutive blank lines -> one
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        if lines[i]:
+            out.append(lines[i])
+            i += 1
+            continue
+        j = i
+        while j < len(lines) and not lines[j]:
+            j += 1
+        run = j - i
+        out.extend([""] * (1 if run >= 3 else run))
+        i = j
+    # 2) identical-line runs (markers excluded so re-runs stay stable)
+    folded: list[str] = []
+    i = 0
+    while i < len(out):
+        line = out[i]
+        if line and not line.startswith("... ["):
+            j = i
+            while j + 1 < len(out) and out[j + 1] == line:
+                j += 1
+            if j > i:
+                folded.append(line)
+                folded.append(f"... [×{j - i} identical lines]")
+                i = j + 1
+                continue
+        folded.append(line)
+        i += 1
+    return "\n".join(folded)
+
+
+def finalize_result(result: str) -> str:
+    """Post-process one tool result (car 4a-M3): compress first when above
+    COMPRESS_THRESHOLD — with a single honest English note
+    `[compressed {before}→{after} chars]`, never silently — then apply the
+    hard MAX_RESULT_CHARS truncation unchanged. When truncation fires, both
+    notes are preserved (compression note first, truncation marker last)."""
+    notes = ""
+    if len(result) > COMPRESS_THRESHOLD:
+        compact = compress_output(result)
+        if len(compact) < len(result):
+            notes += (f"\n... [compressed {len(result)}→{len(compact)} "
+                      "chars]")
+            result = compact
+    if len(result) > MAX_RESULT_CHARS:
+        return (result[:MAX_RESULT_CHARS] + notes
+                + f"\n... [truncated at {MAX_RESULT_CHARS} chars]")
+    return result + notes
+
+
 def _skill_route(query: str, topn: int = 3) -> str:
     """Deterministic skill pre-router (our P4 vendored lib/skill_route.py).
 
@@ -529,11 +607,25 @@ def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
                "tools by default (read_file, grep, glob, http_fetch, "
                "skill_route); name extra tools in `tools` to grant them "
                "explicitly. `delegate` and `execute_code` can never be granted "
-               "to a sub-agent. Returns one labelled block per task.",
+               "to a sub-agent. Each tasks item is a string, or an object "
+               "{task, model} to run that one sub-agent on a different model "
+               "— model must be listed in settings mycore.models (an unknown "
+               "or unconfigured list fails that task honestly). Returns one "
+               "labelled block per task.",
                {"type": "object", "properties": {
-                   "tasks": {"type": "array", "items": _STR,
+                   "tasks": {"type": "array",
+                             "items": {
+                                 "anyOf": [
+                                     {"type": "string"},
+                                     {"type": "object",
+                                      "properties": {
+                                          "task": _STR, "model": _STR},
+                                      "required": ["task"]}]},
                              "minItems": 1, "maxItems": 3,
-                             "description": "1-3 independent task descriptions"},
+                             "description": "1-3 independent task "
+                                            "descriptions (plain strings, "
+                                            "or {task, model} to override "
+                                            "the model for that task)"},
                    "tools": {"type": "array", "items": _STR,
                              "description": "extra tool names to grant beyond "
                                             "the read-only default"}},
