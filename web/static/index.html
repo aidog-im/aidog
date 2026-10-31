@@ -645,7 +645,11 @@
          fetched server-side by GET /api/discussions (anonymous, 600s cache),
          rendered with an honest unavailable/empty state while the repo is
          private. Every row link and the header button open GitHub in a new
-         tab; nothing here is ever seeded or faked. -->
+         tab; nothing here is ever seeded or faked. In-app posting (0.5.54):
+         NEW DISCUSSION opens the composer (categories come from
+         GET /api/discussions/categories, which needs the community token —
+         without it the composer shows the setup hint, never a dead form) and
+         a row expands into its thread with a reply box. -->
     <section class="view" id="view-community" data-view="community">
       <div class="view-head">
         <div class="view-titles">
@@ -655,11 +659,42 @@
         <div class="view-actions">
           <button class="btn" id="commRefresh" type="button"
                   data-i18n="comm.refresh">REFRESH</button>
-          <a class="btn primary" id="commOpen"
+          <button class="btn primary" id="commNew" type="button"
+                  data-i18n="comm.new">NEW DISCUSSION</button>
+          <a class="btn" id="commOpen"
              href="https://github.com/aidog-im/aidog/discussions/new"
-             target="_blank" rel="noopener" data-i18n="comm.open">OPEN A DISCUSSION</a>
+             target="_blank" rel="noopener" data-i18n="comm.open">OPEN ON GITHUB</a>
         </div>
       </div>
+      <!-- in-app composer: hidden until NEW DISCUSSION (or an empty-state
+           start button) opens it; the category select is filled from the
+           server's GraphQL read, never seeded here. -->
+      <section class="card" id="commComposer" hidden>
+        <h2 data-i18n="comm.composeTitle">START A DISCUSSION</h2>
+        <div class="ctl-row">
+          <label for="commTitle" data-i18n="comm.titleLabel">Title</label>
+          <input type="text" id="commTitle" maxlength="120" autocomplete="off"
+                 data-i18n-ph="comm.titlePh" placeholder="what is this about?">
+        </div>
+        <div class="ctl-row">
+          <label for="commNewCat" data-i18n="comm.catLabel">Category</label>
+          <select id="commNewCat"></select>
+        </div>
+        <div class="ctl-row">
+          <label for="commBody" data-i18n="comm.bodyLabel">Message</label>
+          <textarea id="commBody" rows="6" maxlength="2000"
+                    data-i18n-ph="comm.bodyPh"
+                    placeholder="write the discussion body (markdown)"></textarea>
+        </div>
+        <div class="ctl-actions">
+          <button class="btn primary" id="commPost" type="button"
+                  data-i18n="comm.post">POST</button>
+          <button class="btn" id="commCancel" type="button"
+                  data-i18n="comm.cancel">Cancel</button>
+          <span class="save-state" id="commPostMsg" role="status"></span>
+        </div>
+        <div class="stat-note" id="commSetupHint" hidden></div>
+      </section>
       <section class="card">
         <h2><span data-i18n="sec.community">DISCUSSIONS</span>
             <span class="chat-badge" id="commBadge">–</span></h2>
@@ -1038,6 +1073,13 @@
         <div class="card">
           <h2 data-i18n="sec.creds">CREDENTIALS</h2>
           <div class="stat-note" id="credTokenHint" hidden></div>
+          <!-- 0.5.54: one button checks every slot (shape rules everywhere,
+               live probes where the provider can prove usability). -->
+          <div class="ctl-actions" style="margin-top:8px">
+            <button class="btn" id="credVerifyAll" type="button"
+                    data-i18n="cred.verifyAll">VERIFY ALL</button>
+            <span class="save-state" id="credVerifyMsg" role="status"></span>
+          </div>
           <div id="credList"></div>
         </div>
 

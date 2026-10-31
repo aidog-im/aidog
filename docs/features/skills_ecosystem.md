@@ -23,7 +23,7 @@ Companion pages: [capabilities.md](capabilities.md)（能力目录契约）、
 
 ```
 第 1 层  本仓 overlay/skills/           随产品发行的核心技能（5 个，全过 lint + skill_route 预筛）
-第 2 层  独立 skills 仓（私有 GitHub）   官方推荐技能的唯一真值源：catalog + 分类目录 + 双闸 + 版本
+第 2 层  独立 skills 仓（公开 GitHub）   官方推荐技能的唯一真值源：catalog + 分类目录 + 双闸 + 版本
 第 3 层  官网 aidog.im 目录页            静态 JSON 目录：用户可浏览，产品读同一份 JSON
 ```
 
@@ -41,7 +41,7 @@ aidog-skills/
 ├── tools/lint.py                # 机器闸
 ├── REVIEW.md                    # 人工闸（deny-by-default 清单）
 ├── THIRD_PARTY.md               # 上游复刻署名清单
-└── README.md                    # 英文：私有仓声明 + 审核流程 + 同步机制
+└── README.md                    # 英文：公开仓声明 + 审核流程 + 同步机制
 ```
 
 **catalog 条目字段恰为设计书 §4.4 的七个**（不自造）：

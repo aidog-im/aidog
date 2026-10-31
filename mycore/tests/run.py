@@ -60,7 +60,9 @@ BROWSER_TOOLS = frozenset({
 
 
 def expected_tool_names() -> frozenset[str]:
-    """Core 11 + generate_image (always, car 4c) + the six browser_* tools
+    """Core 11 + generate_image (always, car 4c) + community_post (always,
+    0.5.54 in-app community car — write side answers an honest ERROR without
+    the slot, same rationale as generate_image) + the six browser_* tools
     IFF a browser binary is discoverable (car 4b capability-honest
     registration) + connector_search IFF connectors.status() reports at
     least one credential slot (car 4c, mirrors the registration gate) +
@@ -72,7 +74,8 @@ def expected_tool_names() -> frozenset[str]:
     with or without connector slots — and with AIDOG_BROWSER_BIN overridden
     to a dead path — so every count assertion derives from this, never a
     literal."""
-    out = set(CORE_TOOLS) | {"generate_image", "exchange_markets"}
+    out = set(CORE_TOOLS) | {"generate_image", "exchange_markets",
+                             "community_post"}
     try:
         from mycore import browser as _br
         if _br.available():
@@ -8412,6 +8415,383 @@ def test_settings_models_budget() -> None:
         shutil.rmtree(prof_root, ignore_errors=True)
 
 
+def test_community() -> None:
+    """0.5.54 in-app community car — mycore.community: the ONE shared
+    GitHub Discussions channel behind both the console POST routes and the
+    community_post tool. Injected transport everywhere (zero network, zero
+    credentials). Asserts the four owner contracts: a single dedicated slot,
+    the shared 30s write interval + length caps, category-word failures with
+    ZERO credential echo, and tokenless reads."""
+    from mycore import community as co
+
+    SENTINEL = "ghp_COMMUNITY-SENTINEL-0123456789abcdef"
+    env_keys = ("AIDOG_COMMUNITY_PAT", "AIDOG_GH_API_URL",
+                "AIDOG_COMMUNITY_REPO")
+    saved = {k: os.environ.get(k) for k in env_keys}
+    co.reset_for_tests()
+    real_transport = co._transport
+    seen: dict = {"n": 0, "calls": []}
+    script: dict = {"fn": None}
+
+    def fake(url, method="GET", headers=None, payload=None, timeout=None):
+        seen["n"] += 1
+        seen["calls"].append((method, url))
+        # the module ships the JSON body already encoded (bytes) — decode
+        # once here so every scripted branch can match on the query text
+        if isinstance(payload, (bytes, bytearray)):
+            try:
+                payload = json.loads(payload.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                payload = None
+        fn = script["fn"]
+        if fn is None:
+            raise AssertionError("no scripted response")
+        return fn(url, method, headers or {}, payload)
+
+    def set_slot(value):
+        if value is None:
+            os.environ.pop("AIDOG_COMMUNITY_PAT", None)
+        else:
+            os.environ["AIDOG_COMMUNITY_PAT"] = value
+
+    def boom(url, method="GET", headers=None, payload=None, timeout=None):
+        raise AssertionError("transport must not be reached")
+
+    try:
+        for k in env_keys:
+            os.environ.pop(k, None)
+        co.set_transport(fake)
+
+        # --- the one slot: absent -> empty string, every write refused -----
+        check("community: no slot -> read_token empty",
+              co.read_token() == "", repr(co.read_token()))
+        set_slot(SENTINEL)
+        check("community: env slot wins and round-trips",
+              co.read_token() == SENTINEL)
+
+        # --- validation fires BEFORE any transport (no network on bad input)
+        co.set_transport(boom)
+        for bad_title, why in (("", "empty"), ("x" * 121, "too long")):
+            try:
+                co.create(bad_title, "body", "ideas")
+                check(f"community: title {why} -> bad_input, no transport",
+                      False)
+            except co.CommunityError as e:
+                check(f"community: title {why} -> bad_input, no transport",
+                      e.reason == "bad_input", f"{e.reason}: {e.detail}")
+        for bad_body, why in (("", "empty"), ("y" * 2001, "too long"),
+                              ("hi\x07there", "control char")):
+            try:
+                co.create("ok title", bad_body, "ideas")
+                check(f"community: body {why} -> bad_input, no transport",
+                      False)
+            except co.CommunityError as e:
+                check(f"community: body {why} -> bad_input, no transport",
+                      e.reason == "bad_input", f"{e.reason}: {e.detail}")
+        try:
+            co.create("ok title", "ok body", "")
+            check("community: blank category -> bad_input, no transport", False)
+        except co.CommunityError as e:
+            check("community: blank category -> bad_input, no transport",
+                  e.reason == "bad_input", e.reason)
+        try:
+            co.replies("abc")
+            check("community: non-numeric replies number -> bad_input", False)
+        except co.CommunityError as e:
+            check("community: non-numeric replies number -> bad_input",
+                  e.reason == "bad_input", e.reason)
+
+        # --- categories: no slot -> the honest no_token design state -------
+        co.set_transport(fake)
+        set_slot(None)
+        try:
+            co.categories(force=True)
+            check("community: categories without slot -> no_token", False)
+        except co.CommunityError as e:
+            check("community: categories without slot -> no_token",
+                  e.reason == "no_token", e.reason)
+
+        # --- categories: GraphQL shape + 10min cache (one call, not two) ---
+        set_slot(SENTINEL)
+        seen["n"] = 0
+        script["fn"] = lambda u, m, h, p: (
+            200, json.dumps({"data": {"repository": {"discussionCategories":
+                {"nodes": [{"id": "D_1", "name": "Ideas", "slug": "ideas"},
+                           {"id": "D_2", "name": "Q&A", "slug": "q-a"}]}}}}))
+        cats = co.categories(force=True)
+        check("community: categories map id/name/slug",
+              [c["slug"] for c in cats] == ["ideas", "q-a"], str(cats))
+        check("community: category read carries the Authorization header",
+              seen["n"] == 1 and "POST" in seen["calls"][0][0]
+              and "/graphql" in seen["calls"][0][1], str(seen["calls"]))
+        cats2 = co.categories()          # cached window: no second call
+        check("community: categories cache serves the second read",
+              seen["n"] == 1 and cats2 == cats, f"n={seen['n']}")
+
+        # --- create: repo node id -> mutation -> {number, url} -------------
+        seen["n"] = 0
+        co.reset_for_tests()
+        co.set_transport(fake)
+        set_slot(SENTINEL)
+        script["fn"] = lambda u, m, h, p: (
+            200, json.dumps({"data": {"repository": {"discussionCategories":
+                {"nodes": [{"id": "D_1", "name": "Ideas", "slug": "ideas"}]}}}}))
+        calls = []
+
+        def create_script(u, m, h, p):
+            calls.append((m, u, p))
+            if u.endswith("/graphql") and isinstance(p, dict) \
+                    and "createDiscussion" in str(p.get("query", "")):
+                return 200, json.dumps({"data": {"createDiscussion":
+                    {"discussion": {"number": 42,
+                                    "url": "https://github.com/aidog-im/aidog/discussions/42"}}}})
+            if "/repos/" in u and u.endswith("/aidog"):
+                return 200, json.dumps({"node_id": "R_deadbeef"})
+            if u.endswith("/graphql"):     # category lookup first
+                return 200, json.dumps({"data": {"repository":
+                    {"discussionCategories": {"nodes": [
+                        {"id": "D_1", "name": "Ideas", "slug": "ideas"}]}}}})
+            raise AssertionError(f"unexpected url {u}")
+        script["fn"] = create_script
+        res = co.create("Ship it", "body text", "ideas")
+        check("community: create -> number + url",
+              res == {"number": 42,
+                      "url": "https://github.com/aidog-im/aidog/discussions/42"},
+              str(res))
+        mutation = [c for c in calls if isinstance(c[2], dict)
+                    and "createDiscussion" in str(c[2].get("query", ""))]
+        check("community: create mutation carries rid/cid/title/body vars",
+              bool(mutation)
+              and mutation[0][2]["variables"] == {
+                  "rid": "R_deadbeef", "cid": "D_1",
+                  "title": "Ship it", "body": "body text"},
+              str(mutation[:1]))
+        check("community: category accepts a slug and resolves to its node id",
+              any(c[2]["variables"].get("cid") == "D_1"
+                  for c in mutation if isinstance(c[2], dict)), "cid missing")
+
+        # --- shared 30s write interval (persisted: crosses both processes) --
+        check("community: right after a write the window is closed",
+              co.seconds_until_writable() > 20,
+              str(co.seconds_until_writable()))
+        busy_detail = ""
+        try:
+            co.create("Again", "body", "ideas")
+            check("community: second write inside 30s -> busy", False)
+        except co.CommunityError as e:
+            busy_detail = e.detail or ""
+            check("community: second write inside 30s -> busy",
+                  e.reason == "busy", f"{e.reason}: {e.detail}")
+        check("community: busy detail carries a retry countdown, no URL",
+              bool(re.search(r"wait \d+s", busy_detail))
+              and "http" not in busy_detail.lower(), busy_detail)
+
+        # --- comment: resolve the discussion node id, then mutate ----------
+        co.reset_for_tests()
+        co.set_transport(fake)
+        set_slot(SENTINEL)
+        ccalls = []
+
+        def comment_script(u, m, h, p):
+            ccalls.append((m, u, p))
+            if isinstance(p, dict) and "addDiscussionComment" in str(p.get("query", "")):
+                return 200, json.dumps({"data": {"addDiscussionComment":
+                    {"comment": {"id": "DC_9"}}}})
+            if isinstance(p, dict) and "discussion(number:" in str(p.get("query", "")):
+                return 200, json.dumps({"data": {"repository":
+                    {"discussion": {"id": "D_kw"}}}})
+            raise AssertionError(f"unexpected url {u}")
+        script["fn"] = comment_script
+        cres = co.comment(7, "a reply")
+        check("community: comment -> number + comment_id",
+              cres == {"number": 7, "comment_id": "DC_9"}, str(cres))
+        mut = [c for c in ccalls if isinstance(c[2], dict)
+               and "addDiscussionComment" in str(c[2].get("query", ""))]
+        check("community: comment mutation uses the resolved discussion id",
+              bool(mut) and mut[0][2]["variables"]["id"] == "D_kw"
+              and mut[0][2]["variables"]["body"] == "a reply",
+              str(mut[:1]))
+
+        # --- missing discussion -> not_found (never a raw upstream string) -
+        co.reset_for_tests()
+        co.set_transport(fake)
+        set_slot(SENTINEL)
+        script["fn"] = lambda u, m, h, p: (
+            200, json.dumps({"data": {"repository": {"discussion": None}}}))
+        try:
+            co.comment(40444, "hello")
+            check("community: unknown discussion -> not_found", False)
+        except co.CommunityError as e:
+            check("community: unknown discussion -> not_found",
+                  e.reason == "not_found", e.reason)
+
+        # --- status classification: one word per failure class -------------
+        co.reset_for_tests()
+        co.set_transport(fake)
+        set_slot(SENTINEL)
+        for status, body, want in (
+                (401, '{"message":"Bad credentials"}', "no_scope"),
+                (403, '{"message":"Resource not accessible"}', "no_scope"),
+                (403, '{"message":"API rate limit exceeded"}', "rate_limited"),
+                (404, '{"message":"Not Found"}', "not_found"),
+                (429, '{"message":"slow down"}', "rate_limited"),
+                (400, '{"message":"Validation Failed"}', "bad_input"),
+                (502, '{"message":"bad gateway"}', "upstream_error")):
+            script["fn"] = (lambda s, b: (lambda u, m, h, p: (s, b)))(status, body)
+            try:
+                co._request("https://api.github.com/graphql", "POST",
+                            SENTINEL, {"query": "q"})
+                check(f"community: HTTP {status} -> {want}", False)
+            except co.CommunityError as e:
+                check(f"community: HTTP {status} -> {want}", e.reason == want,
+                      f"{e.reason} ({e.detail})")
+
+        # --- transport failure -> network, never a traceback --------------
+        def net_boom(url, method="GET", headers=None, payload=None, timeout=None):
+            raise OSError("name or service not known")
+        co.set_transport(net_boom)
+        try:
+            co._request("https://api.github.com/graphql", "POST", SENTINEL, {})
+            check("community: transport failure -> network", False)
+        except co.CommunityError as e:
+            check("community: transport failure -> network",
+                  e.reason == "network" and "Traceback" not in str(e), e.reason)
+
+        # --- verify_token: the slot health check the console buttons use ----
+        co.reset_for_tests()
+        co.set_transport(fake)
+        set_slot(None)
+        v = co.verify_token()
+        check("community: verify without slot -> honest no_token",
+              v.get("ok") is False and v.get("reason") == "no_token", str(v))
+        set_slot(SENTINEL)
+        script["fn"] = lambda u, m, h, p: (401, '{"message":"Bad credentials"}')
+        v = co.verify_token()
+        check("community: verify rejects a dead token -> no_scope",
+              v.get("ok") is False and v.get("reason") == "no_scope", str(v))
+        script["fn"] = lambda u, m, h, p: (
+            200, json.dumps({"data": {"repository": {"discussionCategories":
+                {"totalCount": 6}}}}) if u.endswith("/graphql")
+            else json.dumps({"login": "aidog-bot"}))
+        v = co.verify_token()
+        check("community: verify ok -> login + scope, no token anywhere",
+              v.get("ok") is True and v.get("login") == "aidog-bot"
+              and SENTINEL not in json.dumps(v), str(v))
+
+        # --- ZERO CREDENTIAL ECHO across every failure surface -------------
+        co.reset_for_tests()
+        co.set_transport(fake)
+        set_slot(SENTINEL)
+        echoes = []
+        for fn in (lambda: co.create("t", "b", "nope"),
+                   lambda: co.comment(1, "b"),
+                   lambda: co.categories(force=True),
+                   lambda: co.replies(1),
+                   lambda: co.verify_token()):
+            script["fn"] = lambda u, m, h, p: (403, '{"message":"forbidden"}')
+            try:
+                fn()
+            except co.CommunityError as e:
+                echoes.append(json.dumps({"reason": e.reason,
+                                          "detail": e.detail}))
+            except Exception as e:  # noqa: BLE001
+                echoes.append(f"{type(e).__name__}: {e}")
+        joined = "|".join(echoes)
+        check("community: zero credential echo across every failure surface",
+              bool(echoes) and SENTINEL not in joined
+              and "ghp_" not in joined and "Bearer" not in joined, joined[:200])
+        check("community: Authorization header present only on live calls",
+              SENTINEL not in json.dumps(seen["calls"].__str__()), "echo")
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        co.set_transport(real_transport)
+        co.reset_for_tests()
+
+
+def test_community_tool() -> None:
+    """0.5.54: the community_post tool — always registered, an honest ERROR
+    line without the slot, direct posting (owner decision) behind the SAME
+    mycore.community limiter, and an action enum the model cannot misuse."""
+    from mycore import community as co
+    from mycore.tools import build_registry
+
+    SENTINEL = "ghp_TOOL-SENTINEL-fedcba9876543210"
+    env_keys = ("AIDOG_COMMUNITY_PAT", "AIDOG_GH_API_URL")
+    saved = {k: os.environ.get(k) for k in env_keys}
+    co.reset_for_tests()
+    tmp = Path(tempfile.mkdtemp(prefix="comm_tool_"))
+    try:
+        reg = build_registry(allowed_roots=[str(tmp)])
+        check("community tool: always registered (no slot gate at build time)",
+              "community_post" in reg.names(), str(reg.names()))
+        schema = {t["function"]["name"]: t["function"]
+                  for t in reg.schema()}["community_post"]
+        check("community tool: schema requires action+body, enums post/reply",
+              schema["parameters"].get("required") == ["action", "body"]
+              and schema["parameters"]["properties"]["action"]["enum"]
+              == ["post", "reply"], str(schema["parameters"]))
+
+        os.environ.pop("AIDOG_COMMUNITY_PAT", None)
+        out = reg.dispatch("community_post",
+                           {"action": "post", "title": "t", "body": "b",
+                            "category": "ideas"})
+        check("community tool: no slot -> honest ERROR naming nothing secret",
+              out.startswith("ERROR:") and "community token" in out
+              and "ghp_" not in out, out[:120])
+        out = reg.dispatch("community_post", {"action": "launch", "body": "b"})
+        check("community tool: unknown action -> ERROR, no transport",
+              out.startswith("ERROR:") and "post" in out, out[:120])
+
+        os.environ["AIDOG_COMMUNITY_PAT"] = SENTINEL
+        co.reset_for_tests()
+        seen_urls = []
+
+        def fake(url, method="GET", headers=None, payload=None, timeout=None):
+            seen_urls.append(url)
+            if isinstance(payload, (bytes, bytearray)):
+                try:
+                    payload = json.loads(payload.decode("utf-8"))
+                except (ValueError, UnicodeDecodeError):
+                    payload = None
+            if isinstance(payload, dict) and "createDiscussion" in str(payload.get("query", "")):
+                return 200, json.dumps({"data": {"createDiscussion":
+                    {"discussion": {"number": 5,
+                                    "url": "https://github.com/aidog-im/aidog/discussions/5"}}}})
+            if isinstance(payload, dict) and "discussionCategories" in str(payload.get("query", "")):
+                return 200, json.dumps({"data": {"repository":
+                    {"discussionCategories": {"nodes": [
+                        {"id": "D_1", "name": "Ideas", "slug": "ideas"}]}}}})
+            if "/repos/" in url:
+                return 200, json.dumps({"node_id": "R_1"})
+            return 200, "{}"
+        co.set_transport(fake)
+        out = reg.dispatch("community_post",
+                           {"action": "post", "title": "Hello",
+                            "body": "world", "category": "ideas"})
+        check("community tool: post returns the discussion url line",
+              out.startswith("posted: https://github.com/")
+              and "#5" in out, out[:160])
+        out2 = reg.dispatch("community_post",
+                            {"action": "post", "title": "Again",
+                             "body": "world", "category": "ideas"})
+        check("community tool: second post inside the window -> ERROR busy",
+              out2.startswith("ERROR:") and "wait" in out2, out2[:160])
+        check("community tool: no token in any dispatch output",
+              SENTINEL not in (out + out2), "sentinel leaked")
+    finally:
+        co.reset_for_tests()
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_tools_toggle() -> None:
     """tools_off: settings disables a tool, env overrides settings, empty
     config = full-registry parity, unknown env name = ignored (never fatal)."""
@@ -8428,7 +8808,7 @@ def test_tools_toggle() -> None:
                "browser_close", "exchange_markets", "exchange_portfolio",
                "exchange_orders", "exchange_prepare_order",
                "exchange_execute_order", "exchange_plans"} <= KNOWN_TOOL_NAMES
-              and len(KNOWN_TOOL_NAMES) == 25,
+              and len(KNOWN_TOOL_NAMES) == 26,
               str(sorted(KNOWN_TOOL_NAMES)))
 
         # 1) settings dict path disables a core tool
@@ -12028,6 +12408,8 @@ def main() -> int:
     test_model()
     test_registry_and_tools()
     test_tools_toggle()
+    test_community()
+    test_community_tool()
     test_envslots()
     test_model_key_slots()
     test_settings_models_budget()

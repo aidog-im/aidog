@@ -53,9 +53,9 @@ branch. All of these are refused with a `400` and an exact
 
 Only the offending **tool name** is ever echoed — never a value, never
 anything secret (the field holds names only, so there is no secret to leak).
-The catalog lives in `mycore/tools.py::KNOWN_TOOL_NAMES` (**25 names** = 11
-core + `generate_image` + `connector_search` + the six `browser_*` + the six
-`exchange_*`);
+The catalog lives in `mycore/tools.py::KNOWN_TOOL_NAMES` (**26 names** = 11
+core + `generate_image` + `connector_search` + `community_post` + the six
+`browser_*` + the six `exchange_*`);
 capability-honest registration (browser binary / connector slots / CEX
 credential slots — see [exchanges.md](exchanges.md)) still
 governs whether a *known* tool actually appears — the switch can only remove.

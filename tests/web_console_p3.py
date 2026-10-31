@@ -1489,10 +1489,10 @@ def main() -> int:
         and isinstance(r.get("set"), bool)
         and isinstance(r.get("writable"), bool)
         for r in _rows)
-    check("GET /api/secrets shape (33 rows, name/group/set/length/writable)",
+    check("GET /api/secrets shape (34 rows, name/group/set/length/writable)",
           s == 200 and isinstance(secs, dict)
-          and isinstance(_rows, list) and len(_rows) == 33
-          and len(set(_row_names)) == 33 and _row_keys_ok
+          and isinstance(_rows, list) and len(_rows) == 34
+          and len(set(_row_names)) == 34 and _row_keys_ok
           and isinstance(secs.get("writable"), bool),
           f"s={s} rows={len(_rows) if isinstance(_rows, list) else _rows} "
           f"keys_ok={_row_keys_ok}")
@@ -1676,7 +1676,7 @@ def main() -> int:
         _grows = _g[1].get("slots") if _g else None
         check("secrets GET (in-process, temp file) reports presence, no values",
               _g is not None and _g[0] == 200
-              and isinstance(_grows, list) and len(_grows) == 33
+              and isinstance(_grows, list) and len(_grows) == 34
               and all(r.get("length") is None for r in _grows)
               and _g[1].get("writable") is True
               and "p3-again" not in json.dumps(_g[1])
@@ -1704,9 +1704,9 @@ def main() -> int:
     _kt = (caps2.get("mycore") or {}).get("known_tools") \
         if isinstance(caps2, dict) else None
     from mycore.tools import KNOWN_TOOL_NAMES as _KTN
-    check("GET capabilities mycore.known_tools == 25 sorted names",
-          isinstance(_kt, list) and len(_kt) == 25
-          and _kt == sorted(_KTN) and len(set(_kt)) == 25,
+    check("GET capabilities mycore.known_tools == 26 sorted names",
+          isinstance(_kt, list) and len(_kt) == 26
+          and _kt == sorted(_KTN) and len(set(_kt)) == 26,
           f"n={len(_kt) if isinstance(_kt, list) else _kt}")
 
     # --- 1.4 GET /api/cron: read-only sanitized job list ---
@@ -2043,6 +2043,437 @@ def main() -> int:
     _bytes_end = _prod_secrets.read_bytes() if _prod_secrets.exists() else b""
     check("prod secrets.env untouched by every lane-A secrets leg",
           _bytes_end == _prod_bytes, f"changed={_bytes_end != _prod_bytes}")
+
+    # --- 0.5.54 in-app community car: routes, gates and slot verification --
+    # Every leg is prod-safe. LIVE-console legs only exercise paths that fail
+    # at the gate or at validation (no outbound call ever leaves); every
+    # SUCCESS path runs in-process on the imported console copy with an
+    # injected GitHub transport (lane A's module-surgery pattern), a temp
+    # secrets file, a temp rate-limit state dir and a local mock for the one
+    # probe that speaks its own protocol (Telegram getMe) — so this lane
+    # writes no production file and contacts no external host.
+    import tempfile as _tf3
+    import threading as _th3
+    import mycore.community as _comm
+    from http.server import BaseHTTPRequestHandler as _BHR3
+    from http.server import ThreadingHTTPServer as _THSrv3
+
+    _SENT = "ghp_P3-SENTINEL-0123456789abcdef"
+    _GHSENT = "ghp_P3-GHPAT-SENTINEL-fedcba987654"
+    _BOT = "123456789:AAp3-SENTINEL-token-abcdefghijk"
+    _MODEL = "p3-model-key-SENTINEL-0123456789"
+    _c_leaks = [_SENT, _GHSENT, _BOT, _MODEL]
+
+    # (a) gate legs on the LIVE console — 401 fires before any outbound call
+    for _path, _doc in (("/api/discussions/create",
+                         {"title": "t", "body": "b", "category": "ideas"}),
+                        ("/api/discussions/comment",
+                         {"number": 1, "body": "b"}),
+                        ("/api/slots/verify", {"name": "AIDOG_COMMUNITY_PAT"})):
+        _cs, _cb = post(_path, _doc, "wrong-token")
+        check(f"live {_path} wrong bearer -> 401 unauthorized",
+              _cs == 401 and _cb == {"error": "unauthorized"}, f"{_cs} {_cb}")
+    _cs, _cb = post("/api/slots/verify", {"name": "AIDOG_COMMUNITY_PAT"}, None)
+    check("live /api/slots/verify without bearer -> 401",
+          _cs == 401, f"{_cs} {_cb}")
+
+    # (b) validation legs on the LIVE console — 400 fires before any outbound
+    _live_validation = [
+        ("/api/discussions/create",
+         {"body": "b", "category": "ideas"}, "title is required"),
+        ("/api/discussions/create",
+         {"title": "t", "category": "ideas"}, "body is required"),
+        ("/api/discussions/create",
+         {"title": "t", "body": "b"}, "category is required"),
+        ("/api/discussions/create",
+         {"title": "x" * 121, "body": "b", "category": "ideas"},
+         "title too long (max 120 chars)"),
+        ("/api/discussions/create",
+         {"title": "t", "body": "y" * 2001, "category": "ideas"},
+         "body too long (max 2000 chars)"),
+        ("/api/discussions/comment",
+         {"number": "seven", "body": "b"},
+         "number must be a positive integer"),
+        ("/api/discussions/comment",
+         {"number": True, "body": "b"},
+         "number must be a positive integer"),
+    ]
+    for _path, _doc, _want in _live_validation:
+        _cs, _cb = post(_path, _doc, token)
+        _det = _cb.get("details") if isinstance(_cb, dict) else None
+        check(f"live {_path} invalid payload -> 400 names '{_want[:30]}'",
+              _cs == 400 and isinstance(_det, list) and _want in _det,
+              f"{_cs} {_det}")
+
+    # (c) slot verify: bad request shapes on the LIVE console (no probe runs)
+    for _doc, _want in (({}, "pass a slot name or all:true"),
+                        ({"name": 123}, "pass a slot name or all:true"),
+                        ({"name": "NOT_A_SLOT"}, "unknown slot:")):
+        _cs, _cb = post("/api/slots/verify", _doc, token)
+        _det = _cb.get("details") if isinstance(_cb, dict) else None
+        check(f"live verify bad shape -> 400 ('{_want[:26]}')",
+              _cs == 400 and isinstance(_det, list)
+              and any(_want in str(d) for d in _det), f"{_cs} {_det}")
+    _cs, _cb = post("/api/slots/verify", {"name": "MYCORE_WD_CHAT"}, token)
+    _row = (_cb.get("results") or [None])[0] if isinstance(_cb, dict) else None
+    #  no live probe exists for this slot, so the row can only claim level
+    #  'format' and must never carry a stored value (whatever the machine's
+    #  fill state is, the shape of the answer is fixed)
+    check("live verify MYCORE_WD_CHAT -> one format-level row, zero values",
+          _cs == 200 and isinstance(_row, dict)
+          and _row.get("name") == "MYCORE_WD_CHAT"
+          and _row.get("level") == "format"
+          and _row.get("set") in (True, False)
+          and all(v not in json.dumps(_cb) for v in _leak_vals),
+          f"{_cs} {_row}")
+    check("live verify response keys are the documented six",
+          isinstance(_row, dict)
+          and set(_row) == {"name", "group", "set", "level", "ok",
+                            "reason", "detail"},
+          str(sorted(_row)) if isinstance(_row, dict) else str(_row))
+
+    # (d) read-route number validation on the LIVE console (no outbound)
+    for _q in ("", "?number=0", "?number=-4", "?number=abc", "?number=true"):
+        _cs, _cb = get("/api/discussions/replies" + _q)
+        check(f"live replies{_q or ' (no number)'} -> 400 validation",
+              _cs == 400 and isinstance(_cb, dict)
+              and _cb.get("ok") is False
+              and "number must be a positive integer"
+              in str(_cb.get("details")), f"{_cs} {_cb}")
+
+    # (e) SUCCESS paths in-process: mock transport + temp files + local mocks
+    class _BotOk(_BHR3):
+        """Telegram getMe answerer — the ONLY probe that speaks its own
+        protocol, so it gets a local endpoint instead of the real host."""
+        def do_GET(self):  # noqa: N802
+            body = json.dumps({"ok": True,
+                               "result": {"id": 1, "is_bot": True,
+                                          "username": "p3bot"}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):  # noqa: ARG002
+            pass
+
+    _tgmock = _THSrv3(("127.0.0.1", 0), _BotOk)
+    _th3.Thread(target=_tgmock.serve_forever, daemon=True).start()
+
+    _ctmp = Path(_tf3.mkdtemp(prefix="p3_community_"))
+    _c_secrets = _ctmp / "secrets.env"
+    _c_settings = _ctmp / "settings.json"
+    _c_state = _ctmp / "state"
+
+    def _c_write_secrets(with_community=True, wd="not-a-number"):
+        _c_secrets.write_text(
+            "WEB_TOKEN=temp-gate-token-0123456789\n"
+            + (f"AIDOG_COMMUNITY_PAT={_SENT}\n" if with_community else "")
+            + f"AIDOG_GH_PAT={_GHSENT}\n"
+            + f"MYCORE_TG_TOKEN={_BOT}\n"
+            + f"MODEL_API_KEY={_MODEL}\n"
+            + f"MYCORE_WD_CHAT={wd}\n", encoding="utf-8")
+        _c_secrets.chmod(0o600)
+
+    _c_write_secrets()
+    _c_settings.write_text(json.dumps(
+        {"mycore": {"base_url": "http://127.0.0.1:9/v1"}}), encoding="utf-8")
+
+    _real = (_srv.SECRETS, _srv.SETTINGS_FILE, _comm._transport,
+             _comm.read_token, os.environ.get("AIDOG_TG_API_URL"),
+             os.environ.get("AIDOG_MC_STATE"))
+    _c_calls: list = []
+    _c_mode = {"v": "ok"}
+
+    def _c_transport(url, method="GET", headers=None, payload=None,
+                     timeout=None):
+        """Injected GitHub transport: (status, body). The module hands us the
+        JSON body already ENCODED — decode once so every branch can match."""
+        if isinstance(payload, (bytes, bytearray)):
+            try:
+                payload = json.loads(payload.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                payload = None
+        _c_calls.append((method, url, payload))
+        mode = _c_mode["v"]
+        if mode == "err403":
+            return 403, json.dumps({"message": "Resource not accessible"})
+        if mode == "err502":
+            return 502, json.dumps({"message": "bad gateway"})
+        q = str(payload.get("query", "")) if isinstance(payload, dict) else ""
+        if url.endswith("/graphql") and "createDiscussion" in q:
+            return 200, json.dumps({"data": {"createDiscussion":
+                {"discussion": {"number": 9,
+                                "url": "https://github.com/aidog-im/aidog/discussions/9"}}}})
+        if url.endswith("/graphql") and "addDiscussionComment" in q:
+            return 200, json.dumps({"data": {"addDiscussionComment":
+                {"comment": {"id": "DC_p3"}}}})
+        if url.endswith("/graphql") and "discussion(number:" in q:
+            return 200, json.dumps({"data": {"repository":
+                {"discussion": {"id": "D_p3node"}}}})
+        if url.endswith("/graphql"):     # discussionCategories
+            return 200, json.dumps({"data": {"repository":
+                {"discussionCategories": {"nodes": [
+                    {"id": "D_1", "name": "Ideas", "slug": "ideas"},
+                    {"id": "D_2", "name": "Q&A", "slug": "q-a"}]}}}})
+        if "/discussions/" in url and "/comments" in url:
+            return 200, json.dumps([
+                {"id": 11, "user": {"login": "alice"}, "body": "first reply",
+                 "created_at": "2026-10-27T10:00:00Z",
+                 "html_url": "https://github.com/aidog-im/aidog/discussions/7#discussioncomment-11"},
+                {"id": 12, "user": {"login": "bob"}, "body": "second",
+                 "created_at": "2026-10-27T11:00:00Z",
+                 "html_url": "http://evil.example/x"}])
+        if url.endswith("/user"):
+            return 200, json.dumps({"login": "p3-tester"})
+        if "/repos/" in url:
+            return 200, json.dumps({"node_id": "R_p3node"})
+        raise AssertionError(f"unexpected url {url}")
+
+    def _c_call(handler_name, doc, bearer=None, action=None):
+        """Lane-A module surgery: one Handler method, response in a box."""
+        raw = json.dumps(doc).encode() if doc is not None else b""
+        h = _srv.Handler.__new__(_srv.Handler)
+        h.headers = {"Content-Length": str(len(raw))}
+        if bearer is not None:
+            h.headers["Authorization"] = f"Bearer {bearer}"
+        h.rfile = _io.BytesIO(raw)
+        box: dict = {}
+        h._json = lambda obj, code=200: box.setdefault("res", (code, obj))
+        if action is None:
+            getattr(h, handler_name)()
+        else:
+            getattr(h, handler_name)(action)
+        return box.get("res")
+
+    _GATE = "temp-gate-token-0123456789"
+    try:
+        _srv.SECRETS = _c_secrets
+        _srv.SETTINGS_FILE = _c_settings
+        os.environ["AIDOG_TG_API_URL"] = \
+            f"http://127.0.0.1:{_tgmock.server_address[1]}"
+        os.environ["AIDOG_MC_STATE"] = str(_c_state)
+        _comm.set_transport(_c_transport)
+        _srv.bust_discussions_cache()
+        _srv.bust_replies_cache()
+
+        # categories: no token -> the honest no_token design state
+        _comm.read_token = lambda: ""
+        _cat = _srv.collect_categories(fresh=True)
+        check("in-process categories without slot -> reason no_token",
+              _cat.get("available") is False
+              and _cat.get("reason") == "no_token"
+              and _cat.get("categories") == [], str(_cat))
+        # categories: mapped rows, no credential anywhere in the payload
+        _comm.read_token = lambda: _SENT
+        _cat = _srv.collect_categories(fresh=True)
+        check("in-process categories -> available + two mapped rows",
+              _cat.get("available") is True
+              and [c.get("slug") for c in _cat.get("categories", [])]
+              == ["ideas", "q-a"]
+              and all(set(c) == {"id", "name", "slug"}
+                      for c in _cat.get("categories", [])), str(_cat))
+        check("in-process categories payload has zero credential echo",
+              _SENT not in json.dumps(_cat), "sentinel echoed")
+        _c_mode["v"] = "err403"
+        _cat = _srv.collect_categories(fresh=True)
+        check("in-process categories upstream 403 -> available:false no_scope",
+              _cat.get("available") is False
+              and _cat.get("reason") == "no_scope"
+              and _SENT not in json.dumps(_cat), str(_cat))
+        _c_mode["v"] = "ok"
+
+        # replies: mapped rows + href scrub + 60s cache + ?fresh=1 busts it
+        _srv.bust_replies_cache()
+        _c_calls.clear()
+        _rep = _srv.collect_replies(7)
+        _n1 = len(_c_calls)
+        check("in-process replies -> available + two rows, five fields each",
+              _rep.get("available") is True and _rep.get("number") == 7
+              and len(_rep.get("replies", [])) == 2
+              and all(set(r) == {"id", "author", "body", "created_at", "url"}
+                      for r in _rep.get("replies", [])), str(_rep)[:220])
+        check("in-process replies scrubs a non-github html_url to empty",
+              _rep["replies"][1]["url"] == ""
+              and _rep["replies"][0]["url"].startswith("https://github.com/"),
+              str(_rep["replies"][1]))
+        _rep2 = _srv.collect_replies(7)
+        check("in-process replies 60s cache serves the second read",
+              len(_c_calls) == _n1
+              and _rep2.get("replies") == _rep.get("replies"),
+              f"calls={len(_c_calls)}")
+        _srv.collect_replies(7, fresh=True)
+        check("in-process replies ?fresh=1 re-hits upstream",
+              len(_c_calls) == _n1 + 1, f"calls={len(_c_calls)}")
+        _c_mode["v"] = "err502"
+        _rep = _srv.collect_replies(8, fresh=True)
+        check("in-process replies upstream 5xx -> available:false upstream_error",
+              _rep.get("available") is False
+              and _rep.get("reason") == "upstream_error"
+              and _rep.get("replies") == [], str(_rep))
+        _c_mode["v"] = "ok"
+
+        # POST create: validation refuses BEFORE the write window opens
+        _comm.reset_for_tests()
+        _comm.set_transport(_c_transport)
+        _c_calls.clear()
+        _r = _c_call("_handle_discussion_write",
+                     {"title": "t", "body": "b"}, _GATE, action="create")
+        check("in-process create without category -> 400, no outbound",
+              _r is not None and _r[0] == 400
+              and "category is required" in str(_r[1].get("details"))
+              and not _c_calls, f"{_r}")
+
+        # POST create: happy path -> 200 {ok, number, url}
+        _c_calls.clear()
+        _r = _c_call("_handle_discussion_write",
+                     {"title": "Ship it", "body": "body text",
+                      "category": "ideas"}, _GATE, action="create")
+        check("in-process create -> 200 ok + number + github url",
+              _r is not None and _r[0] == 200
+              and _r[1].get("ok") is True and _r[1].get("number") == 9
+              and str(_r[1].get("url", "")).startswith("https://github.com/"),
+              f"{_r}")
+        check("in-process create request bodies carry no token",
+              all(_SENT not in str(c[2]) for c in _c_calls),
+              "sentinel in a request body")
+
+        # the shared 30s window: the next write is refused with 429 + retry_s
+        _r = _c_call("_handle_discussion_write",
+                     {"title": "Again", "body": "body",
+                      "category": "ideas"}, _GATE, action="create")
+        check("in-process create inside the 30s window -> 429 busy + retry_s",
+              _r is not None and _r[0] == 429
+              and _r[1].get("reason") == "busy"
+              and isinstance(_r[1].get("retry_s"), int)
+              and _r[1]["retry_s"] > 0, f"{_r}")
+
+        # POST comment: happy path, then a second one refused by the window
+        _comm.reset_for_tests()
+        _comm.set_transport(_c_transport)
+        _r = _c_call("_handle_discussion_write",
+                     {"number": 7, "body": "a reply"}, _GATE,
+                     action="comment")
+        check("in-process comment -> 200 ok + number + comment_id",
+              _r is not None and _r[0] == 200
+              and _r[1].get("ok") is True and _r[1].get("number") == 7
+              and _r[1].get("comment_id") == "DC_p3", f"{_r}")
+        _r = _c_call("_handle_discussion_write",
+                     {"number": 7, "body": "again"}, _GATE,
+                     action="comment")
+        check("in-process comment inside the window -> 429 busy",
+              _r is not None and _r[0] == 429
+              and _r[1].get("reason") == "busy", f"{_r}")
+
+        # no community slot in the file (and none in the reader) -> 409
+        _c_write_secrets(with_community=False)
+        _comm.reset_for_tests()
+        _comm.set_transport(_c_transport)
+        _comm.read_token = lambda: ""
+        _r = _c_call("_handle_discussion_write",
+                     {"title": "t", "body": "b", "category": "ideas"},
+                     _GATE, action="create")
+        check("in-process create without the community slot -> 409 no_token",
+              _r is not None and _r[0] == 409
+              and _r[1].get("reason") == "no_token", f"{_r}")
+        _c_write_secrets()
+
+        # --- slot verification, both levels, entirely against local doubles
+        _comm.reset_for_tests()
+        _comm.set_transport(_c_transport)
+        _comm.read_token = lambda: _SENT
+        _r = _c_call("_handle_slot_verify", {"name": "AIDOG_COMMUNITY_PAT"},
+                     _GATE)
+        _row = (_r[1].get("results") or [None])[0] if _r else None
+        check("in-process verify community PAT -> live level, ok, mock login",
+              _r is not None and _r[0] == 200 and isinstance(_row, dict)
+              and _row.get("level") == "live" and _row.get("ok") is True
+              and "p3-tester" in str(_row.get("detail"))
+              and _SENT not in json.dumps(_r[1]), f"{_row}")
+        _r = _c_call("_handle_slot_verify", {"name": "AIDOG_GH_PAT"}, _GATE)
+        _row = (_r[1].get("results") or [None])[0] if _r else None
+        check("in-process verify GH PAT -> live ok with the account login",
+              _r is not None and _row.get("level") == "live"
+              and _row.get("ok") is True
+              and "p3-tester" in str(_row.get("detail"))
+              and _GHSENT not in json.dumps(_r[1]), f"{_row}")
+        _r = _c_call("_handle_slot_verify", {"name": "MYCORE_TG_TOKEN"}, _GATE)
+        _row = (_r[1].get("results") or [None])[0] if _r else None
+        check("in-process verify bot token -> live ok via the local getMe mock",
+              _r is not None and _row.get("level") == "live"
+              and _row.get("ok") is True
+              and "p3bot" in str(_row.get("detail"))
+              and _BOT not in json.dumps(_r[1]), f"{_row}")
+        _r = _c_call("_handle_slot_verify", {"name": "MODEL_API_KEY"}, _GATE)
+        _row = (_r[1].get("results") or [None])[0] if _r else None
+        #  the temp base_url points at a closed port -> honest network reason
+        check("in-process verify model key -> live level, honest network reason",
+              _r is not None and _row.get("level") == "live"
+              and _row.get("reason") in ("network", "upstream_error",
+                                          "unauthorized")
+              and _MODEL not in json.dumps(_r[1])
+              and "127.0.0.1" not in str(_row.get("detail")), f"{_row}")
+        _r = _c_call("_handle_slot_verify", {"name": "MYCORE_WD_CHAT"}, _GATE)
+        _row = (_r[1].get("results") or [None])[0] if _r else None
+        check("in-process verify bad format -> ok false, expectation not value",
+              _r is not None and _row.get("ok") is False
+              and _row.get("reason") == "bad_format"
+              and "not-a-number" not in json.dumps(_r[1]), f"{_row}")
+        _c_write_secrets(wd="12345")
+        _r = _c_call("_handle_slot_verify", {"name": "MYCORE_WD_CHAT"}, _GATE)
+        _row = (_r[1].get("results") or [None])[0] if _r else None
+        check("in-process verify a well-shaped slot -> ok true at format level",
+              _r is not None and _row.get("ok") is True
+              and _row.get("level") == "format"
+              and _row.get("reason") == "ok", f"{_row}")
+        _r = _c_call("_handle_slot_verify", {"name": "LINEAR_API_KEY"}, _GATE)
+        _row = (_r[1].get("results") or [None])[0] if _r else None
+        check("in-process verify unset slot -> ok null + reason not_set",
+              _r is not None and _row.get("set") is False
+              and _row.get("ok") is None
+              and _row.get("reason") == "not_set", f"{_row}")
+        _r = _c_call("_handle_slot_verify", {"name": "NOT_A_SLOT"}, _GATE)
+        check("in-process verify unknown slot -> 400",
+              _r is not None and _r[0] == 400, f"{_r}")
+        _r = _c_call("_handle_slot_verify", {"all": True}, _GATE)
+        _rows_all = _r[1].get("results") if _r else None
+        _all_names = [x.get("name") for x in _rows_all] \
+            if isinstance(_rows_all, list) else []
+        _live_levels = {x.get("name") for x in (_rows_all or [])
+                        if isinstance(x, dict) and x.get("level") == "live"}
+        check("in-process verify all -> 34 rows (33 editable + WEB_TOKEN)",
+              _r is not None and _r[0] == 200 and len(_rows_all) == 34
+              and len(set(_all_names)) == 34, f"n={len(_rows_all or [])}")
+        check("in-process verify all -> only the 4 probe slots claim live",
+              _live_levels == {"AIDOG_COMMUNITY_PAT", "AIDOG_GH_PAT",
+                               "MYCORE_TG_TOKEN", "MODEL_API_KEY"},
+              str(sorted(_live_levels)))
+        check("in-process verify all -> zero credential echo across the batch",
+              all(v not in json.dumps(_r[1]) for v in _c_leaks),
+              "sentinel in verify-all payload")
+    finally:
+        # reset FIRST (while the temp state dir is still installed) so
+        # reset_for_tests() unlinks the rate-limit stamp in TMP, never the
+        # production state dir — then restore every seam.
+        _comm.set_transport(_real[2])
+        _comm.read_token = _real[3]
+        _comm.reset_for_tests()
+        _srv.SECRETS, _srv.SETTINGS_FILE = _real[0], _real[1]
+        for _k, _v in (("AIDOG_TG_API_URL", _real[4]),
+                       ("AIDOG_MC_STATE", _real[5])):
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
+        _srv.bust_discussions_cache()
+        _srv.bust_replies_cache()
+        _tgmock.shutdown()
+        _shutil.rmtree(_ctmp, ignore_errors=True)
+
+    _bytes_end2 = _prod_secrets.read_bytes() if _prod_secrets.exists() else b""
+    check("prod secrets.env untouched by the community lane",
+          _bytes_end2 == _prod_bytes, f"changed={_bytes_end2 != _prod_bytes}")
 
     print(f"\n{len(PASS)} pass · {len(FAIL)} fail")
     if FAIL:

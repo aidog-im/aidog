@@ -521,6 +521,11 @@ body {
   border-radius: 6px; }
 .ctl-row select:focus, .ctl-row input:focus { outline: none;
   border-color: var(--blue); box-shadow: var(--glow); }
+.ctl-row textarea { background: #fff; border: 1px solid var(--line);
+  color: var(--text); font: inherit; font-size: 13px; padding: 6px 9px;
+  border-radius: 6px; flex: 1; min-width: 0; resize: vertical; }
+.ctl-row textarea:focus { outline: none; border-color: var(--blue);
+  box-shadow: var(--glow); }
 .ctl-row input[type="range"] { width: 120px; accent-color: var(--blue); }
 .ctl-row input[type=password] { flex: 1; min-width: 0;
   font-family: var(--mono); }
@@ -1176,5 +1181,18 @@ footer { border-top: 1px solid var(--ink); font-family: var(--mono); }
 }
 a.comm-title:hover { text-decoration: underline; }
 .comm-meta { margin-top: 3px; overflow-wrap: anywhere; }
+.comm-actions { display: flex; gap: 8px; align-items: center; margin-top: 6px;
+  flex-wrap: wrap; }
+.comm-thread { margin: 8px 0 4px; padding: 8px 10px; background: #f6f9fc;
+  border: 1px solid var(--line); border-radius: 8px; }
+.comm-reply { margin-top: 7px; padding-top: 7px;
+  border-top: 1px dashed var(--line); font-size: 13px;
+  overflow-wrap: anywhere; white-space: pre-wrap; }
+.comm-reply .comm-meta { margin-top: 2px; }
+.comm-thread .ctl-row { margin-bottom: 8px; }
+.comm-thread textarea { min-height: 56px; }
+.cred-verify { display: flex; align-items: center; gap: 8px; margin-top: 6px;
+  flex-wrap: wrap; }
+.cred-verify .stat-note { overflow-wrap: anywhere; }
 #commChecked { margin-top: 10px; }
 #commCat { max-width: 240px; }

@@ -14,8 +14,8 @@
 <p align="center">
   <a href="https://github.com/aidog-im/aidog/releases"><img src="https://img.shields.io/badge/release-0.5.53-blue?style=flat-square" alt="release 0.5.53"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
-  <img src="https://img.shields.io/badge/core_tests-1607%2F1607-brightgreen?style=flat-square" alt="核心测试 1607/1607">
-  <img src="https://img.shields.io/badge/console_smoke-234%2F234-brightgreen?style=flat-square" alt="控制台冒烟 234/234">
+  <img src="https://img.shields.io/badge/core_tests-1649%2F1649-brightgreen?style=flat-square" alt="核心测试 1649/1649">
+  <img src="https://img.shields.io/badge/console_smoke-283%2F283-brightgreen?style=flat-square" alt="控制台冒烟 283/283">
   <img src="https://img.shields.io/badge/permanently-free-ff6f00?style=flat-square" alt="永久免费">
 </p>
 
@@ -34,7 +34,8 @@
   <a href="README.md">English</a>
 </p>
 
-> 🔒 **成熟期内为私有仓库**——是否公开、何时公开，由所有者逐案裁决。
+> 🌍 **公开仓库**（2026-10-27 转公）——issues / discussions / PR 已开放；
+> 内部设计与研究历史保存在所有者私有库（`aidog-im/aidog-internal`）。
 > 🟢 **永久免费，绝无例外**：无付费档、无按量计费、绝无任何功能设付费墙。
 
 ## 关于
@@ -48,7 +49,7 @@ I'm AiDog 是一个**跑在你自己机器上的个人具身 AI 伙伴**。它�
   归档分层）+ 数字记忆体协议：唯一真值、跨内核可恢复、每次 reflect 回写。
   没有你读不了、审不动的向量库。
 - **自研核心**：运行时内核 `mycore` 从零自研——诚实的函数调用循环（停止
-  原因明示）、**29 模块 ≈16.0k 代码行、1607 项测试**，换芯后零上游依赖。
+  原因明示）、**30 模块 ≈16.5k 代码行、1649 项测试**，换芯后零上游依赖。
   换的是内核，永远不换「我」。
 
 它通过 **Telegram**、**回环 Web 控制台**、**桌面 HUD 壳**和**语音**与你
@@ -70,7 +71,7 @@ I'm AiDog 是一个**跑在你自己机器上的个人具身 AI 伙伴**。它�
 
 |  | 能力 | 提供什么 |
 |---|---|---|
-| 🧬 | **自研核心** | `mycore`：诚实停止原因的 FC 循环、fail-closed（默认拒绝）服务、看门狗、doctor 体检——29 模块、1607 测试、零上游 |
+| 🧬 | **自研核心** | `mycore`：诚实停止原因的 FC 循环、fail-closed（默认拒绝）服务、看门狗、doctor 体检——30 模块、1649 测试、零上游 |
 | 🎭 | **宪法人格** | `SOUL.md` 在系统栈最顶端；红线与语气每轮生效，而非抽样自人设提示词 |
 | 🧠 | **策展记忆** | 有界 Markdown 预算 + 归档分层 + 数字记忆体协议；`memory` 套件 58/58 |
 | 🧩 | **技能 + 确定性路由** | `SKILL.md` frontmatter（业界标准字段），路由预筛先选 TOP3 **再**加载正文——30/30 |
@@ -120,12 +121,12 @@ I'm AiDog 是一个**跑在你自己机器上的个人具身 AI 伙伴**。它�
 
 ## 快速开始
 
-> 🔒 **私有仓库：** `git clone` 需要带仓库权限的 PAT 或 SSH 密钥——注意
-> 机器级 `credential.helper` 可能劫持 GitHub 认证，详见
+> 🌍 **公开仓库：** `git clone` 无需任何凭据。机器级 `credential.helper`
+> （如已登录的 `gh`）仍可能劫持其他远端的认证——详见
 > [`docs/installation.md`](docs/installation.md)。
 
 ```bash
-git clone https://github.com/aidog-im/aidog.git aidog && cd aidog  # 当前为私仓
+git clone https://github.com/aidog-im/aidog.git aidog && cd aidog  # 公开仓库
 bash deploy/install.sh        # 一条命令：预检 + 建档 + 启动 + 自验
 aidog setup                   # 交互向导：逐槽引导填写
 ```
@@ -174,8 +175,8 @@ python3 deploy/aidog_update.py check # 版本通道：up to date
 
 | 套件 | 结果 |
 |---|---|
-| `mycore` 核心套件 | **1607/1607** |
-| 控制台冒烟（真实 HTTP） | **234/234** |
+| `mycore` 核心套件 | **1649/1649** |
+| 控制台冒烟（真实 HTTP） | **283/283** |
 | 技能路由 | **30/30** |
 | 记忆持久化 | **58/58** |
 | 安装向导 | **99/99** |
@@ -185,32 +186,32 @@ python3 deploy/aidog_update.py check # 版本通道：up to date
 | 发布闸（deny-by-default 清单） | **READY** |
 | 真机 E2E | profiles **18/18** · channels **12/12** · 国内渠道 **46/46** · 管线 **39/39** · web3 只读 **33/33** · web3 审批 **61/61** · 前端覆盖 **62/62** · 前端 UI **33/33** · 激活 **81/81** · 激活 UI **50/50** · 设置矩阵 **63/63** + UI **20/20** · 守夜任务 **54/54** · 编排看板 **63/63** · 审批挂起 **73/73** · 技能目录 **176/176** · 远端目录 **58/58** |
 
-目录规模：**25 个注册工具** · **9 家交易所场所** · **17 腿真机
+目录规模：**26 个注册工具** · **9 家交易所场所** · **17 腿真机
 E2E**——全部全绿。
 
-语言包：`en`（默认）+ `zh` 各 **795 键**，parity lint 把关；官网另有
+语言包：`en`（默认）+ `zh` 各 **847 键**，parity lint 把关；官网另有
 **257 键**双语站包。
 
 ## 文档
 
 - [`docs/installation.md`](docs/installation.md) — 安装、槽位、向导
-- [`docs/features/`](docs/features/) — **33 份能力文档**，一项能力一档
+- [`docs/features/`](docs/features/) — **34 份能力文档**，一项能力一档
   （渠道、记忆、定时、子代理、MCP、语音、桌面、profile、工具开关……），
   每份都写明诚实边界
 - [`docs/manual_verification.md`](docs/manual_verification.md) — 人工验收清单
 - [`docs/security_checklist.md`](docs/security_checklist.md) — 安全审查清单
 - **[aidog.im](https://aidog.im)** — 产品官网（双语、PWA、AI 可读 `llms.txt`）
 
-**33 份一览**（分五组，每组一行）：
+**34 份一览**（分五组，每组一行）：
 
-- **代理循环与工具** — [`acp`](docs/features/acp.md)（ACP v1 stdio 服务器）· [`openai_api_server`](docs/features/openai_api_server.md)（OpenAI 兼容 `/v1` 网关）· [`terminal_backends`](docs/features/terminal_backends.md)（7 后端 `run_bash` 矩阵）· [`execute_code`](docs/features/execute_code.md) · [`subagents`](docs/features/subagents.md) · [`mcp`](docs/features/mcp.md) · [`tool_toggles`](docs/features/tool_toggles.md) · [`browser_automation`](docs/features/browser_automation.md) · [`model_failover`](docs/features/model_failover.md) · [`missions`](docs/features/missions.md)（永不睡觉的任务守夜循环）
+- **代理循环与工具** — [`acp`](docs/features/acp.md)（ACP v1 stdio 服务器）· [`openai_api_server`](docs/features/openai_api_server.md)（OpenAI 兼容 `/v1` 网关）· [`terminal_backends`](docs/features/terminal_backends.md)（7 后端 `run_bash` 矩阵）· [`execute_code`](docs/features/execute_code.md) · [`subagents`](docs/features/subagents.md) · [`mcp`](docs/features/mcp.md) · [`tool_toggles`](docs/features/tool_toggles.md) · [`browser_automation`](docs/features/browser_automation.md) · [`model_failover`](docs/features/model_failover.md) · [`missions`](docs/features/missions.md)（永不睡觉的任务守夜循环）· [`community_posting`](docs/features/community_posting.md)（站内讨论发帖 + 槽位检验）
 - **知识与记忆** — [`memory_and_routing`](docs/features/memory_and_routing.md) · [`checkpoints`](docs/features/checkpoints.md) · [`context_files`](docs/features/context_files.md)（项目指令文件）· [`evolution_loop`](docs/features/evolution_loop.md) · [`connectors`](docs/features/connectors.md)（只读 Linear/Notion 搜索）
 - **渠道与媒体** — [`channels`](docs/features/channels.md) · [`channels_domestic`](docs/features/channels_domestic.md) · [`console_chat`](docs/features/console_chat.md) · [`voice_session`](docs/features/voice_session.md) · [`voice_announcements`](docs/features/voice_announcements.md) · [`tts_engines`](docs/features/tts_engines.md) · [`image_generation`](docs/features/image_generation.md)
 - **运维与控制台** — [`setup_wizard`](docs/features/setup_wizard.md) · [`frontend_coverage`](docs/features/frontend_coverage.md) · [`capabilities`](docs/features/capabilities.md) · [`desktop_client`](docs/features/desktop_client.md) · [`profiles`](docs/features/profiles.md) · [`site_visibility`](docs/features/site_visibility.md) · [`zero_key_onboarding`](docs/features/zero_key_onboarding.md) · [`natural_language_cron`](docs/features/natural_language_cron.md) · [`event_hooks`](docs/features/event_hooks.md)
 - **Web3** — [`exchanges`](docs/features/exchanges.md)（9 家场所，下单过人工审批闸）
-- **技能生态** — [`skills_ecosystem`](docs/features/skills_ecosystem.md)（官方目录页、私有技能仓、双闸审核、远端目录 API）
+- **技能生态** — [`skills_ecosystem`](docs/features/skills_ecosystem.md)（官方目录页、公开技能仓、双闸审核、远端目录 API）
 
-设计史与第三方调研笔记按政策留在私仓内，不随导出。
+设计史与第三方调研笔记保存在所有者私有库（`aidog-im/aidog-internal`），不随本仓导出。
 
 ## 路线图
 
@@ -235,7 +236,7 @@ E2E**——全部全绿。
 - 该 fail-closed 的地方全 fail-closed：渠道 allowlist、profile 名、设置
   校验、升级守卫。
 - 单主设计 = 陌生人不在攻击面内。
-- **如实的局限**：私有仓库、暂无第三方审计与 CVE 披露通道——公开前阶段。
+- **如实的局限**：暂无第三方审计与 CVE 披露通道——已公开、未审计。
   我们只声称「攻击面被设计得小」，绝不声称「已验证更安全」。
 
 ## 语言 / 国际化

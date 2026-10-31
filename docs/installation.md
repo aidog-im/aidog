@@ -18,7 +18,7 @@ you — by **name**, never by value — exactly what still needs a human.
 ## Quick start
 
 ```bash
-git clone <product-repo-url> aidog && cd aidog   # private repo: clone access required
+git clone <product-repo-url> aidog && cd aidog   # public repo: no credentials required
 bash deploy/install.sh                           # <- the one command
 aidog setup                                      # guided wizard: fill the slots it lists
 aidog setup --check                              # any time: read-only status (0/2/1)
@@ -97,7 +97,7 @@ chat output reference slot names and counts only — never values.
 | Slot | Missing means |
 |---|---|
 | `MODEL_API_KEY` | no key needed if your model endpoint is open (the default local gateway is) — set it only when your provider requires one |
-| `AIDOG_GH_PAT` | `aidog update` version checks cannot read the private repo (the console upgrade banner stays silent) |
+| `AIDOG_GH_PAT` | optional — `aidog update` reads the public repo anonymously (a PAT only raises GitHub API rate limits) |
 
 Format rule: **one `KEY=value` per line, no trailing comment on the value
 line** — tooling treats a value as present only when it is the sole content

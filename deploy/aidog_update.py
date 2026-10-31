@@ -2,13 +2,13 @@
 """aidog_update — version check + upgrade for I'm AiDog (owner decree: we cut
 every release; users are notified in-console and upgrade with one command).
 
-Mechanism (two-stage, confidential -> public):
-  - NOW (private repo): origin is a PRIVATE GitHub repo; the release manifest is
-    read from `GET /repos/{owner}/{repo}/contents/release.json` with the
-    repo's own PAT (slot `AIDOG_GH_PAT`, legacy fallback `GITHUB_PAT`) —
-    value never echoed, never put in argv).
-  - POST-mycore: the same repo flips to public; the exact same code works
-    without credentials (GitHub allows anonymous contents reads).
+Mechanism (two-stage, confidential -> public; flip executed 2026-10-27):
+  - NOW (public repo): origin is a PUBLIC GitHub repo; the release manifest is
+    read from `GET /repos/{owner}/{repo}/contents/release.json` — anonymous
+    when no token is set, authenticated via slot `AIDOG_GH_PAT` (legacy
+    fallback `GITHUB_PAT`) when present — value never echoed, never in argv.
+  - Anonymous reads work because GitHub allows unauthenticated contents reads
+    on public repositories (rate-limited; the PAT only raises the budget).
   - owner/repo is derived from `git remote get-url origin` — no config to edit
     when the channel changes.
 

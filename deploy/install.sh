@@ -123,7 +123,8 @@ fi
 #                mycore.secrets.slots + run_service --check)
 #   recommended — features degrade without them (never block READY):
 #                 MODEL_API_KEY only matters when the model endpoint needs a
-#                 key; AIDOG_GH_PAT powers `aidog update` on the private repo
+#                 key; AIDOG_GH_PAT authenticates GitHub reads for aidog update
+#                 (optional on the public repo; anonymous reads are rate-limited)
 SLOTS_REQUIRED="WEB_TOKEN MYCORE_TG_TOKEN AIDOG_TG_ALLOWED_USERS"
 SLOTS_RECOMMENDED="MODEL_API_KEY AIDOG_GH_PAT"
 slot_empty() { ! grep -Eq "^$1=[^[:space:]]+$" secrets.env 2>/dev/null; }

@@ -16,8 +16,8 @@
 <p align="center">
   <a href="https://github.com/aidog-im/aidog/releases"><img src="https://img.shields.io/badge/release-0.5.53-blue?style=flat-square" alt="release 0.5.53"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
-  <img src="https://img.shields.io/badge/core_tests-1607%2F1607-brightgreen?style=flat-square" alt="core tests 1607/1607">
-  <img src="https://img.shields.io/badge/console_smoke-234%2F234-brightgreen?style=flat-square" alt="console smoke 234/234">
+  <img src="https://img.shields.io/badge/core_tests-1649%2F1649-brightgreen?style=flat-square" alt="core tests 1649/1649">
+  <img src="https://img.shields.io/badge/console_smoke-283%2F283-brightgreen?style=flat-square" alt="console smoke 283/283">
   <img src="https://img.shields.io/badge/permanently-free-ff6f00?style=flat-square" alt="permanently free">
 </p>
 
@@ -36,8 +36,9 @@
   <a href="README_cn.md">简体中文</a>
 </p>
 
-> 🔒 **Private repository** during the maturity phase — whether and when it
-> becomes public is the owner's case-by-case decision.
+> 🌍 **Public repository** (published 2026-10-27) — issues, discussions and
+> pull requests are open; internal design/research history lives in the
+> owner-only vault (`aidog-im/aidog-internal`).
 > 🟢 **Permanently free — forever, no exceptions.** No paid tier, no usage
 > fees, no feature locked behind a payment. Ever.
 
@@ -55,7 +56,7 @@ machine. It is built around three ideas that most assistants skip:
   No vector store you cannot read or audit.
 - **A self-developed core.** The runtime kernel (`mycore`) is written from
   scratch in this repository — an honest function-calling loop with explicit
-  stop reasons, **29 modules ≈ 16.0k LOC, 1,607 tests**, and zero upstream
+  stop reasons, **30 modules ≈ 16.5k LOC, 1,649 tests**, and zero upstream
   dependencies after the core swap. Swap the kernel, never swap "me".
 
 It talks to you over **Telegram**, a **loopback web console**, a
@@ -81,7 +82,7 @@ model key (or use the zero-key trial path) and the whole product activates.
 
 |  | Capability | What it provides |
 |---|---|---|
-| 🧬 | **Self-developed core** | `mycore`: FC loop with honest stop reasons, fail-closed service, watchdog, doctor health gate — 29 modules, 1,607 tests, zero upstream |
+| 🧬 | **Self-developed core** | `mycore`: FC loop with honest stop reasons, fail-closed service, watchdog, doctor health gate — 30 modules, 1,649 tests, zero upstream |
 | 🎭 | **Constitution persona** | `SOUL.md` first in the system stack; red lines and tone enforced every reply, not sampled from a persona prompt |
 | 🧠 | **Curated memory** | Bounded Markdown budgets + archive tiers + digital-memory protocol; `memory` suite 58/58 |
 | 🧩 | **Skills + deterministic router** | `SKILL.md` frontmatter (industry-standard fields), route pre-filter picks TOP3 *before* any body loads — 30/30 |
@@ -131,12 +132,12 @@ Three-layer separation is the whole point: **swap the core, never swap
 
 ## Quick Start
 
-> 🔒 **Private repo:** `git clone` needs a PAT or SSH key with repo access —
-> beware a machine-wide `credential.helper` hijacking GitHub auth. See
-> [`docs/installation.md`](docs/installation.md).
+> 🌍 **Public repo:** `git clone` needs no credentials at all. A machine-wide
+> `credential.helper` (e.g. a logged-in `gh`) can still shadow auth for other
+> remotes — see [`docs/installation.md`](docs/installation.md).
 
 ```bash
-git clone https://github.com/aidog-im/aidog.git aidog && cd aidog  # private repo today
+git clone https://github.com/aidog-im/aidog.git aidog && cd aidog  # public repository
 bash deploy/install.sh        # one command: provision + boot + verify
 aidog setup                   # guided wizard: fills the slots it lists
 ```
@@ -190,8 +191,8 @@ Every release is cut only after these run green on a clean tree:
 
 | Suite | Result |
 |---|---|
-| `mycore` core suite | **1607/1607** |
-| Console smoke (live HTTP) | **234/234** |
+| `mycore` core suite | **1649/1649** |
+| Console smoke (live HTTP) | **283/283** |
 | Skill router | **30/30** |
 | Memory persistence | **58/58** |
 | Setup wizard | **99/99** |
@@ -201,16 +202,16 @@ Every release is cut only after these run green on a clean tree:
 | Publish gate (deny-by-default manifest) | **READY** |
 | Real-machine E2E | profiles **18/18** · channels **12/12** · domestic channels **46/46** · pipeline **39/39** · web3 read-only **33/33** · web3 approval **61/61** · frontend coverage **62/62** · frontend UI **33/33** · activation **81/81** · activation UI **50/50** · settings matrix **63/63** + UI **20/20** · missions **54/54** · mission-orch **63/63** · mission-pause **73/73** · skills catalog **176/176** · skills remote **58/58** |
 
-Catalog scope: **25 registered tools** · **9 exchange venues** · **17
+Catalog scope: **26 registered tools** · **9 exchange venues** · **17
 real-machine E2E legs** — all green.
 
-Locale packs: `en` (default) + `zh`, **795 keys** each, parity lint in CI;
+Locale packs: `en` (default) + `zh`, **847 keys** each, parity lint in CI;
 the marketing site ships its own **257-key** bilingual pack.
 
 ## Documentation
 
 - [`docs/installation.md`](docs/installation.md) — install, slots, wizard
-- [`docs/features/`](docs/features/) — **33 capability documents**, one per
+- [`docs/features/`](docs/features/) — **34 capability documents**, one per
   feature (channels, memory, cron, subagents, MCP, voice, desktop,
   profiles, tool toggles, …), each with its honest boundaries
 - [`docs/manual_verification.md`](docs/manual_verification.md) — manual
@@ -220,17 +221,17 @@ the marketing site ships its own **257-key** bilingual pack.
 - **[aidog.im](https://aidog.im)** — product site (bilingual, PWA,
   AI-readable `llms.txt`)
 
-**All 33 at a glance** (grouped, one line per group):
+**All 34 at a glance** (grouped, one line per group):
 
-- **Agent loop & tools** — [`acp`](docs/features/acp.md) (ACP v1 stdio server) · [`openai_api_server`](docs/features/openai_api_server.md) (OpenAI-compatible `/v1` gateway) · [`terminal_backends`](docs/features/terminal_backends.md) (7-backend `run_bash` matrix) · [`execute_code`](docs/features/execute_code.md) · [`subagents`](docs/features/subagents.md) · [`mcp`](docs/features/mcp.md) · [`tool_toggles`](docs/features/tool_toggles.md) · [`browser_automation`](docs/features/browser_automation.md) · [`model_failover`](docs/features/model_failover.md) · [`missions`](docs/features/missions.md) (never-sleeps mission loop)
+- **Agent loop & tools** — [`acp`](docs/features/acp.md) (ACP v1 stdio server) · [`openai_api_server`](docs/features/openai_api_server.md) (OpenAI-compatible `/v1` gateway) · [`terminal_backends`](docs/features/terminal_backends.md) (7-backend `run_bash` matrix) · [`execute_code`](docs/features/execute_code.md) · [`subagents`](docs/features/subagents.md) · [`mcp`](docs/features/mcp.md) · [`tool_toggles`](docs/features/tool_toggles.md) · [`browser_automation`](docs/features/browser_automation.md) · [`model_failover`](docs/features/model_failover.md) · [`missions`](docs/features/missions.md) (never-sleeps mission loop) · [`community_posting`](docs/features/community_posting.md) (in-app Discussions posting + slot verification)
 - **Knowledge & memory** — [`memory_and_routing`](docs/features/memory_and_routing.md) · [`checkpoints`](docs/features/checkpoints.md) · [`context_files`](docs/features/context_files.md) (project instruction files) · [`evolution_loop`](docs/features/evolution_loop.md) · [`connectors`](docs/features/connectors.md) (read-only Linear/Notion search)
 - **Channels & media** — [`channels`](docs/features/channels.md) · [`channels_domestic`](docs/features/channels_domestic.md) · [`console_chat`](docs/features/console_chat.md) · [`voice_session`](docs/features/voice_session.md) · [`voice_announcements`](docs/features/voice_announcements.md) · [`tts_engines`](docs/features/tts_engines.md) · [`image_generation`](docs/features/image_generation.md)
 - **Ops & console** — [`setup_wizard`](docs/features/setup_wizard.md) · [`frontend_coverage`](docs/features/frontend_coverage.md) · [`capabilities`](docs/features/capabilities.md) · [`desktop_client`](docs/features/desktop_client.md) · [`profiles`](docs/features/profiles.md) · [`site_visibility`](docs/features/site_visibility.md) · [`zero_key_onboarding`](docs/features/zero_key_onboarding.md) · [`natural_language_cron`](docs/features/natural_language_cron.md) · [`event_hooks`](docs/features/event_hooks.md)
 - **Web3** — [`exchanges`](docs/features/exchanges.md) (nine venues, orders behind a human approval gate)
-- **Skills ecosystem** — [`skills_ecosystem`](docs/features/skills_ecosystem.md) (official directory, private skills repo, dual-gate review, remote catalog API)
+- **Skills ecosystem** — [`skills_ecosystem`](docs/features/skills_ecosystem.md) (official directory, public skills repo, dual-gate review, remote catalog API)
 
-Design history and third-party research notes stay in the private tree by
-policy; they are not exported.
+Design history and third-party research notes live in the owner-only vault
+(`aidog-im/aidog-internal`); they are never exported here.
 
 ## Roadmap
 
@@ -260,9 +261,9 @@ policy; they are not exported.
 - Fail-closed everywhere it matters: channel allowlists, profile names,
   settings validation, upgrade guard.
 - Single-owner design = strangers are not part of the attack surface.
-- **Honest limits:** private repository, no third-party audit and no CVE
-  disclosure channel *yet* — pre-public stage. We claim a small attack
-  surface by design, never "audited".
+- **Honest limits:** no third-party audit and no CVE disclosure channel
+  *yet* — public but unaudited. We claim a small attack surface by design,
+  never "audited".
 
 ## Language / i18n
 

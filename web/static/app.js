@@ -2673,11 +2673,28 @@ function credRow(slot, writable, labelKey) {
   const st = document.createElement("div");
   st.className = "cred-status stat-note";
   st.textContent = credStatusText(slot);
+  // 0.5.54: one VERIFY button per row (shape check everywhere, real remote
+  // probe for the four slots that have one) + its own result line. The
+  // result renders the server's reason word + expectation — never a value.
+  const mk = (cls, key, fb) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "btn " + cls;
+    b.dataset.i18n = key;
+    b.textContent = t(key, fb);
+    if (!writable) b.disabled = true;
+    return b;
+  };
+  const vst = document.createElement("div");
+  vst.className = "cred-vstat cred-verify stat-note";
+  vst.hidden = true;
   if (name === "WEB_TOKEN") {
     // presence-only: the console never rewrites its own gate
     st.style.marginLeft = "auto";
     row.appendChild(st);
+    row.appendChild(mk("cred-verify", "cred.verify", "VERIFY"));
     wrap.appendChild(row);
+    wrap.appendChild(vst);
     const note = document.createElement("div");
     note.className = "stat-note";
     note.dataset.i18n = "cred.rotateHint";
@@ -2694,20 +2711,13 @@ function credRow(slot, writable, labelKey) {
   input.dataset.i18nPh = "cred.ph";
   input.placeholder = t("cred.ph", "value (never displayed back)");
   if (!writable) input.disabled = true;
-  const mk = (cls, key, fb) => {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.className = "btn " + cls;
-    b.dataset.i18n = key;
-    b.textContent = t(key, fb);
-    if (!writable) b.disabled = true;
-    return b;
-  };
   row.appendChild(input);
   row.appendChild(mk("cred-set", "cred.set", "SET"));
   row.appendChild(mk("cred-clear", "cred.clear", "CLEAR"));
+  row.appendChild(mk("cred-verify", "cred.verify", "VERIFY"));
   wrap.appendChild(row);
   wrap.appendChild(st);
+  wrap.appendChild(vst);
   return wrap;
 }
 
@@ -2870,7 +2880,7 @@ async function credWrite(name, value, wrap, input) {
 
 function wireCredList() {
   const handler = e => {
-    const btn = e.target.closest(".cred-set, .cred-clear");
+    const btn = e.target.closest(".cred-set, .cred-clear, .cred-verify");
     if (!btn) return;
     const wrap = e.target.closest("[data-slot]");
     if (!wrap) return;
@@ -2878,6 +2888,10 @@ function wireCredList() {
     const input = wrap.querySelector(".cred-input");
     const clear = btn.classList.contains("cred-clear");
     const st = wrap.querySelector(".cred-status");
+    if (btn.classList.contains("cred-verify")) {
+      credVerify([name], wrap);
+      return;
+    }
     if (clear && !window.confirm(t("cred.confirmClear", "Clear this slot in secrets.env?"))) {
       return;
     }
@@ -2895,6 +2909,87 @@ function wireCredList() {
     const el = document.getElementById(id);
     if (el) el.addEventListener("click", handler);
   });
+  const all = document.getElementById("credVerifyAll");
+  if (all) all.addEventListener("click", () => credVerify(null, null));
+}
+
+/* ------------------------------------------------ slot verification (0.5.54) --
+   POST /api/slots/verify with the Access token. One call covers a single
+   row (the row's VERIFY button) or the whole catalog (VERIFY ALL). Each
+   result lands in that row's own .cred-vstat line: the server's reason word
+   mapped through the packs, plus its expectation/detail — the VALUE never
+   appears anywhere. Level (format|live) is stated so a shape pass is never
+   mistaken for a proven-working credential. */
+async function credVerify(names, oneWrap) {
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  const msg = document.getElementById("credVerifyMsg");
+  const paint = (wrap, html, isErr) => {
+    const v = wrap && wrap.querySelector(".cred-vstat");
+    if (!v) return;
+    v.hidden = false;
+    v.className = "cred-vstat cred-verify stat-note" +
+      (isErr ? " save-state err" : "");
+    v.textContent = html;
+  };
+  if (!token) {
+    const txt = t("cred.needToken",
+      "access token required — set it in Access");
+    if (oneWrap) paint(oneWrap, txt, true);
+    else if (msg) { msg.className = "save-state err"; msg.textContent = txt; }
+    return;
+  }
+  const body = names && names.length === 1
+    ? { name: names[0] } : { all: true };
+  if (oneWrap) paint(oneWrap, t("cred.verifying", "checking\u2026"), false);
+  if (msg) { msg.className = "save-state";
+    msg.textContent = t("cred.verifying", "checking\u2026"); }
+  let res;
+  try {
+    res = await fetch("/api/slots/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    res = null;
+  }
+  const doc = res ? await res.json().catch(() => ({})) : {};
+  const rows = doc && Array.isArray(doc.results) ? doc.results : null;
+  if (!rows) {
+    const txt = res ? t("cred.verifyFail", "verification unavailable")
+                    : t("cred.verifyFail", "verification unavailable");
+    if (oneWrap) paint(oneWrap, txt, true);
+    if (msg) { msg.className = "save-state err"; msg.textContent = txt; }
+    return;
+  }
+  let okCount = 0, badCount = 0;
+  rows.forEach(r => {
+    if (!r || !r.name) return;
+    // the same slot may render twice (Credentials + Telegram card): paint
+    // every row, exactly like credWrite keeps them in sync
+    const wraps = document.querySelectorAll(`[data-slot="${r.name}"]`);
+    const ok = r.ok === true;
+    if (r.ok === true) okCount++;
+    else if (r.ok === false) badCount++;
+    const level = r.level === "live"
+      ? t("cred.v.live", "live") : t("cred.v.format", "format");
+    const reason = r.reason === "not_set"
+      ? t("cred.v.not_set", "not set")
+      : (ok ? t("cred.v.ok", "ok")
+            : t("cred.v.reason." + String(r.reason || ""),
+                String(r.detail || r.reason || "failed")));
+    const detail = r.ok === false && r.detail ? " — " + r.detail : "";
+    const prefix = r.ok === null ? "\u2013" : (ok ? "\u2713" : "\u2717");
+    const txt = `${prefix} ${level} \u00b7 ${reason}${detail}`;
+    wraps.forEach(w => paint(w, txt, r.ok === false));
+  });
+  if (msg) {
+    const txt = t("cred.verifyDone", "{ok} ok \u00b7 {bad} need attention")
+      .replace("{ok}", String(okCount)).replace("{bad}", String(badCount));
+    msg.className = "save-state" + (badCount ? " err" : "");
+    msg.textContent = txt;
+  }
 }
 
 /* -------------------------------------------------------------- channels -- */
@@ -5282,7 +5377,7 @@ function renderOrch() {
       : t("orch.w3ro", "read-only");
     rows.push(orchLink("web3", t("orch.web3", "web3 surface"), val));
   }
-  // credential slots: set count over the writable catalog (32) — the
+  // credential slots: set count over the writable catalog (33) — the
   // presence-only rows from GET /api/secrets (never a value)
   const cr = (credsData && Array.isArray(credsData.slots)) ? credsData : null;
   if (cr) {
@@ -5461,12 +5556,56 @@ function reasonLi(r) { return `<li>&gt; ${reasonHtml(r)}</li>`; }
    REFRESH sends ?fresh=1 to bust the server cache. All copy is t(key, fb). */
 let commData = null;   // /api/discussions payload (null = never loaded)
 let commCat = "";      // active category filter ("" = all categories)
+let commCats = null;   // composer categories payload (null = never loaded)
+let commThread = null; // discussion number whose thread is open (null = none)
+let commThreadData = null;  // {number, replies[]} for the open thread
 
 function commReasonText(reason) {
   const word = /^[a-z_]+$/.test(String(reason || "")) ? reason : "unknown";
   return t("comm.reason." + word,
     t("comm.reason.unknown",
       "discussions could not be loaded right now"));
+}
+
+/* one shared fetch for every POST face: Bearer token from the Access card,
+   the server's {error, reason, detail} ladder mapped to honest copy. Never
+   echoes the token — only the reason word reaches the status line. */
+async function commPost(path, payload) {
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) return { ok: false, reason: "need_token" };
+  try {
+    const res = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (res.ok && body && body.ok !== false) return { ok: true, body };
+    return { ok: false,
+             reason: /^[a-z_]+$/.test(String(body.reason || ""))
+               ? body.reason : "upstream_error",
+             detail: String(body.detail || body.error || "") };
+  } catch (e) {
+    return { ok: false, reason: "network",
+             detail: String(e && e.message ? e.message : e).slice(0, 120) };
+  }
+}
+
+function commErrorText(res) {
+  if (res.reason === "need_token") {
+    return t("comm.needToken",
+      "access token required — set it in Settings, Access");
+  }
+  if (res.reason === "busy" || res.reason === "rate_limited") {
+    const s = (res.body && res.body.retry_s) || 0;
+    const base = commReasonText(res.reason);
+    return s ? base.replace("{s}", String(s)) : base;
+  }
+  if (res.detail && res.reason !== "no_token" && res.reason !== "no_scope") {
+    return commReasonText(res.reason) + " (" + res.detail + ")";
+  }
+  return commReasonText(res.reason);
 }
 
 function commRelTime(iso) {
@@ -5546,9 +5685,16 @@ function renderCommunity() {
   const shown = commCat
     ? rows.filter(r => String(r.category || "") === commCat) : rows;
   if (!shown.length) {
+    // 0.5.54: the empty state carries an IN-APP entry (the audit's top
+    // community pain point) — the external link stays in the header.
     list.innerHTML = `<div class="gal-empty">${escapeHtml(commCat
       ? t("comm.noCat", "no discussion in this category yet")
-      : t("comm.empty", "no discussions yet \u2014 start the first one"))}</div>`;
+      : t("comm.empty", "no discussions yet \u2014 start the first one"))}</div>` +
+      (commCat ? "" : `<div class="comm-actions"><button class="btn primary" ` +
+        `id="commStart" type="button">${escapeHtml(
+          t("comm.start", "START A DISCUSSION"))}</button></div>`);
+    const start = document.getElementById("commStart");
+    if (start) start.addEventListener("click", () => commOpenComposer());
   } else {
     list.innerHTML = shown.map(r => {
       const title = String(r.title || "");
@@ -5568,8 +5714,19 @@ function renderCommunity() {
         replies,
         commRelTime(r.updated_at),
       ].filter(Boolean);
+      const num = Number(r.number);
+      const canOpen = Number.isInteger(num) && num > 0;
+      const openBtn = canOpen
+        ? `<button class="btn comm-open" type="button" data-num="${num}">` +
+          escapeHtml(Number(commThread) === num
+            ? t("comm.hideThread", "HIDE THREAD")
+            : t("comm.showThread", "REPLIES")) + `</button>`
+        : "";
+      const thread = (canOpen && Number(commThread) === num)
+        ? commThreadHtml(num) : "";
       return `<div class="ctl-row comm-row"><div class="comm-main">` +
         head + `<div class="stat-note comm-meta">${escapeHtml(bits.join(" \u00b7 "))}</div>` +
+        `<div class="comm-actions">${openBtn}</div>${thread}` +
         `</div></div>`;
     }).join("");
   }
@@ -5581,6 +5738,220 @@ function renderCommunity() {
     checked.hidden = !checked.textContent;
   }
 }
+
+/* ------------------------------------------------- in-app posting (0.5.54) --
+   The composer and the per-thread reply box are the console's WRITE faces:
+   both POST through the Bearer token the owner typed in Access, both map the
+   server's reason words to pack copy, and both say exactly what is missing
+   (no token / no Discussions scope) instead of showing a dead form. */
+function commComposerEl() { return document.getElementById("commComposer"); }
+
+function commSetPostMsg(text, isErr) {
+  const el = document.getElementById("commPostMsg");
+  if (!el) return;
+  el.className = "save-state" + (isErr ? " err" : "");
+  el.textContent = text || "";
+}
+
+async function commLoadCategories(force) {
+  if (!force && commCats && commCats.available) return commCats;
+  try {
+    const r = await fetch("/api/discussions/categories" + (force ? "?fresh=1" : ""));
+    const d = await r.json();
+    commCats = (d && typeof d.available === "boolean") ? d
+      : { available: false, categories: [], reason: "unknown" };
+  } catch (e) {
+    commCats = { available: false, categories: [], reason: "network" };
+  }
+  return commCats;
+}
+
+async function commOpenComposer() {
+  const card = commComposerEl();
+  if (!card) return;
+  card.hidden = false;
+  commSetPostMsg("", false);
+  const hint = document.getElementById("commSetupHint");
+  const sel = document.getElementById("commNewCat");
+  if (sel) { sel.innerHTML = ""; sel.disabled = true; }
+  if (hint) { hint.hidden = false;
+    hint.textContent = t("comm.loadingCats", "loading categories\u2026"); }
+  const payload = await commLoadCategories(true);
+  if (!payload.available) {
+    // no_token / no_scope are SETUP states: the copy names the fix, and the
+    // composer stays visible (never a silent no-op button).
+    if (hint) hint.textContent = payload.reason === "no_token"
+      ? t("comm.hint.no_token",
+          "posting needs the community GitHub token — set AIDOG_COMMUNITY_PAT " +
+          "in Settings, Credentials, then try again")
+      : commReasonText(payload.reason);
+    if (sel) sel.disabled = true;
+    return;
+  }
+  const cats = Array.isArray(payload.categories) ? payload.categories : [];
+  if (sel) {
+    sel.innerHTML = cats.map(c =>
+      `<option value="${escapeHtml(c.slug || c.id)}">${escapeHtml(c.name || c.slug)}</option>`
+    ).join("");
+    sel.disabled = cats.length === 0;
+  }
+  if (hint) hint.hidden = cats.length > 0;
+  if (hint && !cats.length) {
+    hint.textContent = t("comm.hint.noCats",
+      "no discussion categories available yet");
+  }
+}
+
+function commCloseComposer() {
+  const card = commComposerEl();
+  if (card) card.hidden = true;
+  commSetPostMsg("", false);
+  const title = document.getElementById("commTitle");
+  const body = document.getElementById("commBody");
+  if (title) title.value = "";
+  if (body) body.value = "";
+}
+
+async function commSubmitPost() {
+  const title = (document.getElementById("commTitle") || {}).value || "";
+  const body = (document.getElementById("commBody") || {}).value || "";
+  const sel = document.getElementById("commNewCat");
+  const category = sel ? sel.value : "";
+  if (!title.trim() || !body.trim()) {
+    commSetPostMsg(t("comm.needFields", "title and message are required"), true);
+    return;
+  }
+  if (!category) {
+    commSetPostMsg(t("comm.needCat", "pick a category first"), true);
+    return;
+  }
+  commSetPostMsg(t("comm.posting", "posting\u2026"), false);
+  const res = await commPost("/api/discussions/create",
+    { title: title.trim(), body: body.trim(), category });
+  if (!res.ok) {
+    commSetPostMsg(commErrorText(res), true);
+    if (res.reason === "no_token" || res.reason === "no_scope") {
+      const hint = document.getElementById("commSetupHint");
+      if (hint) { hint.hidden = false;
+        hint.textContent = commErrorText(res); }
+    }
+    return;
+  }
+  commSetPostMsg(t("comm.posted", "posted \u2014 opening the discussion"), false);
+  const url = res.body && /^https:\/\/github\.com\//.test(String(res.body.url || ""))
+    ? String(res.body.url) : "";
+  commCloseComposer();
+  commCats = null;              // a fresh list on the next open
+  await refreshCommunity(true); // the new row is in the server's fresh read
+  if (url) window.open(url, "_blank", "noopener");
+}
+
+function commThreadHtml(num) {
+  const rows = (commThreadData && Number(commThreadData.number) === Number(num)
+    && Array.isArray(commThreadData.replies)) ? commThreadData.replies : null;
+  let inner;
+  if (!rows) {
+    inner = `<div class="stat-note">${escapeHtml(
+      t("comm.threadLoading", "loading replies\u2026"))}</div>`;
+  } else if (!rows.length) {
+    inner = `<div class="stat-note">${escapeHtml(
+      t("comm.noReplies", "no replies yet \u2014 start the conversation"))}</div>`;
+  } else {
+    inner = rows.map(r => {
+      const bits = [
+        t("comm.by", "by {a}").replace("{a}", String(r.author || "\u2014")),
+        commRelTime(r.created_at),
+      ].filter(Boolean);
+      return `<div class="comm-reply">${escapeHtml(String(r.body || ""))}` +
+        `<div class="stat-note comm-meta">${escapeHtml(bits.join(" \u00b7 "))}</div></div>`;
+    }).join("");
+  }
+  return `<div class="comm-thread" data-thread="${num}">${inner}` +
+    `<div class="ctl-row"><textarea rows="3" maxlength="2000" ` +
+    `id="commReplyBody${num}" data-i18n-ph="comm.replyPh" ` +
+    `placeholder="write a reply (markdown)"></textarea></div>` +
+    `<div class="comm-actions">` +
+    `<button class="btn primary comm-send" type="button" data-num="${num}">` +
+    escapeHtml(t("comm.sendReply", "REPLY")) + `</button>` +
+    `<span class="save-state" id="commReplyMsg${num}" role="status"></span>` +
+    `</div></div>`;
+}
+
+async function commOpenThread(num) {
+  const box = document.getElementById("commReplyMsg" + num);
+  commThreadData = null;
+  try {
+    const r = await fetch(`/api/discussions/replies?number=${num}&fresh=1`);
+    const d = await r.json();
+    commThreadData = (d && d.available === true)
+      ? { number: num, replies: Array.isArray(d.replies) ? d.replies : [] }
+      : { number: num, replies: [], reason: d && d.reason };
+    if (d && d.available === false && box) {
+      box.className = "save-state err";
+      box.textContent = commReasonText(d.reason);
+    }
+  } catch (e) {
+    commThreadData = { number: num, replies: [], reason: "network" };
+  }
+  renderCommunity();
+}
+
+async function commSendReply(num) {
+  const input = document.getElementById("commReplyBody" + num);
+  const box = document.getElementById("commReplyMsg" + num);
+  const body = input ? input.value : "";
+  if (!box) return;
+  if (!body.trim()) {
+    box.className = "save-state err";
+    box.textContent = t("comm.needBody", "write a reply first");
+    return;
+  }
+  box.className = "save-state";
+  box.textContent = t("comm.sending", "sending\u2026");
+  const res = await commPost("/api/discussions/comment",
+    { number: Number(num), body: body.trim() });
+  if (!res.ok) {
+    box.className = "save-state err";
+    box.textContent = commErrorText(res);
+    return;
+  }
+  if (input) input.value = "";
+  await commOpenThread(num);   // the new comment is in the fresh read
+  //  the thread re-render replaced the status node — re-query it and confirm
+  //  AFTER the refresh, so "replied" survives instead of flashing away
+  const fresh = document.getElementById("commReplyMsg" + num);
+  if (fresh) {
+    fresh.className = "save-state";
+    fresh.textContent = t("comm.replied", "replied");
+  }
+}
+
+/* wire the write faces once (they live in static markup, never re-created) */
+(function wireCommunityWrites() {
+  const on = (id, ev, fn) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener(ev, fn);
+  };
+  on("commNew", "click", () => commOpenComposer());
+  on("commCancel", "click", () => commCloseComposer());
+  on("commPost", "click", () => commSubmitPost());
+  // delegate: REPLIES toggle, thread REPLY button — both ride the list
+  const list = document.getElementById("commList");
+  if (list) list.addEventListener("click", async e => {
+    const open = e.target.closest(".comm-open");
+    if (open) {
+      const num = Number(open.dataset.num);
+      if (Number(commThread) === num) {
+        commThread = null; commThreadData = null; renderCommunity();
+      } else {
+        commThread = num; await commOpenThread(num);
+      }
+      return;
+    }
+    const send = e.target.closest(".comm-send");
+    if (send) await commSendReply(Number(send.dataset.num));
+  });
+})();
 
 /* ---------------------------------------------------------------- views -- */
 /* All eight views live in the same document; the inactive ones are hidden with

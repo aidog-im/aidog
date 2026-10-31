@@ -157,6 +157,40 @@ Routes:
                                    never a URL, an exception string, or a
                                    credential. While the repo is private this
                                    is the DESIGN state, not an error.
+  GET  /api/discussions/categories
+                                   -> {available, categories[{id, name,
+                                   slug}], checked_at[, reason]} — the post
+                                   composer's category list (GraphQL, so it
+                                   needs AIDOG_COMMUNITY_PAT; without it the
+                                   honest reason no_token|no_scope ships and
+                                   the UI shows the setup hint)
+  GET  /api/discussions/replies?number=N
+                                   -> {available, number, replies[{id,
+                                   author, body, created_at}], checked_at[,
+                                   reason]} — anonymous REST read of one
+                                   thread (public repo; 400 bad number)
+  POST /api/discussions/create    -> Bearer; {title, body, category} ->
+                                   {ok, number, url} | 400 validation |
+                                   404 unknown category/discussion | 409
+                                   not configured (reason no_token|no_scope)
+                                   | 429 (reason busy|rate_limited, retry_s)
+                                   | 502 (reason network|upstream_error)
+  POST /api/discussions/comment   -> Bearer; {number, body} ->
+                                   {ok, number, comment_id} — same ladder;
+                                   writes share mycore.community's 30s
+                                   interval + 120/2000 char caps with the
+                                   agent's community_post tool
+  POST /api/slots/verify          -> Bearer; {name} | {all:true} ->
+                                   {results[{name, group, set, level:
+                                   format|live, ok, reason, detail}]} — one
+                                   credential check per row: shape rules
+                                   everywhere, a real remote probe for the
+                                   slots that have one (community PAT ->
+                                   GitHub Discussions scope, GH PAT ->
+                                   /user, bot token -> getMe, model key ->
+                                   GET {base}/models). Values are never
+                                   echoed; unset slots answer ok:null /
+                                   reason not_set (honest, not a failure)
   GET  /api/skills/remote       -> official skills catalog (car 4, 0.5.47):
                                    {source: remote|cache|unavailable,
                                    fetched_at, count, skills[7-field rows]};
@@ -472,7 +506,7 @@ WAKE_PHRASE_MAX_LEN = 64
 # not rewrite itself (rotate it by hand), so it is listed but not writable.
 SECRET_GROUPS: dict = {
     "core": ("MODEL_API_KEY", "MYCORE_TG_TOKEN", "AIDOG_TG_ALLOWED_USERS",
-             "AIDOG_GH_PAT", "MYCORE_WD_CHAT"),
+             "AIDOG_GH_PAT", "AIDOG_COMMUNITY_PAT", "MYCORE_WD_CHAT"),
     "gateway": ("OPENAI_API_TOKEN",),
     "web3": ("OKX_API_KEY", "OKX_API_SECRET", "OKX_API_PASSPHRASE",
              "KRAKEN_API_KEY", "KRAKEN_API_SECRET",
@@ -488,7 +522,7 @@ SECRET_GROUPS: dict = {
     "connectors": ("LINEAR_API_KEY", "NOTION_API_KEY"),
 }
 SECRET_SLOTS: dict = {name: group for group, names in SECRET_GROUPS.items()
-                      for name in names}          # 32 editable slots
+                      for name in names}          # 33 editable slots
 SECRET_PRESENCE_ONLY = ("WEB_TOKEN",)             # listed, never writable
 SECRET_VALUE_MAX = 4096                           # chars, one line
 
@@ -2159,6 +2193,330 @@ def collect_discussions(fresh: bool = False) -> dict:
         data = _fetch_discussions()
         _discussions_cache.update(ts=time.time(), data=data)
         return data
+
+
+# ---------------------------------------- community writes & thread reads ---
+# The READ faces below are loopback/no-auth like every other GET; the WRITE
+# faces (create/comment) sit behind Bearer WEB_TOKEN. All four share
+# mycore.community's classification: a failure is an HTTP status plus one
+# category WORD (and, for the reads, an available:false payload) — never an
+# exception string, never a URL, never a credential.
+REPLIES_TTL = 60.0                # in-process thread-read reuse (seconds)
+_replies_lock = threading.Lock()
+_replies_cache: dict = {}         # number -> {ts, data}
+
+
+def _community_status(reason: str) -> int:
+    """CommunityError reason word -> HTTP status (the UI reads the word,
+    the status only tells a retry from a fix-your-input)."""
+    return {"bad_input": 400, "not_found": 404, "no_token": 409,
+            "no_scope": 409, "busy": 429, "rate_limited": 429,
+            "network": 502, "upstream_error": 502}.get(reason, 502)
+
+
+def _community_error_payload(err) -> tuple[int, dict]:
+    """mycore.community.CommunityError -> (status, body). `retry_s` rides
+    the busy/rate_limited pair so the composer can countdown honestly."""
+    payload: dict = {"ok": False, "reason": err.reason}
+    if err.detail:
+        payload["detail"] = err.detail
+    if err.reason in ("busy", "rate_limited"):
+        from mycore import community as _comm
+        payload["retry_s"] = int(_comm.seconds_until_writable()) + 1
+    return _community_status(err.reason), payload
+
+
+def _reply_row(item: object) -> dict | None:
+    """One GitHub comment -> the console's five-field reply row. Nested
+    objects degrade to "", a bad html_url degrades to "" (the UI renders
+    plain text then), and only str/int fields survive."""
+    if not isinstance(item, dict):
+        return None
+    user = item.get("user")
+    author = user.get("login") if isinstance(user, dict) else (user or "")
+    url = str(item.get("html_url") or "")
+    if not url.startswith("https://github.com/"):
+        url = ""
+    return {
+        "id": str(item.get("id") or ""),
+        "author": str(author or ""),
+        "body": str(item.get("body") or "")[:4000],
+        "created_at": str(item.get("created_at") or ""),
+        "url": url,
+    }
+
+
+def collect_replies(number: object, fresh: bool = False) -> dict:
+    """GET /api/discussions/replies?number=N — one thread's comments
+    (anonymous REST read, 60s in-process cache, `?fresh=1` busts it). A bad
+    number answers 400 here; an upstream failure answers the same honest
+    available:false shape as the list face."""
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    try:
+        n = int(number)   # bool is an int subclass: reject it explicitly
+        if isinstance(number, bool):
+            raise TypeError
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "validation failed",
+                "details": ["number must be a positive integer"]}
+    if n <= 0:
+        return {"ok": False, "error": "validation failed",
+                "details": ["number must be a positive integer"]}
+    now = time.time()
+    with _replies_lock:
+        cached = _replies_cache.get(n)
+        if (not fresh and cached and now - cached["ts"] < REPLIES_TTL):
+            return dict(cached["data"])
+    from mycore import community as _comm
+    try:
+        items = _comm.replies(n)
+    except _comm.CommunityError as e:
+        return {"available": False, "number": n, "replies": [],
+                "reason": e.reason, "checked_at": stamp}
+    except Exception as e:  # noqa: BLE001 — offline degrades, never 500
+        sys.stderr.write(f"replies fetch failed err={type(e).__name__}\n")
+        return {"available": False, "number": n, "replies": [],
+                "reason": "network", "checked_at": stamp}
+    rows = [r for r in (_reply_row(i) for i in items[:50]) if r]
+    data = {"available": True, "number": n, "replies": rows,
+            "checked_at": stamp}
+    with _replies_lock:
+        _replies_cache[n] = {"ts": time.time(), "data": dict(data)}
+        while len(_replies_cache) > 20:      # bounded: threads are per-number
+            _replies_cache.pop(next(iter(_replies_cache)))
+    return data
+
+
+def bust_replies_cache(number: object = None) -> None:
+    """A successful reply invalidates that thread (called by the POST leg so
+    the very next GET shows the new comment without waiting out the TTL)."""
+    with _replies_lock:
+        if number is None:
+            _replies_cache.clear()
+        else:
+            try:
+                _replies_cache.pop(int(number), None)
+            except (TypeError, ValueError):
+                pass
+
+
+def collect_categories(fresh: bool = False) -> dict:
+    """GET /api/discussions/categories — the post composer's category list.
+    GraphQL needs the community token, so an unfilled slot is a DESIGN state:
+    {available:false, reason:no_token} tells the UI exactly which slot to set.
+    mycore.community caches the node ids for 10 minutes."""
+    from mycore import community as _comm
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    try:
+        items = _comm.categories(force=fresh)
+    except _comm.CommunityError as e:
+        return {"available": False, "categories": [], "reason": e.reason,
+                "checked_at": stamp}
+    except Exception as e:  # noqa: BLE001 — never 500 on a read face
+        sys.stderr.write(f"categories fetch failed err={type(e).__name__}\n")
+        return {"available": False, "categories": [], "reason": "network",
+                "checked_at": stamp}
+    return {"available": True,
+            "categories": [{"id": c["id"], "name": c["name"],
+                            "slug": c["slug"]} for c in items],
+            "checked_at": stamp}
+
+
+def bust_discussions_cache() -> None:
+    """A successful create invalidates the 600s list cache so the panel's
+    next GET (with or without ?fresh=1) shows the new discussion."""
+    with _discussions_lock:
+        _discussions_cache.update(ts=0.0, data=None)
+
+
+# ------------------------------------------- credential-slot verification ---
+# Two check levels, in one table so `verify` stays one honest code path:
+#   * FORMAT — a conservative shape rule. Only rules we are sure about are
+#     listed; every other slot falls back to the generic single-line rule
+#     (copy-paste accidents: trailing spaces, a stray quote, a split line).
+#     The expectation text is what ships to the UI — the VALUE never is.
+#   * LIVE — a real remote probe with a 5s ceiling, for the four slots whose
+#     usability GitHub/Telegram/OpenAI-compatible endpoints can prove.
+SLOT_VERIFY_RULES: dict[str, tuple[str, str]] = {
+    "WEB_TOKEN": (r"^\S{16,}$", "at least 16 chars, no spaces"),
+    "MODEL_API_KEY": (r"^\S{8,}$", "at least 8 chars, no spaces"),
+    "MYCORE_TG_TOKEN": (r"^\d{4,}:[A-Za-z0-9_-]{20,}$",
+                         "bot token form 123456789:AA..."),
+    "AIDOG_TG_ALLOWED_USERS": (r"^\d+(,\d+)*$",
+                                "numeric ids, comma-separated"),
+    "AIDOG_GH_PAT": (r"^\S{20,}$", "at least 20 chars, no spaces"),
+    "AIDOG_COMMUNITY_PAT": (r"^\S{20,}$", "at least 20 chars, no spaces"),
+    "MYCORE_WD_CHAT": (r"^-?\d{5,20}$", "a numeric Telegram chat id"),
+    "CHANNEL_DINGTALK_WEBHOOK": (r"^https://\S+$", "an https:// webhook URL"),
+}
+VERIFY_TIMEOUT = 5.0             # one live probe, hard ceiling
+
+
+def _verify_format(name: str, value: str) -> dict:
+    """Shape check for one stored value -> {ok, reason, detail}. Never
+    echoes the value; the detail names the EXPECTATION instead."""
+    if value != value.strip():
+        return {"ok": False, "reason": "bad_format",
+                "detail": "value has leading or trailing whitespace — "
+                          "retype it without spaces at the edges"}
+    if any(ord(ch) < 32 or ch == 127 for ch in value):
+        return {"ok": False, "reason": "bad_format",
+                "detail": "value contains a control character — retype it "
+                          "as one plain line"}
+    if len(value) > SECRET_VALUE_MAX:
+        return {"ok": False, "reason": "bad_format",
+                "detail": f"value is longer than {SECRET_VALUE_MAX} chars"}
+    rule = SLOT_VERIFY_RULES.get(name)
+    if rule and not re.match(rule[0], value):
+        return {"ok": False, "reason": "bad_format",
+                "detail": f"expected {rule[1]}"}
+    return {"ok": True, "reason": "ok",
+            "detail": ("shape ok" if rule else
+                       "generic shape ok (no slot-specific rule)")}
+
+
+def _probe_community_pat(value: str) -> dict:
+    """Live: the token authenticates AND can read this repo's discussions —
+    exactly what posting needs (mycore.community owns the classification)."""
+    from mycore import community as _comm
+    res = _comm.verify_token(value)
+    if res.get("ok"):
+        return {"ok": True, "reason": "ok",
+                "detail": f"ok — authenticated as {res.get('login', '?')}, "
+                          f"discussions readable"}
+    return {"ok": False, "reason": res.get("reason") or "no_scope",
+            "detail": res.get("detail") or
+                      "token cannot read this repository's discussions"}
+
+
+def _probe_github_pat(value: str) -> dict:
+    """Live: GET /user with the token. The detail may name the ACCOUNT
+    (public data — the owner runs two gh identities, so this matters) but
+    never the token."""
+    from mycore import community as _comm
+    try:
+        body = _comm._request(f"{_comm.api_base()}/user", token=value)
+        login = str(json.loads(body).get("login") or "")
+    except _comm.CommunityError as e:
+        return {"ok": False, "reason": e.reason,
+                "detail": e.detail or "GitHub rejected this token"}
+    except (ValueError, AttributeError, TypeError):
+        return {"ok": False, "reason": "upstream_error",
+                "detail": "unexpected /user payload"}
+    if not login:
+        return {"ok": False, "reason": "upstream_error",
+                "detail": "no login in the /user response"}
+    return {"ok": True, "reason": "ok",
+            "detail": f"ok — authenticated as {login}"}
+
+
+def _probe_bot_token(value: str) -> dict:
+    """Live: Telegram getMe. The token travels in the URL (Telegram's own
+    protocol), so NOTHING from a failed attempt is echoed — not the URL, not
+    the exception, only this classification."""
+    base = (os.environ.get("AIDOG_TG_API_URL") or "https://api.telegram.org"
+            ).rstrip("/")
+    url = f"{base}/bot{value}/getMe"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "aidog-console"})
+        with urllib.request.urlopen(req, timeout=VERIFY_TIMEOUT) as resp:
+            doc = json.loads(resp.read(64 * 1024).decode("utf-8", "replace"))
+    except urllib.error.HTTPError:
+        return {"ok": False, "reason": "unauthorized",
+                "detail": "Telegram rejected this bot token"}
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return {"ok": False, "reason": "network",
+                "detail": "could not reach Telegram"}
+    if isinstance(doc, dict) and doc.get("ok") is True:
+        username = str((doc.get("result") or {}).get("username") or "")
+        return {"ok": True, "reason": "ok",
+                "detail": f"ok — bot @{username}" if username else "ok"}
+    return {"ok": False, "reason": "unauthorized",
+            "detail": "Telegram rejected this bot token"}
+
+
+def _probe_model_key(value: str) -> dict:
+    """Live: GET {mycore.base_url}/models with the key. The base URL is
+    deliberately NEVER echoed (settings allow credentials embedded in it) —
+    the detail talks about the endpoint in words only."""
+    try:
+        base = str((load_settings().get("mycore") or {}).get("base_url") or "").strip()
+    except Exception:  # noqa: BLE001 — a broken settings file is not a 500
+        base = ""
+    if not base:
+        return {"ok": False, "reason": "no_endpoint",
+                "detail": "no model endpoint configured in settings"}
+    url = base.rstrip("/") + "/models"
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "aidog-console", "Authorization": f"Bearer {value}"})
+        with urllib.request.urlopen(req, timeout=VERIFY_TIMEOUT) as resp:
+            status = getattr(resp, "status", 200)
+            resp.read(64 * 1024)
+    except urllib.error.HTTPError as e:
+        code = getattr(e, "code", 0)
+        if code in (401, 403):
+            return {"ok": False, "reason": "unauthorized",
+                    "detail": f"the endpoint answered HTTP {code} — check "
+                              f"the key"}
+        return {"ok": False, "reason": "upstream_error",
+                "detail": f"the endpoint answered HTTP {code}"}
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return {"ok": False, "reason": "network",
+                "detail": "could not reach the configured model endpoint"}
+    if 200 <= status < 300:
+        return {"ok": True, "reason": "ok",
+                "detail": "ok — endpoint accepted the key"}
+    return {"ok": False, "reason": "upstream_error",
+            "detail": f"the endpoint answered HTTP {status}"}
+
+
+# slot -> live probe (absence = format check only, stated as such)
+SLOT_LIVE_PROBES = {
+    "AIDOG_COMMUNITY_PAT": _probe_community_pat,
+    "AIDOG_GH_PAT": _probe_github_pat,
+    "MYCORE_TG_TOKEN": _probe_bot_token,
+    "MODEL_API_KEY": _probe_model_key,
+}
+
+
+def _verify_slot(name: str) -> dict:
+    """One slot's full check row. Unset -> ok:null/not_set (honest absence);
+    a shape failure short-circuits BEFORE any network call; a live probe, if
+    the slot has one, decides the final level/ok/reason/detail."""
+    group = SECRET_SLOTS.get(name, "core")
+    value = read_env_slot(name)
+    row: dict = {"name": name, "group": group, "set": value is not None,
+                 "level": "format", "ok": None, "reason": "not_set",
+                 "detail": "slot is empty — nothing to verify"}
+    if value is None:
+        return row
+    fmt = _verify_format(name, value)
+    row.update(fmt)
+    if not fmt["ok"]:
+        return row                    # fix the shape first, no network call
+    probe = SLOT_LIVE_PROBES.get(name)
+    if probe is None:
+        return row                    # level stays "format", detail says so
+    row["level"] = "live"
+    try:
+        row.update(probe(value))
+    except Exception as e:  # noqa: BLE001 — a probe must never 500 the route
+        sys.stderr.write(f"slot verify probe failed name={name} "
+                         f"err={type(e).__name__}\n")
+        row.update(ok=False, reason="upstream_error",
+                   detail="verification could not complete")
+    return row
+
+
+def _verify_slots(names: list[str]) -> list[dict]:
+    """Rows for every requested slot; live probes run in parallel so
+    `verify all` costs one timeout, not N of them."""
+    from concurrent.futures import ThreadPoolExecutor
+    if not names:
+        return []
+    with ThreadPoolExecutor(max_workers=min(8, len(names))) as pool:
+        return list(pool.map(_verify_slot, names))
 
 
 def collect_events() -> dict:
@@ -3869,6 +4227,20 @@ class Handler(BaseHTTPRequestHandler):
                 if "?" in self.path else {}
             return self._json(collect_discussions(
                 fresh=q.get("fresh", [""])[0] == "1"))
+        if path == "/api/discussions/categories":
+            q = urllib.parse.parse_qs(self.path.split("?", 1)[1]) \
+                if "?" in self.path else {}
+            return self._json(collect_categories(
+                fresh=q.get("fresh", [""])[0] == "1"))
+        if path == "/api/discussions/replies":
+            q = urllib.parse.parse_qs(self.path.split("?", 1)[1]) \
+                if "?" in self.path else {}
+            raw = (q.get("number") or [None])[0]
+            payload = collect_replies(
+                raw, fresh=q.get("fresh", [""])[0] == "1")
+            if payload.get("ok") is False:      # local validation, not upstream
+                return self._json(payload, 400)
+            return self._json(payload)
         if path == "/api/voice":
             return self._json(collect_voice())
         if path == "/api/channels":
@@ -3920,6 +4292,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_settings_write()
         if path == "/api/secrets":
             return self._handle_secrets_write()
+        if path == "/api/slots/verify":
+            return self._handle_slot_verify()
+        if path == "/api/discussions/create":
+            return self._handle_discussion_write("create")
+        if path == "/api/discussions/comment":
+            return self._handle_discussion_write("comment")
         if path == "/api/say":
             return self._handle_say()
         if path == "/api/stt":
@@ -4054,6 +4432,100 @@ class Handler(BaseHTTPRequestHandler):
                            "slot": {"name": name, "group": group,
                                     "set": bool(value),
                                     "length": len(value)}})
+
+    # -------------------------------- community writes (0.5.54) -----------
+    def _handle_discussion_write(self, action: str) -> None:
+        """POST /api/discussions/create|comment — Bearer WEB_TOKEN, then one
+        mycore.community write. Validation answers 400 before any outbound
+        call; every upstream failure lands on the shared ladder (404/409/429/
+        502) with a category WORD plus an upstream-safe detail — never the
+        token, never a traceback. A successful write refreshes the list
+        cache and (for a reply) that thread's cache so the very next GET
+        shows the new content without waiting out the TTL."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        from mycore import community as _comm
+        details: list[str] = []
+        body = doc.get("body")
+        if not isinstance(body, str) or not body.strip():
+            details.append("body is required")
+        elif len(body) > _comm.BODY_MAX:
+            details.append(f"body too long (max {_comm.BODY_MAX} chars)")
+        if action == "create":
+            title = doc.get("title")
+            if not isinstance(title, str) or not title.strip():
+                details.append("title is required")
+            elif len(title) > _comm.TITLE_MAX:
+                details.append(f"title too long (max {_comm.TITLE_MAX} chars)")
+            category = doc.get("category")
+            if not isinstance(category, str) or not category.strip():
+                details.append("category is required")
+        else:
+            number = doc.get("number")
+            if isinstance(number, bool) or not isinstance(number, int) \
+                    or number <= 0:
+                details.append("number must be a positive integer")
+        if details:
+            return self._json({"error": "validation failed",
+                               "details": details}, 400)
+        try:
+            if action == "create":
+                res = _comm.create(doc.get("title"), body,
+                                   doc.get("category"))
+                bust_discussions_cache()
+            else:
+                res = _comm.comment(doc.get("number"), body)
+                bust_replies_cache(res.get("number"))
+        except _comm.CommunityError as e:
+            status, payload = _community_error_payload(e)
+            return self._json(payload, status)
+        except Exception as e:  # noqa: BLE001 — honest degradation, no internals
+            sys.stderr.write(f"discussion write failed err={type(e).__name__}\n")
+            return self._json({"ok": False, "reason": "upstream_error"}, 502)
+        return self._json({"ok": True, **res})
+
+    # -------------------------------- slot verification (0.5.54) -----------
+    def _handle_slot_verify(self) -> None:
+        """POST /api/slots/verify {name}|{all:true} — Bearer WEB_TOKEN, then
+        one check row per requested slot: {name, group, set, level, ok,
+        reason, detail}. Two levels, both honest about what they proved:
+          format — the stored VALUE's shape against a conservative rule
+                   (never echoed back, only the rule's expectation);
+          live   — a real remote probe for the four slots that have one
+                   (community PAT -> Discussions scope, GH PAT -> /user,
+                   bot token -> getMe, model key -> GET {base}/models).
+        Unset slots answer ok:null / reason not_set — absence is information,
+        not a failure. Every live probe runs with a 5s ceiling and reports
+        a category word only; the model key probe never echoes the base URL
+        (it may carry embedded credentials) nor the key itself."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        name = doc.get("name")
+        all_slots = doc.get("all") is True
+        if all_slots:
+            names = list(SECRET_SLOTS) + list(SECRET_PRESENCE_ONLY)
+        elif isinstance(name, str) and name:
+            if name in SECRET_SLOTS or name in SECRET_PRESENCE_ONLY:
+                names = [name]
+            else:
+                return self._json({"error": "validation failed",
+                                   "details": [f"unknown slot: {name[:64]}"]},
+                                  400)
+        else:
+            return self._json({"error": "validation failed",
+                               "details": ["pass a slot name or all:true"]},
+                              400)
+        # one row per name; live probes run in parallel so `all` stays snappy
+        rows = _verify_slots(names)
+        return self._json({"results": rows,
+                           "checked_at": datetime.now(timezone.utc)
+                           .isoformat(timespec="seconds")})
 
     # ------------------------------------ activation & operations (0.5.40) ---
     def _handle_service_restart(self) -> None:

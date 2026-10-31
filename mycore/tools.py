@@ -58,6 +58,9 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "browser_screenshot", "browser_close",
     # car 4c: media face (always / slot-gated registrants)
     "generate_image", "connector_search",
+    # in-app community car (0.5.54): GitHub Discussions writes — always
+    # registered, write side answers an honest ERROR without the slot
+    "community_post",
     # W1 Web3 read-only exchange car (markets always / portfolio+orders
     # slot-gated on at least one CEX credential slot) + W2 order car
     # (prepare/execute/plans ride the SAME slot gate as the account reads)
@@ -604,6 +607,31 @@ def _connector_search(query: str, source: str = "auto", limit: int = 5) -> str:
         raise ToolError(str(e)) from None
 
 
+def _community_post(action: str, body: str, title: str | None = None,
+                    number=None, category: str | None = None) -> str:
+    """`community_post` handler (in-app community car): post a NEW product
+    discussion or REPLY to one, straight from the agent — no GitHub tab, no
+    approval queue (owner decision 2026-10-27: agents post directly, bounded
+    by the shared 30s write interval and the length caps in mycore.community).
+    Reading the public list needs no token and is http_fetch's job; this tool
+    only exists for the two WRITE actions. CommunityError (no token, no
+    Discussions scope, rate wait, bad input) becomes the honest ERROR line;
+    the token itself never reaches this frame's output."""
+    from . import community  # local import: optional dependency path
+    act = str(action or "").strip().lower()
+    try:
+        if act == "post":
+            res = community.create(title, body, category or "")
+            return f"posted: {res['url']} (discussion #{res['number']})"
+        if act == "reply":
+            res = community.comment(number, body)
+            return (f"replied to discussion #{res['number']} "
+                    f"(comment {res['comment_id']})")
+    except community.CommunityError as e:
+        raise ToolError(e.detail or e.reason) from None
+    raise ToolError("action must be 'post' or 'reply'")
+
+
 def _exchange_markets(venue: str, symbol: str | None = None) -> str:
     """`exchange_markets` handler (W1 Web3 car): READ-ONLY public market
     data for one venue — keyless, works with zero credentials. ExchangeError
@@ -955,6 +983,37 @@ def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
                             "description": "WxH pixels, default 1024x1024"}},
                 "required": ["prompt"]},
                lambda prompt, size="1024x1024": _generate_image(prompt, size))
+    # --- in-app community car (0.5.54): GitHub Discussions writes ---
+    # Registers ALWAYS (owner contract: no registration gate) — the read side
+    # is tokenless and the write side answers an honest ERROR when the
+    # AIDOG_COMMUNITY_PAT slot is empty, exactly like generate_image.
+    r.register("community_post",
+               "Post to the product's GitHub Discussions from inside the "
+               "app: action=post starts a NEW discussion (title + body + "
+               "category slug), action=reply answers an existing one "
+               "(number + body). Writes are rate-limited to one per 30s and "
+               "capped at 120/2000 chars; reads of the public list are "
+               "tokenless and belong to http_fetch, not this tool.",
+               {"type": "object", "properties": {
+                   "action": {"type": "string",
+                              "enum": ["post", "reply"]},
+                   "body": {"type": "string",
+                            "description": "Markdown body of the post or "
+                                           "reply (required)."},
+                   "title": {"type": "string",
+                             "description": "Discussion title — required "
+                                            "for action=post only."},
+                   "number": {"type": "integer",
+                              "description": "Discussion number to reply "
+                                             "to — required for action=reply."},
+                   "category": {"type": "string",
+                                "description": "Category slug (e.g. "
+                                               "ideas, general) — for "
+                                               "action=post; defaults to "
+                                               "the repository default."}},
+                "required": ["action", "body"]},
+               lambda action, body, title=None, number=None, category=None:
+               _community_post(action, body, title, number, category))
     # connector_search registers ONLY when at least one credential slot
     # exists (capability-honest, same pattern as browser_note); with no
     # slots the registry carries connector_note instead of a dead tool.
