@@ -547,3 +547,9 @@ it for `qty`:
   sweep) + `L3` (caps → `capabilities.web3`), `tmp/e2e_frontend_ui.js` `U4`
   (save → chips + catalog) + `U2` (editor) — see
   [frontend_coverage.md](frontend_coverage.md).
+- **Approval action buttons proved end to end (activation car, 0.5.40)**:
+  seeded pending plans → console APPROVE / REJECT → the card status flips
+  (APPROVE is replaced by CANCEL, a rejected plan loses its actions) and the
+  stored plan records `decided_by: "console"`. Evidence:
+  `tmp/e2e_activation_ui.js` `U7` (two seeded plans, both decisions + Bearer
+  read-back) — see [frontend_coverage.md](frontend_coverage.md) §4.

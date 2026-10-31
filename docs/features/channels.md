@@ -257,3 +257,10 @@ credential echo.
   core suite: send URL/body, auth header only when the slot is set, empty-`url`
   gate, poll envelope -> `Inbound` mapping, daemon-absent fail-soft, status
   note + zero echo.
+- **Console SEND TEST action button (activation car, 0.5.40)**: the failure
+  reason renders verbatim in `#chanTestMsg` — a disabled route answers
+  `409 · route disabled in settings`, an enabled-but-unconfigured one names
+  the `CHANNEL_*` slot; neither ever carries a value. Evidence:
+  `tmp/e2e_activation_ui.js` `U7` (409 detail) and
+  `tmp/e2e_frontend_coverage.py` `L4` (both 409 shapes) — see
+  [frontend_coverage.md](frontend_coverage.md) §4.

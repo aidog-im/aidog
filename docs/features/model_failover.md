@@ -150,6 +150,18 @@ any `MYCORE_UPSTREAMS`/`MYCORE_BASE_URL`/… export that beats it. Evidence:
 [frontend_coverage.md](frontend_coverage.md). Process cooldown state is
 still **not** rendered (unchanged, documented below).
 
+**Model key resolution (activation car, 0.5.40).** `ChatClient._headers`
+resolves the API key as `os.environ.get(name)` first, then the own-line
+`MODEL_API_KEY` secrets slot — the store the console and `aidog setup`
+write, so a configured key finally reaches the client (previously the
+client read the process env only). Env always wins, an empty pair keeps the
+loopback placeholder / leaves a remote endpoint unauthenticated, and no key
+material is ever logged, repr'd or embedded in an error.
+Evidence: `tmp/e2e_activation.py` `L8` (env wins · slot fallback ·
+placeholder · unauthenticated remote · `describe()` clean) and the
+`run.py::test_model_key_slots` gate — see
+[frontend_coverage.md](frontend_coverage.md) §4.
+
 ## Related
 
 - Module: `mycore/modeltier.py` (parsing + classification + health policy

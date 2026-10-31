@@ -48,6 +48,8 @@
     </div>
     <div class="head-right">
       <span class="clock" id="clock">--:--:--</span>
+      <button class="btn" id="updateCheckBtn" type="button"
+              data-i18n="upd.check">CHECK</button>
       <button class="btn" id="langBtn">中文</button>
     </div>
   </header>
@@ -56,6 +58,8 @@
     <span class="upd-dot"></span>
     <span id="updateText">update available</span>
     <code class="upd-cmd">python3 deploy/aidog_update.py apply</code>
+    <button class="btn primary" id="updateApplyBtn" type="button"
+            data-i18n="upd.apply" hidden>APPLY</button>
     <button class="btn-x" id="updateDismiss" aria-label="dismiss">×</button>
   </div>
 
@@ -141,6 +145,35 @@
         </div>
       </div>
       <div class="ov-grid">
+        <!-- activation & operations car (0.5.40): the first-run "am I ready?"
+             checklist. Renders ONLY from GET /api/setup (presence / format /
+             probe states — never a value); a build without that endpoint
+             keeps the whole card hidden, an honest absence beats a guess. -->
+        <div class="card span-3" id="actCard" hidden>
+          <h2><span data-i18n="sec.activate">ACTIVATION</span>
+              <span class="chat-badge" id="actBadge">–</span></h2>
+          <div class="stat-note" id="actStart" hidden></div>
+          <div id="actList"></div>
+          <div class="ctl-actions" style="margin-top:12px;">
+            <button class="btn" id="actRecheck" type="button"
+                    data-i18n="act.recheck">RE-CHECK</button>
+            <span class="save-state" id="actMsg" role="status"></span>
+          </div>
+          <!-- bot block: token / allowlist presence + format chips, service
+               state and the restart action (confirm -> POST restart -> poll) -->
+          <div style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--line);">
+            <div class="ctl-row token-row" style="margin-bottom:6px;">
+              <label data-i18n="act.bot">BOT & SERVICE</label>
+              <span class="stat-note" id="actBotState" style="margin-top:0;"></span>
+            </div>
+            <div class="ctl-actions">
+              <button class="btn primary" id="svcRestartBtn" type="button"
+                      data-i18n="act.restartBtn">RESTART CHAT SERVICE</button>
+              <span class="save-state" id="svcRestartMsg" role="status"></span>
+            </div>
+          </div>
+        </div>
+
         <div class="card span-3">
           <h2><span data-i18n="sec.services">Services</span>
               <span class="svc-summary" id="svcSummary">–</span></h2>
@@ -202,11 +235,23 @@
         <div class="card span-3">
           <h2 data-i18n="sec.system">SYSTEM CAPABILITIES</h2>
           <table class="kv" id="capGrid"></table>
+          <!-- activation & operations car: doctor self-check (POST
+               /api/doctor/run) — verbatim output, monospace, scrollable;
+               non-zero FAIL renders as honest output, not as a hidden state -->
+          <div class="ctl-actions" style="margin-top:14px;">
+            <button class="btn" id="doctorRunBtn" type="button"
+                    data-i18n="cap.doctor">RUN DOCTOR</button>
+            <span class="save-state" id="doctorMsg" role="status"></span>
+          </div>
+          <pre class="vs-live" id="doctorOut" hidden
+               style="max-height:280px;overflow:auto;font-family:Consolas,monospace;font-size:12px;"></pre>
           <div class="ctl-row token-row" style="margin-top:16px">
             <label data-i18n="cron.title">CRON JOBS</label>
+            <span class="save-state" id="cronMsg" role="status"></span>
           </div>
+          <div class="stat-note" data-i18n="cron.createHint" style="margin-top:0;">create a job by asking in chat or sending /cron in Telegram</div>
           <div id="cronList"></div>
-          <div class="stat-note" data-i18n="cron.hint">jobs are created through natural language, the CLI or Telegram — this list is read-only here</div>
+          <div class="stat-note" data-i18n="cron.hint">delete a job with × on its row</div>
         </div>
 
         <!-- Draft E signature card: hold-to-seal authority preview + four
@@ -593,6 +638,16 @@
                    data-i18n-ph="ctl.mycUrlPh" autocomplete="off">
           </div>
           <div class="ctl-row">
+            <label data-i18n="ctl.mycModels">Model whitelist (comma separated)</label>
+            <input type="text" id="mycModels" maxlength="2048" autocomplete="off"
+                   spellcheck="false" placeholder="per-task model whitelist, e.g. model-a, model-b">
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="ctl.mycBudget">Compaction budget (chars)</label>
+            <input type="number" id="mycBudget" min="4000" max="1000000" step="1"
+                   placeholder="24000 = default">
+          </div>
+          <div class="ctl-row">
             <label data-i18n="ctl.mycContextDirs">Context dirs (":" separated)</label>
             <input type="text" id="mycContextDirs" maxlength="256" autocomplete="off"
                    spellcheck="false" data-i18n-ph="ctl.emptyOff" placeholder="empty = off">
@@ -736,6 +791,11 @@
     </footer>
   </main>
 </div>
+
+<!-- transient update-check toast (activation car): fixed, auto-hiding,
+     carries the three honest check outcomes verbatim -->
+<div id="updToast" role="status" hidden
+     style="position:fixed;top:calc(var(--topbar-h,63px) + 12px);left:50%;transform:translateX(-50%);z-index:70;max-width:min(560px,92vw);background:#fff;border:1px solid var(--line);border-left:3px solid var(--blue);border-radius:10px;box-shadow:0 8px 24px rgba(0,22,51,.18);padding:10px 14px;font-size:12.5px;color:var(--navy);overflow-wrap:anywhere;"></div>
 
 <script src="/static/app.js"></script>
 </body>

@@ -1897,8 +1897,17 @@ function refreshTools() {
 
 /* --------------------------------------------------------------- version -- */
 let versionData = null;
+let updApplying = false, updToastTimer = null;
 function renderVersion() {
   const banner = document.getElementById("updateBanner");
+  const applyBtn = document.getElementById("updateApplyBtn");
+  // the APPLY control exists ONLY while an update is genuinely available
+  // (and never mid-apply); a null/failed check shows neither button state —
+  // that outcome is reported by the check toast instead.
+  if (applyBtn) {
+    applyBtn.hidden = updApplying || !(versionData &&
+      versionData.update_available === true);
+  }
   if (!versionData) { banner.hidden = true; return; }
   if (versionData.update_available &&
       sessionStorage.getItem("aidog_upd_dismiss") !== versionData.latest) {
@@ -1907,6 +1916,124 @@ function renderVersion() {
       t("upd.text", "UPDATE v{v} AVAILABLE").replace("{v}", versionData.latest) +
       (versionData.notes ? " — " + versionData.notes.slice(0, 90) : "");
   } else banner.hidden = true;
+}
+
+/* ------------------------------------------- update check / apply (0.5.40) --
+   Three honest check outcomes: latest / update available / check failed
+   (offline or manifest error, reported verbatim). Apply runs detached on the
+   server — the console WILL restart mid-apply, so poll failures during that
+   window mean "still applying, keep waiting", and the 120s timeout says so
+   instead of pretending success. */
+const actSleep = ms => new Promise(r => setTimeout(r, ms));
+
+function updToast(text, isErr) {
+  const el = document.getElementById("updToast");
+  if (!el) return;
+  el.textContent = text;
+  el.style.borderLeftColor = isErr ? "var(--red)" : "var(--blue)";
+  el.style.color = isErr ? "var(--red)" : "var(--navy)";
+  el.hidden = false;
+  clearTimeout(updToastTimer);
+  updToastTimer = setTimeout(() => { el.hidden = true; }, 8000);
+}
+
+async function updateCheck() {
+  const btn = document.getElementById("updateCheckBtn");
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch("/api/version?fresh=1");
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const d = await res.json();
+    if (!d || typeof d !== "object") throw new Error("bad payload");
+    versionData = d;
+    renderVersion();
+    if (versionData.update_available === true) {
+      updToast(t("upd.text", "UPDATE v{v} AVAILABLE")
+        .replace("{v}", String(versionData.latest || "")), false);
+    } else if (versionData.update_available === false) {
+      updToast(t("upd.latest", "checked — you are up to date (v{v})")
+        .replace("{v}", String(versionData.installed || "")), false);
+    } else {
+      updToast(t("upd.checkFail", "update check failed: {e}")
+        .replace("{e}", String(versionData.error || "unknown error")), true);
+    }
+  } catch (e) {
+    updToast(t("upd.checkFail", "update check failed: {e}")
+      .replace("{e}", String(e).slice(0, 120)), true);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function updateApply() {
+  if (updApplying) return;
+  if (!versionData || versionData.update_available !== true) return;
+  if (!window.confirm(t("upd.confirm",
+      "Apply the update now? Services restart during the upgrade."))) return;
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    updToast(t("save.needToken", "token required"), true);
+    return;
+  }
+  const btn = document.getElementById("updateApplyBtn");
+  updApplying = true;
+  renderVersion();            // APPLY hides itself while the apply runs
+  updToast(t("upd.applying",
+    "applying update — the console may restart while it runs; keep this page open"), false);
+  const done = () => {
+    updApplying = false;
+    if (btn) btn.disabled = false;
+    renderVersion();
+  };
+  try {
+    const res = await fetch("/api/update/apply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify({}),
+    });
+    let body = {};
+    try { body = await res.json(); } catch (e) { body = {}; }
+    if (res.status === 401) {
+      updToast(t("save.badToken", "401 · unauthorized"), true);
+      done(); return;
+    }
+    if (!res.ok) {
+      const err = (body && (body.error || (Array.isArray(body.details) &&
+        body.details.join("; ")))) || ("HTTP " + res.status);
+      updToast(t("upd.applyFail", "apply failed: {e}")
+        .replace("{e}", String(err)), true);
+      done(); return;
+    }
+  } catch (e) {
+    updToast(t("upd.applyFail", "apply failed: {e}")
+      .replace("{e}", String(e).slice(0, 120)), true);
+    done(); return;
+  }
+  // queued: poll a fresh version read every 3s for up to 120s. The console
+  // dying mid-apply is the designed behaviour — every failed fetch here is
+  // "still applying", never an error.
+  const from = String((versionData && versionData.installed) || "");
+  const deadline = Date.now() + 120000;
+  while (Date.now() < deadline) {
+    await actSleep(3000);
+    let d = null;
+    try {
+      const r = await fetch("/api/version?fresh=1");
+      if (r.ok) d = await r.json();
+    } catch (e) { d = null; }      // console restarting — keep waiting
+    if (d && typeof d === "object" &&
+        (String(d.installed || "") || "") !== "" &&
+        (from ? String(d.installed) !== from : d.update_available === false)) {
+      versionData = d;
+      updToast(t("upd.applied", "update applied — v{v} is running")
+        .replace("{v}", String(d.installed)), false);
+      done(); return;
+    }
+  }
+  updToast(t("upd.applyUnknown",
+    "the update never reported back — check data/update_apply.log or the terminal"), true);
+  done();
 }
 
 /* -------------------------------------------------------------- settings -- */
@@ -1959,6 +2086,9 @@ async function loadSettings() {
 async function saveSettings() {
   const state = document.getElementById("saveState");
   const input = document.getElementById("tokenInput");
+  // any non-success outcome below must leave nothing repaintable behind
+  delete state.dataset.saveKind;
+  delete state.dataset.restartHint;
   if (input.value) localStorage.setItem(TOKEN_KEY, input.value.trim());
   const token = localStorage.getItem(TOKEN_KEY) || "";
   const payload = {
@@ -1997,6 +2127,10 @@ async function saveSettings() {
   }
   const mycExtra = mycoreExtraPayload();
   if (mycExtra) Object.assign(payload.mycore, mycExtra);
+  // keys the chat service reads ONCE at start: editing them needs a restart
+  // (a models/budget edit is live and never raises mycRestartDirty)
+  const needSvcRestart = !!(mycRestartDirty ||
+    (toolsDirty && Object.prototype.hasOwnProperty.call(payload.mycore, "tools_off")));
   if (chanDirty) payload.channels = channelsPayload();
   const hookPatch = hooksPayload();
   if (hookPatch) payload.hooks = hookPatch;
@@ -2042,12 +2176,25 @@ async function saveSettings() {
       return;
     }
     settings = Object.assign(settings, body.settings || payload);
+    // restart-to-apply semantics (activation car): a save that touched the
+    // registry-at-start mycore keys says so in the save row — the button
+    // lives in the Overview activation card.
+    let okText = body.changed ? t("save.ok", "saved ✓") : t("save.same", "no change ✓");
+    if (needSvcRestart) {
+      okText += " · " + t("ctl.restartSvcHint",
+        "restart the chat service to apply — button in Overview");
+    }
     state.className = "save-state";
-    state.textContent = body.changed ? t("save.ok", "saved ✓") : t("save.same", "no change ✓");
+    state.textContent = okText;
+    // remembered so a language switch can repaint this row (settingsRelang)
+    state.dataset.saveKind = body.changed ? "ok" : "same";
+    if (needSvcRestart) state.dataset.restartHint = "1";
+    else delete state.dataset.restartHint;
     input.value = "";
     // accepted -> the form is the source of truth again: clear the dirty
     // marks and re-read the rows the server normalized (hooks/channels/tools).
     chanDirty = false; usageDirty = false; mycDirty = false;
+    mycRestartDirty = false;
     if (hookPatch) { hookDirty.clear(); renderHooks(); }
     if (payload.channels) { renderChannels(); loadChanStatus(); }
     if (toolsDirty) { toolsDirty = false; renderToolsOff(); }
@@ -2116,6 +2263,10 @@ let credsData = null;      // last GET /api/secrets payload (names/lengths only)
 let credHintReason = "";   // "" | unavailable | readOnly | needToken
 let chanStatusRows = [];   // GET /api/channels rows (name/enabled/configured/note)
 let chanDirty = false, usageDirty = false, mycDirty = false, toolsDirty = false;
+// activation car: only the keys the chat service reads AT START raise this
+// flag (tools_off / mcp / shell / context_dirs) — a models/budget edit must
+// never nag for a restart it does not need.
+let mycRestartDirty = false;
 const hookDirty = new Set();
 
 /* ---------------------------------------------------------- credentials -- */
@@ -2149,7 +2300,10 @@ function repaintCredStatuses() {
     if (!row) return;
     const st = row.querySelector(".cred-status");
     if (!st || st.dataset.errDetail) return;
-    st.textContent = credStatusText(slot);
+    st.textContent = credStatusText(slot) +
+      (st.dataset.restartHint === "1"
+        ? " · " + t("cred.restartHint", "restart the chat service to apply")
+        : "");
   });
 }
 
@@ -2300,7 +2454,15 @@ async function credWrite(name, value, wrap, input) {
     }
     st.className = "cred-status stat-note";
     delete st.dataset.errDetail;
-    st.textContent = credStatusText(slot);
+    // bot credentials are read from the service process environment once at
+    // start: a successful SET/CLEAR says the restart is still pending here
+    if (name === "MYCORE_TG_TOKEN" || name === "AIDOG_TG_ALLOWED_USERS") {
+      st.dataset.restartHint = "1";
+    }
+    st.textContent = credStatusText(slot) +
+      (st.dataset.restartHint === "1"
+        ? " · " + t("cred.restartHint", "restart the chat service to apply")
+        : "");
     beep(880, 0.06);
   } catch (e) {
     credErrDetail(st, String(e).slice(0, 80));
@@ -2705,6 +2867,23 @@ function mycoreExtraPayload() {
     out.upstreams = g("mycUpstreams").trim();
     out.mcp = g("mycMcp").trim();
     out.shell = g("mycShell").trim();
+    // mycore.models / mycore.budget are first-class schema keys now: they
+    // join the payload only with a value, so an untouched form on a build
+    // without them can never fail the whole save with "unknown key".
+    const stored = (settings.mycore && typeof settings.mycore === "object")
+      ? settings.mycore : {};
+    const mEl = document.getElementById("mycModels");
+    if (mEl) {
+      const list = String(mEl.value || "").split(",").map(s => s.trim())
+        .filter(Boolean).slice(0, 32);
+      const had = Array.isArray(stored.models) && stored.models.length;
+      if (list.length || had) out.models = list;
+    }
+    const bEl = document.getElementById("mycBudget");
+    if (bEl && String(bEl.value || "").trim() !== "") {
+      const n = parseInt(bEl.value, 10);
+      if (Number.isFinite(n)) out.budget = n;   // server enforces 4000..1000000
+    }
   }
   if (toolsDirty) {
     const off = toolsOffValue() || [];
@@ -2737,7 +2916,11 @@ function initSettingsPanels() {
   setField("mycUpstreams", myc.upstreams);
   setField("mycMcp", myc.mcp);
   setField("mycShell", myc.shell);
+  // activation car: mycore.models / mycore.budget are console-managed now
+  setField("mycModels", Array.isArray(myc.models) ? myc.models.join(", ") : "");
+  setField("mycBudget", myc.budget);
   chanDirty = false; usageDirty = false; mycDirty = false; toolsDirty = false;
+  mycRestartDirty = false;
   hookDirty.clear();
   renderToolsOff();
   renderEnvOverride();
@@ -2749,11 +2932,27 @@ function initSettingsPanels() {
   exCapPrefill();              // B2: exchange caps form <- settings.web3
 }
 
+/* repainted after a language switch: the save row may carry a restart hint
+   written in the previous pack (only ever the two success templates — an
+   error detail stays verbatim as it was shown) */
+function repaintSaveState() {
+  const state = document.getElementById("saveState");
+  if (!state || !state.dataset.saveKind || state.classList.contains("err")) return;
+  let text = state.dataset.saveKind === "same"
+    ? t("save.same", "no change ✓") : t("save.ok", "saved ✓");
+  if (state.dataset.restartHint === "1") {
+    text += " · " + t("ctl.restartSvcHint",
+      "restart the chat service to apply — button in Overview");
+  }
+  state.textContent = text;
+}
+
 /* Pack-driven texts that live inside JS-built rows: re-applied on a
    language switch (data-i18n nodes are already handled by loadLang itself). */
 function settingsRelang() {
   paintCredHint();
   repaintCredStatuses();   // "set / empty / {n} chars" follows the language too
+  repaintSaveState();      // activation car: saved row + restart hint follow
   paintChanChips();
   updateHookCounts();
   document.querySelectorAll(".cred-status[data-err-detail]").forEach(el => {
@@ -2762,6 +2961,7 @@ function settingsRelang() {
   renderEnvOverride();
   renderCapGrid();             // B2: system card + cron list follow the pack
   renderCronList();
+  renderSetup();               // activation car: checklist rows re-translate
   evoCrossCheck();
 }
 
@@ -2774,8 +2974,8 @@ function settingsRelang() {
        always (the server is all-or-nothing), then chips + capabilities
        refresh so the read-only summary above shows the stored numbers;
      - Overview system card -> GET /api/capabilities (names and counts only)
-       plus GET /api/cron, which is read-only BY DESIGN: jobs are created
-       through natural language / the CLI / Telegram, never from here.
+       plus GET /api/cron (read route); the 0.5.40 activation car adds the
+       doctor button and the per-row cron delete action next to them.
    Hard rules: a server 400 detail is shown VERBATIM (it names keys, bounds
    and grammar — never a value); a field the server does not send degrades
    to t("cap.unavailable") or a hidden row, never to an invented number. */
@@ -3053,8 +3253,9 @@ function renderCapGrid() {
 }
 
 /* ---------------------------------------------------- cron list (B2) --
-   GET /api/cron, read-only by design (jobs are created through natural
-   language / CLI / Telegram). Absent endpoint or shape -> honest note. */
+   GET /api/cron stays a READ route (the 0.5.40 car adds a DELETE action via
+   POST {action:"del"}, creation stays natural language / CLI / Telegram).
+   Absent endpoint or shape -> honest note. */
 let cronData = null;
 let cronSeen = false;        // false until the FIRST cron fetch settles
 
@@ -3094,11 +3295,397 @@ function renderCronList() {
       meta.push(t("cron.next", "next {v}").replace("{v}", String(job.next)));
     }
     if (job.due) meta.push(t("cron.due", "due now"));
-    return `<div class="ctl-row" data-cron="${escapeHtml(String(job.id || ""))}">` +
+    const jid = String(job.id || "");
+    const del = jid
+      ? `<button class="btn" id="cronDelBtn" type="button" data-job="${escapeHtml(jid)}" ` +
+        `title="${escapeHtml(t("cron.delConfirm", "Delete cron job {id}?"))
+          .replace("{id}", escapeHtml(jid))}" ` +
+        `style="padding:2px 9px;font-size:12px;" aria-label="delete">×</button>`
+      : "";
+    return `<div class="ctl-row" data-cron="${escapeHtml(jid)}">` +
       `<label style="flex:1;min-width:0;overflow-wrap:anywhere;">${escapeHtml(title)}</label>` +
       `<span class="stat-note" style="margin-top:0;">${escapeHtml(meta.join(" · "))}</span>` +
+      del +
       `</div>`;
   }).join("");
+}
+
+/* ------------------------------------ activation & operations (0.5.40) --
+   Lane B of the activation & operations car. Four honest console faces:
+     - ACTIVATION card (Overview, FIRST card): GET /api/setup — required
+       slot / endpoint / service rows, each with a fix deep-link into the
+       Settings control that repairs it, a fresh-run welcome line (or run
+       `aidog setup` in a terminal) and #actRecheck. A build without the
+       endpoint keeps the whole card hidden — an honest absence, never a
+       guessed state. Credential values never appear: presence/format only.
+     - Bot block: token + allowlist presence/format chips, service state and
+       #svcRestartBtn -> confirm -> POST /api/service/restart {target:
+       "service"} -> poll GET /api/status up to 20s for state "running";
+       409 / failure / timeout each render their own honest line with the
+       server error verbatim.
+     - Doctor: POST /api/doctor/run -> summary counts + up to 80 verbatim
+       output lines in a scrollable monospace block (button disabled while
+       running; non-zero FAIL is output, not an error).
+     - cron delete: per-row #cronDelBtn[data-job] -> confirm -> POST /api/cron
+       {action:"del", id} -> list refresh; creation stays natural-language. */
+let setupData = null, setupSeen = false, setupBusy = false;
+
+/* item id -> the Settings control that fixes it (deep-link target) */
+const ACT_FIX = {
+  web_token: { slot: "WEB_TOKEN" },
+  model_key: { slot: "MODEL_API_KEY" },
+  tg_token: { slot: "MYCORE_TG_TOKEN" },
+  tg_allowlist: { slot: "AIDOG_TG_ALLOWED_USERS" },
+  model_endpoint: { field: "mycUrl" },
+  service: { restart: true },
+};
+
+function actChip(text, tone) {
+  const col = tone === "ok" ? "var(--ok)"
+    : tone === "bad" ? "var(--red)"
+    : tone === "warn" ? "var(--amber)" : "var(--muted)";
+  return `<span class="chat-badge" style="color:${col};border-color:${col};">` +
+    `${escapeHtml(text)}</span>`;
+}
+
+function actTone(state) {
+  const s = String(state || "");
+  if (s === "set" || s === "reachable" || s === "running") return "ok";
+  if (s === "empty" || s === "unreachable" || s === "stopped") return "bad";
+  if (s === "invalid" || s.indexOf("pending") === 0) return "warn";
+  return "";                       // unknown state: raw text, neutral chip
+}
+
+function actChipText(state) {
+  const s = String(state || "");
+  const key = s.indexOf("pending") === 0 ? "pending" : s;
+  const map = {
+    set: ["act.st.set", "set ✓"],
+    empty: ["act.st.empty", "empty ✗"],
+    invalid: ["act.st.invalid", "invalid ⚠"],
+    reachable: ["act.st.reachable", "reachable ✓"],
+    unreachable: ["act.st.unreachable", "unreachable ✗"],
+    running: ["act.st.running", "running ✓"],
+    stopped: ["act.st.stopped", "stopped"],
+    pending: ["act.st.pending", "pending (fail-closed)"],
+  };
+  if (map[key]) return t(map[key][0], map[key][1]);
+  return s || "—";                 // server state verbatim, never invented
+}
+
+function renderSetup() {
+  const card = document.getElementById("actCard");
+  if (!card) return;
+  if (!setupData) {                // no endpoint / bad shape: hide, honestly
+    card.hidden = true;
+    card.style.display = "none";
+    return;
+  }
+  card.hidden = false;
+  card.style.display = "";
+  const ready = setupData.ready === true;
+  const badge = document.getElementById("actBadge");
+  if (badge) {
+    badge.textContent = ready ? t("act.ready", "READY ✓")
+      : t("act.notReady", "NOT READY");
+    badge.style.color = ready ? "var(--ok)" : "var(--amber)";
+    badge.style.borderColor = ready ? "var(--ok)" : "var(--amber)";
+  }
+  // fresh-run welcome: this IS the first-boot onboarding (3 steps + the CLI)
+  const start = document.getElementById("actStart");
+  if (start) {
+    start.hidden = ready;
+    if (!ready) {
+      start.innerHTML = escapeHtml(t("act.start",
+        "Welcome — 3 steps to activate: 1) set the console access token, " +
+        "2) set the bot token and the owner allowlist, 3) point the model " +
+        "endpoint. Fix each row below, or run in a terminal:")) + " " +
+        `<code style="font-family:Consolas,monospace;font-size:11.5px;` +
+        `color:var(--blue-ink);border:1px dashed var(--line);` +
+        `padding:1px 6px;border-radius:6px;">aidog setup</code>`;
+    }
+  }
+  const items = Array.isArray(setupData.items) ? setupData.items : [];
+  const list = document.getElementById("actList");
+  if (list) {
+    list.innerHTML = items.map(it => {
+      const o = (it && typeof it === "object") ? it : {};
+      const id = String(o.id || "");
+      if (!id) return "";
+      const label = t("act.item." + id, id);
+      const opt = o.required === false
+        ? ` <span class="stat-note" style="margin-top:0;display:inline;">` +
+          `${escapeHtml(t("act.optional", "optional"))}</span>` : "";
+      const fix = ACT_FIX[id]
+        ? `<button class="btn" type="button" data-act-fix="${escapeHtml(id)}" ` +
+          `style="padding:3px 10px;">${escapeHtml(t("act.fix", "FIX"))}</button>`
+        : "";
+      const hint = o.hint
+        ? `<div class="stat-note" style="margin-top:0;">` +
+          `${escapeHtml(t(String(o.hint), String(o.hint_en || "")))}</div>`
+        : "";
+      return `<div data-act-item="${escapeHtml(id)}">` +
+        `<div class="ctl-row">` +
+        `<label style="flex:1;min-width:0;overflow-wrap:anywhere;">` +
+        `${escapeHtml(label)}</label>${opt}` +
+        actChip(actChipText(o.state), actTone(o.state)) + fix +
+        `</div>${hint}</div>`;
+    }).join("");
+  }
+  // bot block: token / allowlist presence + format, service state
+  const bot = document.getElementById("actBotState");
+  if (bot) {
+    const find = id => items.find(x => x && x.id === id) || null;
+    const parts = [];
+    ["tg_token", "tg_allowlist"].forEach(id => {
+      const o = find(id);
+      if (!o) return;
+      parts.push(escapeHtml(t("act.item." + id, id)) + " " +
+        actChip(actChipText(o.state), actTone(o.state)));
+    });
+    const svc = String(setupData.service || "");
+    if (svc) {
+      parts.push(escapeHtml(t("act.item.service", "Chat service")) + " " +
+        actChip(actChipText(svc), actTone(svc)));
+    }
+    bot.innerHTML = parts.length ? parts.join(" · ") : "—";
+  }
+}
+
+async function refreshSetup() {
+  const msg = document.getElementById("actMsg");
+  try {
+    const res = await fetch("/api/setup");
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const d = await res.json();
+    if (!d || typeof d !== "object" || !Array.isArray(d.items)) {
+      throw new Error("bad payload");
+    }
+    setupData = d;
+    if (msg) { msg.className = "save-state"; msg.textContent = ""; }
+  } catch (e) {
+    if (setupSeen && setupData) {
+      // keep the last honest snapshot and report this probe failure verbatim
+      if (msg) {
+        msg.className = "save-state err";
+        msg.textContent = t("act.checkFail", "setup check failed: {e}")
+          .replace("{e}", String(e).slice(0, 120));
+      }
+    } else {
+      setupData = null;           // 404 (lane not landed) / bad shape
+    }
+  }
+  setupSeen = true;
+  renderSetup();
+}
+
+function actFocusEl(el) {
+  if (!el) return;
+  try { el.scrollIntoView({ block: "center", behavior: "smooth" }); }
+  catch (e) { el.scrollIntoView(); }
+  const input = (el.querySelector && el.querySelector("input, textarea")) || el;
+  if (input && typeof input.focus === "function") {
+    try { input.focus({ preventScroll: true }); } catch (e) { input.focus(); }
+  }
+}
+
+/* fix path: deep-link to the control that repairs this item */
+function actFix(id) {
+  const fix = ACT_FIX[id];
+  if (!fix) return;
+  if (fix.restart) {
+    const b = document.getElementById("svcRestartBtn");
+    actFocusEl(b);
+    return;
+  }
+  setView("settings", true);
+  requestAnimationFrame(() => {
+    if (fix.slot) {
+      const sel = `#credList [data-slot="${fix.slot}"]`;
+      const row = document.querySelector(sel);
+      if (row) { actFocusEl(row); return; }
+      loadCreds().then(() => actFocusEl(document.querySelector(sel)));
+      return;
+    }
+    if (fix.field) actFocusEl(document.getElementById(fix.field));
+  });
+}
+
+async function svcRestart() {
+  const btn = document.getElementById("svcRestartBtn");
+  const msg = document.getElementById("svcRestartMsg");
+  if (!btn || !msg) return;
+  if (!window.confirm(t("act.restartConfirm",
+      "Restart the chat service now? Bot token / allowlist / tool changes " +
+      "take effect after a restart."))) return;
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    msg.className = "save-state err";
+    msg.textContent = t("save.needToken", "token required");
+    return;
+  }
+  btn.disabled = true;
+  msg.className = "save-state";
+  msg.textContent = t("act.restarting", "restarting… waiting for the service");
+  try {
+    const res = await fetch("/api/service/restart", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify({ target: "service" }),
+    });
+    let body = {};
+    try { body = await res.json(); } catch (e) { body = {}; }
+    if (res.status === 401) {
+      msg.className = "save-state err";
+      msg.textContent = t("save.badToken", "401 · unauthorized");
+      btn.disabled = false;
+      return;
+    }
+    if (!res.ok) {
+      const err = (body && (body.error || (Array.isArray(body.details) &&
+        body.details.length && body.details.join("; ")))) || ("HTTP " + res.status);
+      msg.className = "save-state err";
+      msg.textContent = (res.status === 409
+        ? t("act.restartNoTmux", "no service session to restart (tmux) — start it first")
+        : t("act.restartFail", "restart failed")) + " · " + String(err);
+      btn.disabled = false;
+      refreshSetup();
+      return;
+    }
+    // restart accepted: poll /api/status up to 20s for state "running"
+    const deadline = Date.now() + 20000;
+    let running = false;
+    while (Date.now() < deadline) {
+      await actSleep(1500);
+      try {
+        const st = await fetch("/api/status").then(r => r.json());
+        const s = st && st.mycore && st.mycore.service && st.mycore.service.state;
+        if (st && typeof st === "object") { statusData = st; renderStatus(); }
+        if (s === "running") { running = true; break; }
+      } catch (e) { /* transient while the service restarts — keep waiting */ }
+    }
+    if (running) {
+      msg.className = "save-state";
+      msg.textContent = t("act.restartOk", "service restarted ✓");
+      beep(880, 0.06);
+    } else {
+      msg.className = "save-state err";
+      msg.textContent = t("act.restartTimeout",
+        "the service did not report running within 20s — check the Overview panels");
+    }
+  } catch (e) {
+    msg.className = "save-state err";
+    msg.textContent = t("act.restartFail", "restart failed") + " · " +
+      String(e).slice(0, 120);
+  }
+  btn.disabled = false;
+  refreshSetup();
+}
+
+/* ------------------------------------------------------ doctor (0.5.40) -- */
+async function doctorRun() {
+  const btn = document.getElementById("doctorRunBtn");
+  const out = document.getElementById("doctorOut");
+  const msg = document.getElementById("doctorMsg");
+  if (!btn || !out || !msg) return;
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    msg.className = "save-state err";
+    msg.textContent = t("save.needToken", "token required");
+    return;
+  }
+  btn.disabled = true;
+  msg.className = "save-state";
+  msg.textContent = t("cap.doctorRunning", "running doctor…");
+  out.hidden = true;
+  out.textContent = "";
+  try {
+    const res = await fetch("/api/doctor/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify({}),
+    });
+    let body = {};
+    try { body = await res.json(); } catch (e) { body = {}; }
+    if (res.status === 401) {
+      msg.className = "save-state err";
+      msg.textContent = t("save.badToken", "401 · unauthorized");
+      return;
+    }
+    if (!res.ok) {
+      const err = (body && (body.error || (Array.isArray(body.details) &&
+        body.details.length && body.details.join("; ")))) || ("HTTP " + res.status);
+      msg.className = "save-state err";
+      msg.textContent = t("cap.doctorErr", "doctor run failed: {e}")
+        .replace("{e}", String(err));
+      out.hidden = false;
+      out.textContent = msg.textContent;
+      return;
+    }
+    const lines = Array.isArray(body.lines) ? body.lines.map(String) : [];
+    // the doctor's own summary line passes through verbatim when it parsed;
+    // without it the counts are composed from the parsed numbers instead
+    const counts = t("cap.doctorCounts", "FAIL {f} · WARN {w}")
+      .replace("{f}", String(body.fail == null ? 0 : body.fail))
+      .replace("{w}", String(body.warn == null ? 0 : body.warn));
+    const summary = (typeof body.summary === "string" && body.summary)
+      ? body.summary : counts;
+    out.textContent = lines.length ? lines.slice(0, 80).join("\n") : summary;
+    out.hidden = false;
+    msg.className = "save-state" + ((Number(body.fail) || 0) > 0 ? " err" : "");
+    msg.textContent = summary;
+  } catch (e) {
+    msg.className = "save-state err";
+    msg.textContent = t("cap.doctorErr", "doctor run failed: {e}")
+      .replace("{e}", String(e).slice(0, 120));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* ------------------------------------------------- cron delete (0.5.40) -- */
+async function cronDel(id) {
+  const msg = document.getElementById("cronMsg");
+  if (!id) return;
+  if (!window.confirm(t("cron.delConfirm", "Delete cron job {id}?")
+      .replace("{id}", id))) return;
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    if (msg) { msg.className = "save-state err";
+      msg.textContent = t("save.needToken", "token required"); }
+    return;
+  }
+  if (msg) { msg.className = "save-state"; msg.textContent = "…"; }
+  try {
+    const res = await fetch("/api/cron", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify({ action: "del", id: id }),
+    });
+    let body = {};
+    try { body = await res.json(); } catch (e) { body = {}; }
+    if (!res.ok) {
+      const err = (body && (body.error || (Array.isArray(body.details) &&
+        body.details.length && body.details.join("; ")))) || ("HTTP " + res.status);
+      if (msg) {
+        msg.className = "save-state err";
+        msg.textContent = t("cron.delErr", "delete failed: {e}")
+          .replace("{e}", String(err));
+      }
+      return;
+    }
+    if (msg) { msg.className = "save-state"; msg.textContent = ""; }
+    refreshCron();               // the row disappearing is the confirmation
+  } catch (e) {
+    if (msg) {
+      msg.className = "save-state err";
+      msg.textContent = t("cron.delErr", "delete failed: {e}")
+        .replace("{e}", String(e).slice(0, 120));
+    }
+  }
 }
 
 /* --------------------------------------------------------------- polling -- */
@@ -3254,7 +3841,13 @@ if (exCapSaveBtnEl) exCapSaveBtnEl.addEventListener("click", exCapSave);
   const el = document.getElementById(id);
   if (el) el.addEventListener("input", () => { usageDirty = true; });
 });
-["mycContextDirs", "mycUpstreams", "mycMcp", "mycShell"].forEach(id => {
+["mycContextDirs", "mycMcp", "mycShell"].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener("input", () => {
+    mycDirty = true; mycRestartDirty = true;
+  });
+});
+["mycUpstreams", "mycModels", "mycBudget"].forEach(id => {
   const el = document.getElementById(id);
   if (el) el.addEventListener("input", () => { mycDirty = true; });
 });
@@ -3271,6 +3864,35 @@ if (hookListEl) hookListEl.addEventListener("input", e => {
   if (blk) { hookDirty.add(blk.dataset.hookEvent); updateHookCount(blk); }
 });
 wireCredList();
+/* --- activation & operations car (0.5.40): every listener is guarded so an
+       absent element is a no-op, never a page error --- */
+const actRecheckEl = document.getElementById("actRecheck");
+if (actRecheckEl) actRecheckEl.addEventListener("click", async () => {
+  const msg = document.getElementById("actMsg");
+  actRecheckEl.disabled = true;
+  if (msg) { msg.className = "save-state";
+    msg.textContent = t("act.checking", "checking…"); }
+  await refreshSetup();
+  actRecheckEl.disabled = false;
+});
+const actListEl = document.getElementById("actList");
+if (actListEl) actListEl.addEventListener("click", e => {
+  const btn = e.target.closest("[data-act-fix]");
+  if (btn) actFix(btn.dataset.actFix);
+});
+const svcRestartBtnEl = document.getElementById("svcRestartBtn");
+if (svcRestartBtnEl) svcRestartBtnEl.addEventListener("click", svcRestart);
+const updCheckEl = document.getElementById("updateCheckBtn");
+if (updCheckEl) updCheckEl.addEventListener("click", updateCheck);
+const updApplyEl = document.getElementById("updateApplyBtn");
+if (updApplyEl) updApplyEl.addEventListener("click", updateApply);
+const doctorRunEl = document.getElementById("doctorRunBtn");
+if (doctorRunEl) doctorRunEl.addEventListener("click", doctorRun);
+const cronListDelEl = document.getElementById("cronList");
+if (cronListDelEl) cronListDelEl.addEventListener("click", e => {
+  const btn = e.target.closest("#cronDelBtn, [data-job]");
+  if (btn && btn.dataset.job) cronDel(btn.dataset.job);
+});
 const chanTestBtnEl = document.getElementById("chanTestBtn");
 if (chanTestBtnEl) chanTestBtnEl.addEventListener("click", chanSendTest);
 const micBtnEl = document.getElementById("micBtn");
@@ -3318,7 +3940,8 @@ loadLang(startLang);
 loadSettings().then(() => { scheduleRefresh(); renderVoice(); initSettingsPanels(); });
 refreshStatus(); refreshUsage(); refreshEvents(); refreshVersion(); refreshSkills();
 refreshEvolution();
-refreshCron();           // B2: read-only cron list for the Overview card
+refreshCron();           // cron list for the Overview card (+ delete row)
+refreshSetup();          // activation car: Overview checklist (hidden if 404)
 loadChatHistory();   // console session restored at boot (read-only route)
 refreshVoiceCap();   // engine status visible before the first orb tap (#4)
 refreshCaps();       // media face: stt/image presence for the chat cards

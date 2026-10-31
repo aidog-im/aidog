@@ -5,10 +5,15 @@ task-2 roadmap slice owner-approved 2026-10-20 and competitive gap §4.2-6
 ("installation experience": prior-art products ship polished one-shot onboarding,
 we were an ops-grade CLI that left you staring at `$EDITOR secrets.env`).
 
-**Honest boundary:** this is a guided *CLI* wizard, not a GUI/one-click
-installer package. Public-distribution packaging remains open (§4.2-6 still
-partially open). Everything it writes lives in the same machine-local,
-gitignored files the installer already used — no new state, no new surface.
+**Honest boundary:** this is a guided *CLI* wizard — there is still no
+GUI/one-click installer package. Public-distribution packaging remains open
+(§4.2-6 still partially open). What changed in 0.5.40: the **console now
+mirrors the wizard's own `--check` semantics** — the Overview ACTIVATION
+card (`#actCard`) reports the same required/format/endpoint/service rows
+and the same `ready` rule, with a FIX deep-link into the control that
+repairs each row — while the guided *writing* flow stays in the terminal.
+Everything the wizard writes lives in the same machine-local, gitignored
+files the installer already used — no new state, no new surface.
 
 ## 1. Entry points (`deploy/aidog_setup.py`, dispatched by `aidog setup`)
 
@@ -74,7 +79,30 @@ Rules the tests lock (regression wall in `tests/setup_wizard_b3.py`):
 - all required filled + format clean → exit `0`;
 - **creates nothing** — a fresh checkout stays a fresh checkout (asserted).
 
-## 4. Tests
+## 4. Console mirror (activation car, 0.5.40)
+
+The console does not re-implement the wizard's writes — it reports the same
+verdicts and points at the fix:
+
+- `GET /api/setup` (loopback read) renders the wizard's `--check` rule as six
+  rows: the three required slots (`WEB_TOKEN`, `MYCORE_TG_TOKEN`,
+  `AIDOG_TG_ALLOWED_USERS`), the optional `MODEL_API_KEY`, the model endpoint
+  reachability and the chat-service state; `ready` mirrors the wizard's
+  pending/exit-0 semantics (empty required slot = `fmt:true, ok:false`, a
+  non-empty bad value = `fmt:false, state:invalid`, service never in `ready`).
+- The server's `SLOT_PATTERNS` are **parity-tested against this wizard's
+  `SLOTS`** — the pattern strings are asserted byte-equal, so the two
+  definitions cannot drift.
+- The card's FIX buttons deep-link to the credential row / `#mycUrl` /
+  restart button that repairs the row, and `#actStart` names `aidog setup`
+  as the terminal path.
+
+Evidence: `tmp/e2e_activation.py` `L1` (fresh → filled → invalid lifecycle +
+pattern parity) and `tmp/e2e_activation_ui.js` `U1` (card renders, FIX
+deep-links, RE-CHECK re-probes) — see
+[frontend_coverage.md](frontend_coverage.md) §4.
+
+## 5. Tests
 
 `python3 tests/setup_wizard_b3.py` → **99/99** (offline, stdlib, every write
 confined to a throwaway fake repo under `/tmp`; the real `secrets.env` /

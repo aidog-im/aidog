@@ -86,6 +86,12 @@ delivery but never duplicates one.
   shared grammar + registry with `/cron`, `source=model`.
 - **Console chat** gets the same tool (origin = none → falls through to
   `MYCORE_WD_CHAT` / log-only).
+- **Console**: Overview `#cronList` renders the registry (read-only rows);
+  since 0.5.40 each row carries `#cronDelBtn` — confirm → `POST /api/cron
+  {action:"del", id}` → the list refreshes and the row disappears. There is
+  deliberately **no `add` action**: creation stays natural-language/CLI/
+  Telegram (the 400 refusal says so), mirroring the CLI `--del` semantics
+  exactly (unknown id → 404, nothing written when nothing matched).
 - **CLI/ops**: `python3 -m mycore.scheduler [--list | --add SPEC --text … |
   --del ID] [--json]` (exit 0/1/2, evolution parity) — also how the E2E
   probe job is injected.
@@ -118,11 +124,16 @@ line, detail to the log only). Dry-run evaluates + marks + logs, never sends.
   keys (packs 194 → 204).
 - `python3 deploy/check_publish.py` → `data/` is runtime state (gitignored),
   nothing new tracked; leak scan unchanged.
-- **Console coverage (frontend car, 0.5.39)**: the registry is now READABLE
-  from the console — Overview `#cronList` renders the new `GET /api/cron`
+- **Console coverage (frontend car, 0.5.39)**: the registry became READABLE
+  from the console — Overview `#cronList` renders `GET /api/cron`
   (id/spec/text/origin/next/due, fixed field whitelist so no absolute path
   can enter the payload; absent/corrupt file → `count: 0`). Creation stays
-  natural-language/CLI/Telegram by design — there is no create button.
-  Evidence: `tmp/e2e_frontend_coverage.py` `L6` (seed → count/fields →
-  delete) and `tmp/e2e_frontend_ui.js` `U5` (list renders) — see
-  [frontend_coverage.md](frontend_coverage.md).
+  natural-language/CLI/Telegram by design — there is still no create button.
+  Evidence: `tmp/e2e_frontend_coverage.py` `L6` (seed → count/fields → CLI
+  delete) and `tmp/e2e_frontend_ui.js` `U5` (list renders).
+- **Delete button (activation car, 0.5.40)**: per-row `#cronDelBtn` + the
+  `cron.createHint` line. Evidence: `tmp/e2e_activation.py` `L7` (seed →
+  console delete → count 0 → second delete 404 → `add` refused 400 → 401
+  without a bearer) and `tmp/e2e_activation_ui.js` `U5` (confirm → row
+  disappears → server count 0) — see [frontend_coverage.md](frontend_coverage.md)
+  §4.

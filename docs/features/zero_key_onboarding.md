@@ -109,6 +109,15 @@ before the manual `base_url` prompt.**
   `aidog setup`, not the console.
   Evidence: `tmp/e2e_frontend_ui.js` `U5` — see
   [frontend_coverage.md](frontend_coverage.md).
+- **Activation card (activation car, 0.5.40)**: adoption is still CLI, but
+  the console now tells you *where you stand* — the ACTIVATION card reports
+  the model endpoint row as `reachable / unreachable / empty / invalid`
+  (probed against `<base_url>/models`) and its FIX button deep-links to
+  `#mycUrl` in Settings, right next to the keyless hint (`act.hint.model_key`:
+  "not needed for loopback endpoints").
+  Evidence: `tmp/e2e_activation.py` `L1` (endpoint state + ready flip against
+  a mock local endpoint) and `tmp/e2e_activation_ui.js` `U1` (card + FIX
+  deep-link) — see [frontend_coverage.md](frontend_coverage.md) §4.
 
 Suite totals after car G (v0.5.32): core **1020/1020**, smoke **154/154**, wizard
 **99/99**.

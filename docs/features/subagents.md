@@ -61,11 +61,12 @@ delegate(tasks = ["summarize this log",
 Rules (no silent fallback, ever):
 
 - `model` must appear in the settings whitelist `web/settings.json`
-  `mycore.models` (the same list the console `/model` picker reads — one
-  source of truth). Unknown id → that task alone returns
+  `mycore.models` — one source of truth, editable from the console since
+  0.5.40 (Settings → Model `#mycModels`, schema-validated ≤32 single-line
+  ids; `[]` = whitelist off). Unknown id → that task alone returns
   `[i/N] error: model '…' is not in the mycore.models whitelist (…)`;
   siblings still run.
-- Settings carry **no** `mycore.models` list → an explicit not-configured
+- No `mycore.models` list stored → an explicit not-configured
   error block (the task does not silently inherit the default model).
 - The override swaps the model **name only** on the turn's own connection —
   base URL and credentials stay the bound parent's (`bind_turn` path);
@@ -80,3 +81,11 @@ Rules (no silent fallback, ever):
 - No sub-agent → user direct delivery (results always route through the
   parent's reply).
 - No persistent sub-agent sessions; every `delegate` call starts fresh.
+
+## Evidence
+
+- Whitelist carrier + console editor (0.5.40): `tmp/e2e_activation.py` `L2`
+  (accept/reject matrix + the raw-file consumer `subagent._allowed_models`
+  reading the same document) and `tmp/e2e_activation_ui.js` `U6`
+  (`#mycModels` save → server read-back) — see
+  [frontend_coverage.md](frontend_coverage.md) §4.

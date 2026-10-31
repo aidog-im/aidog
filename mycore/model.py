@@ -112,6 +112,22 @@ def _is_loopback(url: str) -> bool:
     return parts.hostname in ("127.0.0.1", "localhost", "::1")
 
 
+def _slot_key(name: str) -> str:
+    """Own-line secrets.env slot fallback for the API key (activation car
+    §1.8): the console writes `secrets.env` while this client used to read the
+    process ENV only, so a console-set key never reached the model. The env
+    still wins at the call site (an operator override is never ignored);
+    this reader returns "" on any failure (fail-closed) and the value it
+    returns is used for one request header — never logged, never repr'd."""
+    if not name:
+        return ""
+    try:
+        from . import envslots   # local import: keeps the module graph acyclic
+        return envslots.slot_value(name)
+    except Exception:  # noqa: BLE001 — a missing reader degrades to "no key"
+        return ""
+
+
 # transport signature: (url, headers, payload_bytes, timeout) -> response text
 Transport = Callable[[str, dict, bytes, float], str]
 
@@ -402,11 +418,18 @@ class ChatClient:
         raise last if last is not None else ModelError("no upstream to attempt")
 
     def _headers(self, base_url: str, key_env: str) -> dict:
-        """Per-attempt headers. The key VALUE is read from the environment
-        here (the credential pool stores slot names only) and never logged."""
+        """Per-attempt headers. The key VALUE is resolved as env FIRST, then
+        the secrets.env slot of the same name (the store the console writes) —
+        the value is never logged, echoed or embedded in an error."""
         cfg = self.cfg
         headers = {"Content-Type": "application/json"}
-        key = os.environ.get(key_env or cfg.api_key_env, "")
+        # A comma-separated pool name is expanded so each slot is looked up on
+        # its own (units() already splits; this stays correct if it does not).
+        key = ""
+        for name in (n for n in (key_env or cfg.api_key_env or "").split(",") if n):
+            key = os.environ.get(name, "") or _slot_key(name)
+            if key:
+                break
         if key:
             headers["Authorization"] = f"Bearer {key}"
         elif _is_loopback(base_url):

@@ -45,6 +45,19 @@ Routes:
                                    channels, hooks, cron, browser, terminal,
                                    local models; no auth, no secrets) + the
                                    `exchange` block (W1: venue rows + tools)
+  GET  /api/setup               -> activation checklist (required slots + model
+                                   endpoint + service; presence/booleans only,
+                                   loopback read, no auth)
+  POST /api/service/restart     -> Bearer; {target:"service"} restarts the chat
+                                   service tmux session only — never this console
+                                   (400 bad target / 409 no session)
+  POST /api/update/apply        -> Bearer; queues aidog_update.py apply in a
+                                   detached child -> 202 (log: data/update_apply.log)
+  POST /api/doctor/run          -> Bearer; runs deploy/aidog_doctor.py once ->
+                                   {checks, fail, warn, summary, lines} (200 even
+                                   on a non-zero exit: FAIL/WARN are honest output)
+  POST /api/cron                -> Bearer; {action:"del", id} deletes one job
+                                   (404 unknown id; create stays natural-language/CLI)
   GET  /api/exchange/quote      -> READ-ONLY public market probe: venue +
                                    optional symbol -> {venue, symbol, lines};
                                    own 10/60s sliding window -> 429
@@ -249,8 +262,17 @@ ALLOWED_TOP = ("language", "refresh_sec", "sound", "voice_volume",
                "evolution", "channels", "hooks", "media", "web3")
 USAGE_KEYS = ("metrics_url", "pricing_config", "log_dir")
 MYCORE_KEYS = ("base_url", "model", "context_dirs", "upstreams", "mcp", "shell",
-               "tools_off")
+               "tools_off", "models", "budget")
 MYCORE_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$")
+# mycore.models / mycore.budget join the schema (activation car §1.6): the
+# raw-file consumers (service._allowed_models / service._budget /
+# subagent._allowed_models / acp) read the SAME document the console writes,
+# so validating them here keeps the console view and the runtime view in
+# agreement. `[]` is legal (= whitelist off, honest); budget stays OUT of
+# DEFAULT_SETTINGS on purpose — absent = cli default, exactly as before.
+MODELS_MAX = 32
+MODEL_ID_MAX = 128
+BUDGET_MIN, BUDGET_MAX = 4000, 1000000
 # Per-tool kill switch (v0.5.32): each mycore.tools_off entry is one tool
 # name — lowercase snake, bounded at 40 chars (mirrors the name grammar the
 # registry itself uses). The KNOWN_TOOL_NAMES membership check lives in the
@@ -324,6 +346,40 @@ SECRET_SLOTS: dict = {name: group for group, names in SECRET_GROUPS.items()
                       for name in names}          # 32 editable slots
 SECRET_PRESENCE_ONLY = ("WEB_TOKEN",)             # listed, never writable
 SECRET_VALUE_MAX = 4096                           # chars, one line
+
+# ---------------------------------------- activation checklist formats (§1.1) ---
+# Format rules reported by GET /api/setup. Each pattern MIRRORS one entry of
+# `deploy/aidog_setup.py` SLOTS — the wizard is the source of truth for "is
+# this slot filled correctly" — and tests/web_console_p3.py imports the wizard
+# module and asserts these strings are byte-equal to the wizard's compiled
+# patterns, so the two definitions cannot drift apart.
+SLOT_PATTERNS: dict = {
+    "WEB_TOKEN": r"^\S{16,}$",
+    "MYCORE_TG_TOKEN": r"^\d{4,}:[A-Za-z0-9_-]{20,}$",
+    "AIDOG_TG_ALLOWED_USERS": r"^\d+(,\d+)*$",
+    "MODEL_API_KEY": r"^\S{8,}$",
+}
+# The wizard's required set (aidog_setup --check pending semantics).
+REQUIRED_SLOTS = ("WEB_TOKEN", "MYCORE_TG_TOKEN", "AIDOG_TG_ALLOWED_USERS")
+# Fixed checklist order: (item id, slot name, i18n hint key, English fallback).
+# The server sends the KEY for the locale pack plus a short English fallback so
+# the row is readable even before the pack carries the translation.
+SETUP_ITEMS: tuple = (
+    ("web_token", "WEB_TOKEN", "act.hint.web_token",
+     "console write token: invent any random string of 16+ chars"),
+    ("model_key", "MODEL_API_KEY", "act.hint.model_key",
+     "not needed for loopback endpoints"),
+    ("tg_token", "MYCORE_TG_TOKEN", "act.hint.tg_token",
+     "Telegram bot token from @BotFather (123456789:AA...)"),
+    ("tg_allowlist", "AIDOG_TG_ALLOWED_USERS", "act.hint.tg_allowlist",
+     "numeric Telegram user ids, comma-separated (fail-closed while empty)"),
+)
+# Slots whose VALUE is format-checked on a console write (activation car
+# §1.9) — a mirrored wizard pattern, extendable per slot. Empty = clear and
+# is legal for every slot; the value itself is never echoed in the refusal.
+SLOT_WRITE_PATTERNS: dict = {
+    "AIDOG_TG_ALLOWED_USERS": SLOT_PATTERNS["AIDOG_TG_ALLOWED_USERS"],
+}
 # Env-var NAMES the operator may export into the console process; only the
 # names ever serialize into /api/capabilities (the value may be a URL with
 # embedded credentials or a model list).
@@ -802,6 +858,46 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                         seen.add(item)
                     if bad is None:
                         clean_mc[key] = val
+                    continue
+                if key == "models":
+                    # per-task /model whitelist (activation car §1.6): a bounded
+                    # list of model IDS; [] = whitelist off (honest). bools are
+                    # not lists; entries are single-line, never secrets.
+                    if isinstance(val, bool) or not isinstance(val, list):
+                        errors.append("mycore.models must be a list of model ids")
+                        continue
+                    if len(val) > MODELS_MAX:
+                        errors.append(
+                            f"mycore.models holds at most {MODELS_MAX} entries")
+                        continue
+                    bad_model: str | None = None
+                    for item in val:
+                        if not isinstance(item, str):
+                            bad_model = "non-string entry"
+                            break
+                        if not item or item != item.strip() \
+                                or len(item) > MODEL_ID_MAX \
+                                or any(ord(c) < 32 or ord(c) == 127 for c in item):
+                            bad_model = item[:40] or "empty"
+                            break
+                    if bad_model is not None:
+                        errors.append(
+                            "mycore.models entries must be non-empty single-line "
+                            f"strings of at most {MODEL_ID_MAX} chars "
+                            f"(first bad: {bad_model!r})")
+                        continue
+                    clean_mc[key] = list(val)
+                    continue
+                if key == "budget":
+                    # compaction budget in chars (activation car §1.6): int only
+                    # (bool refused), bounded; absent = cli default.
+                    if isinstance(val, bool) or not isinstance(val, int) \
+                            or not BUDGET_MIN <= val <= BUDGET_MAX:
+                        errors.append(
+                            f"mycore.budget must be an integer in "
+                            f"{BUDGET_MIN}..{BUDGET_MAX}")
+                        continue
+                    clean_mc[key] = val
                     continue
                 if not isinstance(val, str) or not val or len(val) > 256 or "\x00" in val:
                     errors.append(f"mycore.{key} must be a non-empty string of at most 256 chars")
@@ -1901,9 +1997,14 @@ def _load_update_mod():
     return _update_mod
 
 
-def collect_version() -> dict:
+def collect_version(fresh: bool = False) -> dict:
     now = time.time()
     with _version_lock:
+        if fresh:
+            # `GET /api/version?fresh=1` (activation car §1.3): the update
+            # banner/button must not wait out the 300s cache — additive query,
+            # same payload shape as the cached read.
+            _version_cache["ts"] = 0.0
         if _version_cache["data"] is not None and now - _version_cache["ts"] < (
                 30.0 if "error" in _version_cache["data"] else VERSION_TTL):
             return _version_cache["data"]
@@ -2362,6 +2463,163 @@ def collect_cron() -> dict:
         return {"jobs": [], "count": 0}
 
 
+# ------------------------------------- activation & operations (0.5.40) ----
+
+def endpoint_reachable(base: str, timeout: float = 1.0) -> bool:
+    """Is the configured model endpoint answering? Reuses the console's own
+    probes (`port_open` / `http_status`, the retry pair inside http_status
+    keeps the whole probe at ≈2s): a 2xx on <base>/models or <base>/v1/models
+    proves reachability; a refused port is down; an auth-gated gateway that
+    refuses the probe still counts as reachable because its PORT is open.
+    Never raises — an unparsable URL is simply unreachable."""
+    if not isinstance(base, str) or not base:
+        return False
+    try:
+        parts = urllib.parse.urlparse(base)
+    except ValueError:
+        return False
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return False
+    try:
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+    except ValueError:
+        return False
+    probe = base.rstrip("/")
+    probe = f"{probe}/models" if probe.endswith("/v1") else f"{probe}/v1/models"
+    if http_status(probe, timeout=timeout) is not None:
+        return True
+    return port_open(port)
+
+
+def collect_setup() -> dict:
+    """GET /api/setup — the activation checklist (loopback READ, no auth).
+
+    Presence/booleans only: every row carries a state word and a hint, never a
+    value (the credential values stay inside read_env_slot). Item order is
+    fixed (SETUP_ITEMS + model_endpoint + service) and `ready` = every
+    REQUIRED row ok + the model endpoint reachable — the wizard's own
+    `aidog setup --check` pending semantics, mirrored. The service row is not
+    part of `ready`: a bot may be deliberately off (fail-closed pending).
+    """
+    items: list[dict] = []
+    for item_id, slot, hint_key, hint_en in SETUP_ITEMS:
+        value = read_env_slot(slot)
+        required = slot in REQUIRED_SLOTS
+        present = bool(value)
+        # An EMPTY value is pending (not a format violation); a non-empty value
+        # that breaks the mirrored wizard pattern is invalid (fmt False).
+        fmt = (not present) or bool(re.match(SLOT_PATTERNS[slot], value))
+        state = "empty" if not present else ("set" if fmt else "invalid")
+        ok = (state == "set") if required else (state != "invalid")
+        items.append({"id": item_id, "required": required, "ok": ok,
+                      "fmt": fmt, "state": state,
+                      "hint": hint_key, "hint_en": hint_en})
+    base = str((load_settings().get("mycore") or {}).get("base_url") or "")
+    url_fmt = bool(re.match(r"^https?://\S+$", base))
+    reachable = endpoint_reachable(base) if url_fmt else False
+    if not base:
+        ep_state = "empty"
+    elif not url_fmt:
+        ep_state = "invalid"
+    else:
+        ep_state = "reachable" if reachable else "unreachable"
+    items.append({"id": "model_endpoint", "required": True,
+                  "ok": bool(url_fmt and reachable), "fmt": url_fmt,
+                  "state": ep_state, "hint": "act.hint.model_endpoint",
+                  "hint_en": "any http(s) OpenAI-compatible base_url"})
+    svc_state = mycore_service_facts()["state"]
+    items.append({"id": "service", "required": False,
+                  "ok": svc_state == "running", "fmt": None,
+                  "state": svc_state, "hint": "act.hint.service",
+                  "hint_en": "chat service (Telegram bot) state"})
+    ready = all(i["ok"] for i in items if i["required"])
+    return {"ready": ready, "items": items, "service": svc_state,
+            "model": {"endpoint": base, "reachable": reachable}}
+
+
+def _tmux_session_exists(name: str) -> bool:
+    """tmux session probe for the restart gate — read-only, 5s cap, never
+    raises (a missing tmux binary reads as 'no session' = honest 409)."""
+    try:
+        return subprocess.run(["tmux", "has-session", "-t", name],
+                              capture_output=True, timeout=5).returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def restart_chat_service() -> tuple[int, dict]:
+    """POST /api/service/restart core (§1.2): restart ONLY the chat-service
+    tmux session. The web console is NEVER restarted from here — it comes back
+    through boot/upgrade paths only (restart it and this request dies mid-flight).
+
+    Session names are the real ones: `aidog_svc` for the default profile
+    (deploy/boot_services.sh) and `aidog_svc_<name>` for a named profile, whose
+    start interface is `deploy/profile_ctl.sh start <name>` (idempotent: it only
+    creates the console session when it is missing, so it never bounces this
+    console). Logs carry the session name and a return code — nothing else.
+    """
+    try:
+        profile = profile_paths.profile_name()
+    except Exception as e:  # noqa: BLE001 — ProfileError: fail-closed, no guess
+        return 503, {"error": f"profile resolution failed: {type(e).__name__}"}
+    session = f"aidog_svc_{profile}" if profile else "aidog_svc"
+    if not _tmux_session_exists(session):
+        return 409, {"error": "chat service not running under tmux",
+                     "target": "service"}
+    try:
+        subprocess.run(["tmux", "kill-session", "-t", session],
+                       capture_output=True, timeout=10)   # rc ignored by design
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write(f"service restart kill failed session={session} "
+                         f"rc={type(e).__name__}\n")
+        return 500, {"error": "session kill failed"}
+    if profile:
+        cmd = ["bash", str(REPO / "deploy/profile_ctl.sh"), "start", profile]
+    else:
+        cmd = ["bash", str(REPO / "deploy/boot_services.sh"), "start"]
+    rc = -1
+    try:
+        rc = subprocess.run(cmd, cwd=str(REPO), capture_output=True,
+                            timeout=25).returncode
+    except subprocess.TimeoutExpired:
+        sys.stderr.write(f"service restart requested target=service "
+                         f"session={session} rc=timeout\n")
+        return 504, {"error": "service start timed out"}
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write(f"service restart requested target=service "
+                         f"session={session} rc={type(e).__name__}\n")
+        return 500, {"error": "service start failed"}
+    sys.stderr.write(f"service restart requested target=service "
+                     f"session={session} rc={rc}\n")
+    if rc != 0:
+        return 500, {"error": "service start failed", "rc": rc}
+    return 200, {"ok": True, "target": "service"}
+
+
+def _cron_jobs_path() -> Path:
+    """Cron registry seam (one line so tests can point POST /api/cron at a
+    temp registry). Production callers never pass anything."""
+    from mycore import scheduler as _scheduler   # noqa: PLC0415 — lazy import
+    return _scheduler.default_jobs_path()
+
+
+def cron_delete(job_id: str) -> tuple[int, dict]:
+    """POST /api/cron {action:'del'} — mirrors the CLI `--del` semantics of
+    mycore.scheduler exactly: load -> delete_job -> save, unknown id = a plain
+    refusal (404 here, rc 1 there) and NOTHING is written when nothing matched.
+    Create stays natural-language/CLI by design (no `add` action)."""
+    from mycore import scheduler as _scheduler   # noqa: PLC0415 — lazy import
+    try:
+        jobs = _scheduler.load_jobs(_cron_jobs_path())
+        if not _scheduler.delete_job(jobs, job_id):
+            return 404, {"error": "unknown job id"}
+        _scheduler.save_jobs(_cron_jobs_path(), jobs)
+    except OSError as e:  # noqa: BLE001 — type name only, never a path/value
+        sys.stderr.write(f"cron del failed err={type(e).__name__}\n")
+        return 500, {"error": f"persist failed: {type(e).__name__}"}
+    return 200, {"ok": True, "id": job_id, "count": len(jobs)}
+
+
 # ----------------------------------------------------------------- server ----
 
 MIME = {
@@ -2414,6 +2672,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(read_config_bits())
         if path == "/api/settings":
             return self._json(load_settings())
+        if path == "/api/setup":
+            return self._json(collect_setup())
         if path == "/api/usage":
             return self._json(collect_usage(load_settings()))
         if path == "/api/events":
@@ -2423,7 +2683,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/chat/history":
             return self._json(chat_history())
         if path == "/api/version":
-            return self._json(collect_version())
+            query = urllib.parse.parse_qs(self.path.split("?", 1)[1]) \
+                if "?" in self.path else {}
+            fresh = query.get("fresh", [""])[0] == "1"
+            return self._json(collect_version(fresh=fresh))
         if path == "/api/skills":
             return self._json(collect_skills())
         if path == "/api/voice":
@@ -2478,6 +2741,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_channel_send()
         if path == "/v1/chat/completions":
             return self._handle_openai_chat()
+        if path == "/api/cron":
+            return self._handle_cron_post()
+        if path == "/api/service/restart":
+            return self._handle_service_restart()
+        if path == "/api/update/apply":
+            return self._handle_update_apply()
+        if path == "/api/doctor/run":
+            return self._handle_doctor_run()
         if path.startswith("/api/exchange/plans/"):
             return self._handle_exchange_plan_decide(
                 path[len("/api/exchange/plans/"):])
@@ -2561,6 +2832,13 @@ class Handler(BaseHTTPRequestHandler):
             # rather than silently stored shorter than what was sent.
             return self._json({"error": "validation failed",
                                "details": ["value must not start or end with whitespace"]}, 400)
+        fmt_pat = SLOT_WRITE_PATTERNS.get(name)
+        if value and fmt_pat and not re.match(fmt_pat, value):
+            # per-slot shape rule (activation car §1.9): mirrors the setup
+            # wizard; the stored value is NEVER echoed back in the refusal.
+            return self._json({"error": "validation failed",
+                               "details": [f"invalid format for {name}: expected "
+                                           f"{fmt_pat} (value not shown)"]}, 400)
         try:
             changed = write_env_slot(name, value)
         except OSError as e:  # noqa: BLE001 — type name only, never the value
@@ -2571,6 +2849,122 @@ class Handler(BaseHTTPRequestHandler):
                            "slot": {"name": name, "group": group,
                                     "set": bool(value),
                                     "length": len(value)}})
+
+    # ------------------------------------ activation & operations (0.5.40) ---
+    def _handle_service_restart(self) -> None:
+        """POST /api/service/restart {target:'service'} — Bearer gate, then
+        the target check, then restart_chat_service(). The chat service only:
+        this console never restarts itself. 400 bad target · 409 no tmux
+        session (honest) · 503/401 from the standard gate."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        if doc.get("target") != "service":
+            return self._json({"error": "validation failed",
+                               "details": ["target must be 'service'"]}, 400)
+        code, out = restart_chat_service()
+        return self._json(out, code)
+
+    def _handle_update_apply(self) -> None:
+        """POST /api/update/apply — queue `aidog_update.py apply` in a
+        DETACHED child and answer 202 immediately: apply ends with
+        `boot_services.sh restart`, so this console may die mid-flight (the
+        design). stdout+stderr append to data/update_apply.log; the request
+        body is drained but never logged. The script's own dirty-worktree
+        guard decides whether anything actually runs."""
+        if not self._require_token():
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0") or 0)
+        except ValueError:
+            length = 0
+        if length > MAX_BODY:
+            return self._json({"error": f"body too large (max {MAX_BODY} bytes)"},
+                              413)
+        if length:
+            self.rfile.read(length)          # drained, never inspected/logged
+        log = REPO / "data" / "update_apply.log"
+        try:
+            log.parent.mkdir(parents=True, exist_ok=True)
+            fh = open(log, "ab")
+            try:
+                fh.write(("--- update apply queued "
+                          f"{datetime.now(timezone.utc).isoformat()} "
+                          "(console) ---\n").encode("utf-8"))
+                fh.flush()
+                subprocess.Popen(
+                    [sys.executable, "deploy/aidog_update.py", "apply"],
+                    cwd=str(REPO), stdin=subprocess.DEVNULL,
+                    stdout=fh, stderr=subprocess.STDOUT,
+                    start_new_session=True, close_fds=True)
+            finally:
+                fh.close()
+        except OSError as e:  # noqa: BLE001 — type name only
+            sys.stderr.write(f"update apply queue failed err={type(e).__name__}\n")
+            return self._json({"error": f"queue failed: {type(e).__name__}"}, 500)
+        sys.stderr.write("update apply queued\n")
+        return self._json({"ok": True, "queued": True}, 202)
+
+    def _handle_doctor_run(self) -> None:
+        """POST /api/doctor/run — run deploy/aidog_doctor.py once (60s cap),
+        parse its own summary line and pass up to 80 output lines through
+        verbatim. Doctor's contract: values are never printed, so the payload
+        carries no credential material. A NON-ZERO exit is not an error —
+        FAIL/WARN counts are honest output and still answer 200."""
+        if not self._require_token():
+            return
+        try:
+            proc = subprocess.run([sys.executable, "deploy/aidog_doctor.py"],
+                                  cwd=str(REPO), capture_output=True, text=True,
+                                  timeout=60)
+        except subprocess.TimeoutExpired:
+            return self._json({"error": "doctor run timed out (60s)"}, 504)
+        except OSError as e:  # noqa: BLE001
+            return self._json({"error": f"launch failed: {type(e).__name__}"}, 500)
+        text = (proc.stdout or "")
+        if (proc.stderr or "").strip():
+            text += ("\n" if text and not text.endswith("\n") else "") + proc.stderr
+        lines = text.splitlines()
+        m = re.search(r"(\d+) checks · (\d+) FAIL · (\d+) WARN", text)
+        summary = m.group(0) if m else None
+        return self._json({
+            "checks": int(m.group(1)) if m else None,
+            "fail": int(m.group(2)) if m else None,
+            "warn": int(m.group(3)) if m else None,
+            "summary": summary,
+            "rc": proc.returncode,
+            "lines": lines[:80],
+        })
+
+    def _handle_cron_post(self) -> None:
+        """POST /api/cron {action:'del', id} — Bearer gate, then the CLI
+        `--del` semantics (404 unknown id, 400 missing/invalid fields). There
+        is deliberately no `add`: jobs are created by natural language (CHAT)
+        or `python3 -m mycore.scheduler --add`."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        action = doc.get("action")
+        if action != "del":
+            return self._json({
+                "error": "validation failed",
+                "details": ["action must be 'del' (create jobs by asking in "
+                            "CHAT or with /cron — no add action here)"]}, 400)
+        job_id = doc.get("id")
+        if not isinstance(job_id, str) or not job_id.strip():
+            return self._json({"error": "validation failed",
+                               "details": ["id must be a non-empty string"]},
+                              400)
+        code, out = cron_delete(job_id.strip())
+        if code != 200:
+            sys.stderr.write(f"cron del refused action=del rc={code}\n")
+        else:
+            sys.stderr.write(f"cron del ok count={out.get('count')}\n")
+        return self._json(out, code)
 
     # ------------------------------------------------------ evolution legs ---
     def _require_token(self) -> bool:
@@ -3525,9 +3919,18 @@ class Handler(BaseHTTPRequestHandler):
         clean, errors = validate_settings_patch(patch)
         if errors:
             return self._json({"error": "validation failed", "details": errors}, 400)
-        current = load_settings()
-        merged = deep_merge(current, clean)
-        changed = merged != current
+        # Merge onto the RAW stored document — never onto load_settings()'s
+        # filtered view (bug fix §1.7): an unknown hand-written key must
+        # survive a console save. GET keeps the validated view (fail-closed
+        # display); only the validated patch is written.
+        try:
+            stored = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            stored = {}
+        if not isinstance(stored, dict):
+            stored = {}
+        merged = deep_merge(stored, clean)
+        changed = merged != stored
         if changed:
             try:
                 atomic_write_json(SETTINGS_FILE, merged)
@@ -3538,7 +3941,8 @@ class Handler(BaseHTTPRequestHandler):
             if {"currency", "fx_rate", "usage"} & set(clean):
                 with _usage_lock:
                     _usage_cache["ts"], _usage_cache["data"] = 0.0, None
-        return self._json({"ok": True, "changed": changed, "settings": merged})
+        return self._json({"ok": True, "changed": changed,
+                           "settings": load_settings()})
 
     def log_message(self, fmt: str, *args) -> None:  # quiet default
         sys.stderr.write("%s %s\n" % (datetime.now().strftime("%H:%M:%S"), fmt % args))

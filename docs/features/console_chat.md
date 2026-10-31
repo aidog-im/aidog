@@ -95,7 +95,9 @@ event: error  data: {"error": "internal"}    (only if the turn dies mid-stream)
 - The turn uses the *same* pieces as the TG pipeline: `build_system_stack()`
   + the session file + `run_turn()` + the 8-tool registry + the same
   compaction budget rule (`mycore.budget` from settings, cli default
-  otherwise). Session file: `<state>/sessions/web.jsonl` (state =
+  otherwise — **schema-managed since 0.5.40**: the key is validated and
+  editable in the console, so the console view and the service view agree).
+  Session file: `<state>/sessions/web.jsonl` (state =
   `AIDOG_MC_STATE`, default `data/mycore_service`; numeric file names there
   belong to TG chat_ids, so `web` cannot collide).
 - Tool **arguments are never sent to the browser** (machine paths) — only
@@ -111,7 +113,29 @@ to send, `token required / 401 / stream failed` inline status, iteration +
 tool-call count under the final answer, history restored at boot. All strings
 come from the locale packs (`sec.chat`, `chat.*`).
 
-## 5. Ride-along items (same car)
+## 5. Config carriers made first-class (activation car, 0.5.40)
+
+- **`mycore.models` + `mycore.budget` are schema keys now**: they join
+  `MYCORE_KEYS`, so `GET/POST /api/settings` accept them (models: ≤32
+  single-line ids, `[]` legal; budget: int 4000..1000000, bool refused) and
+  the console exposes both in Settings → Model (`#mycModels`, `#mycBudget`).
+  The raw-file readers (`service._budget`, `service._allowed_models`,
+  `subagent._allowed_models`, ACP) consume the very document the console
+  writes — one source of truth for both channels.
+- **A console save can no longer destroy hand-written keys**: the settings
+  merge lands on the RAW stored document (unknown keys such as `zzz_custom`
+  survive), while `GET` keeps returning the validated view.
+- **The chat model key reaches the client**: `mycore/model.py::_headers`
+  resolves env first, then the own-line `MODEL_API_KEY` secrets slot — the
+  store the console writes. Env still wins; loopback keeps its placeholder;
+  no value is ever logged or echoed.
+
+Evidence: `tmp/e2e_activation.py` `L2` (schema matrix + raw consumer +
+unknown-key survival) and `L8` (env → slot → placeholder, in-process),
+`tmp/e2e_activation_ui.js` `U6` (save → server read-back + restart hint) —
+see [frontend_coverage.md](frontend_coverage.md) §4.
+
+## 6. Ride-along items (same car)
 
 - **Weekday localization**: `wd.mon … wd.sun` keys in both packs; the TG
   `/evolution` head line and the console `evo.status` line now render the
@@ -122,7 +146,7 @@ come from the locale packs (`sec.chat`, `chat.*`).
   via `history.replaceState` — links are shareable in a language. The console
   applies the same precedence (`QS_LANG` first).
 
-## 6. Gates
+## 7. Gates
 
 | Suite | Before | After |
 |---|---|---|

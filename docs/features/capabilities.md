@@ -184,6 +184,19 @@ Evidence: `tmp/e2e_frontend_coverage.py` legs `L1`/`L3`/`L5` and
 `tmp/e2e_frontend_ui.js` leg `U5`; the index for this coverage is
 [frontend_coverage.md](frontend_coverage.md).
 
+**Self-check button (activation car, 0.5.40).** The same SYSTEM card now
+runs the product's own doctor from the console: `#doctorRunBtn` →
+`POST /api/doctor/run` (Bearer `WEB_TOKEN`) → the doctor's own summary line
+`N checks · X FAIL · Y WARN` rendered verbatim in `#doctorMsg` plus up to 80
+output lines in the scrollable `#doctorOut`. The button disables while the
+check runs; a non-zero exit is still HTTP 200 because FAIL/WARN counts are
+honest output, not an error. Doctor's contract (values are never printed)
+means the response carries no credential material.
+Evidence: `tmp/e2e_activation.py` `L6` (200 + summary regex + ≤80 lines +
+no seeded sentinel value) and `tmp/e2e_activation_ui.js` `U4` (click →
+disabled → summary + output block → re-enabled) — see
+[frontend_coverage.md](frontend_coverage.md) §4.
+
 ## Testing evidence
 
 `tests/web_console_p3.py`: shape check (the catalog blocks with their inner

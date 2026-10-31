@@ -1744,6 +1744,302 @@ def main() -> int:
           and isinstance(set_c.get("hooks"), dict),
           f"hooks={set_c.get('hooks') if isinstance(set_c, dict) else None}")
 
+    # --- activation & operations car (0.5.40, lane A): every mutating leg
+    # runs in-process against TEMP files — production settings.json /
+    # secrets.env / the cron registry are never touched (the byte checks
+    # above and below prove it), and no leg restarts anything for real. ---
+    import tempfile as _tf2
+    import threading as _th2
+    from http.server import BaseHTTPRequestHandler as _BHR
+    from http.server import ThreadingHTTPServer as _THSrv
+
+    class _SetupOk(_BHR):
+        """Minimal 200-answerer backing the model-endpoint reachability probe."""
+        def do_GET(self):  # noqa: N802
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *args):  # noqa: ARG002 — silent test server
+            pass
+
+    _adir = Path(_tf2.mkdtemp(prefix="p3_activation_"))
+    _a_secrets = _adir / "secrets.env"
+    _a_settings = _adir / "settings.json"
+    _a_jobs = _adir / "cron_jobs.json"
+    _hsrv = _THSrv(("127.0.0.1", 0), _SetupOk)
+    _th2.Thread(target=_hsrv.serve_forever, daemon=True).start()
+    _a_port = _hsrv.server_address[1]
+    _keep = (_srv.SECRETS, _srv.SETTINGS_FILE, _srv._cron_jobs_path,
+             _srv._tmux_session_exists)
+    try:
+        # --- §1.1 GET /api/setup: live shape, presence/booleans only ---
+        s, setup = get("/api/setup")
+        _its = setup.get("items") if isinstance(setup, dict) else None
+        _ids = [i.get("id") for i in _its] if isinstance(_its, list) else []
+        check("GET /api/setup shape: ready + fixed item order + service/model",
+              s == 200 and isinstance(setup, dict)
+              and isinstance(setup.get("ready"), bool)
+              and _ids == ["web_token", "model_key", "tg_token",
+                           "tg_allowlist", "model_endpoint", "service"]
+              and all(set(("id", "required", "ok", "fmt", "state", "hint",
+                           "hint_en")) <= set(i)
+                      and isinstance(i.get("required"), bool)
+                      and isinstance(i.get("ok"), bool)
+                      and isinstance(i.get("hint"), str)
+                      and i.get("hint").startswith("act.hint.")
+                      and isinstance(i.get("hint_en"), str)
+                      for i in _its)
+              and setup.get("service") in ("running", "pending(fail-closed)",
+                                           "stopped")
+              and isinstance(setup.get("model"), dict)
+              and isinstance(setup["model"].get("endpoint"), str)
+              and isinstance(setup["model"].get("reachable"), bool),
+              f"s={s} {str(setup)[:220]}")
+        check("GET /api/setup carries no credential value",
+              isinstance(setup, dict)
+              and all(v not in json.dumps(setup) for v in _leak_vals),
+              f"n_items={len(_its) if isinstance(_its, list) else _its}")
+        _svc_rows = [i for i in (_its or []) if i.get("id") == "service"]
+        check("GET /api/setup service row is never part of `ready`",
+              isinstance(_svc_rows, list) and len(_svc_rows) == 1
+              and _svc_rows[0].get("required") is False,
+              f"row={_svc_rows}")
+
+        # --- §1.1 drift guard: server patterns == wizard SLOTS patterns ---
+        _wspec = _ilu.spec_from_file_location(
+            "aidog_setup_p3_parity",
+            Path(__file__).resolve().parent.parent / "deploy/aidog_setup.py")
+        _wiz = _ilu.module_from_spec(_wspec)
+        _wspec.loader.exec_module(_wiz)
+        _wpat = {name: pat.pattern for name, _lb, pat, _sec, _help in _wiz.SLOTS}
+        check("setup SLOT_PATTERNS mirror the wizard SLOTS patterns exactly",
+              bool(_srv.SLOT_PATTERNS)
+              and all(_wpat.get(k) == v for k, v in _srv.SLOT_PATTERNS.items()),
+              f"server={sorted(_srv.SLOT_PATTERNS)} wizard={sorted(_wpat)}")
+        check("setup required set == the wizard's 3 required slots",
+              _srv.REQUIRED_SLOTS == ("WEB_TOKEN", "MYCORE_TG_TOKEN",
+                                      "AIDOG_TG_ALLOWED_USERS")
+              and set(_srv.REQUIRED_SLOTS) <= set(_wpat),
+              str(_srv.REQUIRED_SLOTS))
+
+        # --- §1.1 ready transitions: fresh -> filled -> dead endpoint ---
+        _srv.SECRETS, _srv.SETTINGS_FILE = _a_secrets, _a_settings
+        _a_secrets.write_text("", encoding="utf-8")
+        _a_settings.write_text(json.dumps(
+            {"mycore": {"base_url": f"http://127.0.0.1:{_a_port}/v1"}}),
+            encoding="utf-8")
+        _fresh = _srv.collect_setup()
+        _by = {i["id"]: i for i in _fresh["items"]}
+        check("setup fresh profile: required rows empty, ready false",
+              _fresh["ready"] is False
+              and _by["web_token"]["state"] == "empty"
+              and _by["tg_token"]["state"] == "empty"
+              and _by["tg_allowlist"]["state"] == "empty"
+              and _by["web_token"]["fmt"] is True
+              and _by["model_endpoint"]["state"] == "reachable",
+              str({k: v["state"] for k, v in _by.items()}))
+        _a_secrets.write_text("WEB_TOKEN=" + "w" * 20 + "\n"
+                              "MYCORE_TG_TOKEN=123456789:" + "a" * 25 + "\n"
+                              "AIDOG_TG_ALLOWED_USERS=12345\n",
+                              encoding="utf-8")
+        _filled = _srv.collect_setup()
+        check("setup filled + reachable endpoint -> ready true",
+              _filled["ready"] is True
+              and all(i["ok"] for i in _filled["items"] if i["required"])
+              and _filled["model"] == {
+                  "endpoint": f"http://127.0.0.1:{_a_port}/v1",
+                  "reachable": True},
+              str({i["id"]: (i["state"], i["ok"]) for i in _filled["items"]}))
+        _a_secrets.write_text("WEB_TOKEN=" + "w" * 20 + "\n"
+                              "MYCORE_TG_TOKEN=123456789:" + "a" * 25 + "\n"
+                              "AIDOG_TG_ALLOWED_USERS=abc\n",
+                              encoding="utf-8")
+        _bad = _srv.collect_setup()
+        _bad_row = {i["id"]: i for i in _bad["items"]}["tg_allowlist"]
+        check("setup invalid allowlist -> fmt false + invalid + ready false",
+              _bad["ready"] is False and _bad_row["fmt"] is False
+              and _bad_row["state"] == "invalid"
+              and _bad_row["ok"] is False,
+              str(_bad_row))
+        _a_settings.write_text(json.dumps(
+            {"mycore": {"base_url": "http://127.0.0.1:1/v1"}}),
+            encoding="utf-8")
+        _dead = _srv.collect_setup()
+        _dead_row = {i["id"]: i for i in _dead["items"]}["model_endpoint"]
+        check("setup dead model endpoint -> unreachable, ready false",
+              _dead["ready"] is False
+              and _dead["model"]["reachable"] is False
+              and _dead_row["state"] == "unreachable",
+              str(_dead_row))
+        _srv.SECRETS, _srv.SETTINGS_FILE = _keep[0], _keep[1]
+
+        # --- §1.2–§1.4: the 401 legs (gate first — nothing else runs) ---
+        s, body = post("/api/service/restart", {"target": "service"}, None)
+        check("POST /api/service/restart no token -> 401", s == 401,
+              f"got {s}")
+        s, body = post("/api/update/apply", {}, None)
+        check("POST /api/update/apply no token -> 401", s == 401, f"got {s}")
+        s, body = post("/api/doctor/run", {}, None)
+        check("POST /api/doctor/run no token -> 401", s == 401, f"got {s}")
+        s, ver = get("/api/version?fresh=1")
+        check("GET /api/version?fresh=1 shape (additive cache bypass)",
+              s == 200 and isinstance(ver, dict)
+              and isinstance(ver.get("installed"), str)
+              and ver.get("update_available") in (True, False, None),
+              f"got {s} {str(ver)[:160]}")
+
+        if token:
+            # --- §1.2 restart: 400 bad target (never reaches tmux) + ---
+            # --- 409 no session, with the tmux probe patched off ---
+            s, body = post("/api/service/restart", {"target": "console"}, token)
+            check("POST /api/service/restart bad target -> 400 details",
+                  s == 400 and isinstance(body, dict)
+                  and any("target" in str(d)
+                          for d in body.get("details", [])),
+                  f"got {s} {str(body)[:160]}")
+            _srv._tmux_session_exists = lambda name: False   # no tmux in p3
+            _r = _srv_call("_handle_service_restart",
+                           {"target": "service"}, token)
+            _srv._tmux_session_exists = _keep[3]
+            check("service restart: session absent -> honest 409, no tmux touch",
+                  _r is not None and _r[0] == 409
+                  and _r[1].get("error") == "chat service not running under tmux"
+                  and _r[1].get("target") == "service",
+                  f"res={_r}")
+
+            # --- §1.5 cron delete: temp registry, CLI --del semantics ---
+            from mycore import scheduler as _sch
+            _jobs_list: list = []
+            _job = _sch.create_job(_jobs_list, "every 1h", "ping the owner",
+                                   kind="message", source="ops")
+            _sch.save_jobs(_a_jobs, _jobs_list)
+            _srv._cron_jobs_path = lambda: _a_jobs
+            _r = _srv_call("_handle_cron_post",
+                           {"action": "add", "id": "x"}, token)
+            check("POST /api/cron unknown action -> 400 (no add by design)",
+                  _r is not None and _r[0] == 400
+                  and "del" in str(_r[1].get("details")), f"res={_r}")
+            _r = _srv_call("_handle_cron_post", {"action": "del"}, token)
+            check("POST /api/cron missing id -> 400",
+                  _r is not None and _r[0] == 400, f"res={_r}")
+            _r = _srv_call("_handle_cron_post",
+                           {"action": "del", "id": "nope12"}, token)
+            check("POST /api/cron unknown id -> 404",
+                  _r is not None and _r[0] == 404, f"res={_r}")
+            _r = _srv_call("_handle_cron_post",
+                           {"action": "del", "id": _job["id"]}, token)
+            check("POST /api/cron del -> 200 + registry emptied",
+                  _r is not None and _r[0] == 200 and _r[1].get("ok") is True
+                  and _r[1].get("count") == 0
+                  and _sch.load_jobs(_a_jobs) == [], f"res={_r}")
+            _r = _srv_call("_handle_cron_post",
+                           {"action": "del", "id": _job["id"]}, token)
+            check("POST /api/cron del again -> 404 (nothing left to delete)",
+                  _r is not None and _r[0] == 404, f"res={_r}")
+            _r = _srv_call("_handle_cron_post",
+                           {"action": "del", "id": "x"}, "not-the-real-token")
+            check("POST /api/cron wrong bearer -> 401, registry untouched",
+                  _r is not None and _r[0] == 401
+                  and _sch.load_jobs(_a_jobs) == [], f"res={_r}")
+            _srv._cron_jobs_path = _keep[2]
+
+            # --- §1.6 + §1.7: models/budget schema + unknown-key fix ---
+            _srv.SETTINGS_FILE = _a_settings
+            _a_settings.write_text(json.dumps(
+                {"zzz_custom": "hand-written", "sound": False}),
+                encoding="utf-8")
+            _r = _srv_call("_handle_settings_write", {"sound": True}, token)
+            _raw = json.loads(_a_settings.read_text(encoding="utf-8"))
+            check("settings write preserves unknown hand-written keys (1.7)",
+                  _r is not None and _r[0] == 200
+                  and _raw.get("zzz_custom") == "hand-written"
+                  and _raw.get("sound") is True
+                  and "zzz_custom" not in (_r[1].get("settings") or {}),
+                  f"raw_keys={sorted(_raw)} res={_r and _r[0]}")
+            _r = _srv_call("_handle_settings_write",
+                           {"mycore": {"models": ["model-a", "model-b"],
+                                       "budget": 40000}}, token)
+            _mc_raw = (json.loads(_a_settings.read_text(encoding="utf-8"))
+                       .get("mycore") or {})
+            check("settings mycore.models/budget accepted -> raw file agrees",
+                  _r is not None and _r[0] == 200
+                  and _mc_raw.get("models") == ["model-a", "model-b"]
+                  and _mc_raw.get("budget") == 40000
+                  and (_r[1].get("settings") or {}).get("mycore", {}).get(
+                      "budget") == 40000,
+                  f"res={_r and _r[0]} raw={sorted(_mc_raw)}")
+            _r = _srv_call("_handle_settings_write",
+                           {"mycore": {"models": []}}, token)
+            check("settings mycore.models [] accepted (whitelist off)",
+                  _r is not None and _r[0] == 200
+                  and json.loads(_a_settings.read_text(encoding="utf-8"))[
+                      "mycore"]["models"] == [],
+                  f"res={_r and _r[0]}")
+            _rejects = (
+                ({"mycore": {"budget": 3999}}, "budget"),
+                ({"mycore": {"budget": 1000001}}, "budget"),
+                ({"mycore": {"budget": True}}, "budget"),
+                ({"mycore": {"budget": "40000"}}, "budget"),
+                ({"mycore": {"models": "model-a"}}, "models"),
+                ({"mycore": {"models": {"a": 1}}}, "models"),
+                ({"mycore": {"models": ["ok", "bad\nid"]}}, "models"),
+                ({"mycore": {"models": ["x"] * 33}}, "models"),
+                ({"mycore": {"models": [123]}}, "models"),
+            )
+            for _patch, _why in _rejects:
+                _r = _srv_call("_handle_settings_write", _patch, token)
+                check(f"settings mycore.{_why} reject "
+                      f"{sorted(_patch['mycore'].values())} -> 400",
+                      _r is not None and _r[0] == 400
+                      and _why in str(_r[1]), f"res={_r}")
+            _srv.SETTINGS_FILE = _keep[1]
+
+            # --- §1.9 secrets allowlist format gate (temp secrets file) ---
+            _a_secrets.write_text(f"WEB_TOKEN={token}\n"
+                                  "AIDOG_TG_ALLOWED_USERS=\n",
+                                  encoding="utf-8")
+            _a_secrets.chmod(0o600)   # the real token lives in this temp file
+            _srv.SECRETS = _a_secrets
+            _r = _srv_call("_handle_secrets_write",
+                           {"name": "AIDOG_TG_ALLOWED_USERS",
+                            "value": "abc"}, token)
+            check("secrets allowlist bad format -> 400 names the slot, no write",
+                  _r is not None and _r[0] == 400
+                  and any("AIDOG_TG_ALLOWED_USERS" in str(d)
+                          for d in _r[1].get("details", []))
+                  and _srv.read_env_slot("AIDOG_TG_ALLOWED_USERS") is None,
+                  f"res={_r}")
+            _r = _srv_call("_handle_secrets_write",
+                           {"name": "AIDOG_TG_ALLOWED_USERS",
+                            "value": "123,456"}, token)
+            check("secrets allowlist valid -> 200 + stored + no value echo",
+                  _r is not None and _r[0] == 200
+                  and _srv.read_env_slot("AIDOG_TG_ALLOWED_USERS") == "123,456"
+                  and "123,456" not in json.dumps(_r[1]), f"res={_r}")
+            _r = _srv_call("_handle_secrets_write",
+                           {"name": "AIDOG_TG_ALLOWED_USERS",
+                            "value": "123 456"}, token)
+            check("secrets allowlist whitespace-separated -> 400",
+                  _r is not None and _r[0] == 400
+                  and "invalid format" in str(_r[1].get("details")),
+                  f"res={_r}")
+            _r = _srv_call("_handle_secrets_write",
+                           {"name": "AIDOG_TG_ALLOWED_USERS",
+                            "value": ""}, token)
+            check("secrets allowlist clear (empty value) -> 200 set false",
+                  _r is not None and _r[0] == 200
+                  and _r[1].get("slot", {}).get("set") is False
+                  and _srv.read_env_slot("AIDOG_TG_ALLOWED_USERS") is None,
+                  f"res={_r}")
+            _srv.SECRETS = _keep[0]
+    finally:
+        _srv.SECRETS, _srv.SETTINGS_FILE = _keep[0], _keep[1]
+        _srv._cron_jobs_path, _srv._tmux_session_exists = _keep[2], _keep[3]
+        _hsrv.shutdown()
+        _shutil.rmtree(_adir, ignore_errors=True)
+
     _bytes_end = _prod_secrets.read_bytes() if _prod_secrets.exists() else b""
     check("prod secrets.env untouched by every lane-A secrets leg",
           _bytes_end == _prod_bytes, f"changed={_bytes_end != _prod_bytes}")

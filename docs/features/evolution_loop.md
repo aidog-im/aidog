@@ -114,6 +114,12 @@ never a "missing slot" notice; curated slots keep their notice behavior).
   reflects `enabled`/`daily_at`/`weekly_day`/`monthly_day`) and
   `tmp/e2e_frontend_ui.js` `U3` (save → status line re-rendered + Bearer
   read-back) — see [frontend_coverage.md](frontend_coverage.md).
+- **LEARN + REFLECT action buttons (activation car, 0.5.40)**: both buttons
+  round-trip against an isolated profile — LEARN reports `learned → <path>`
+  with the artifact landing in that profile's body dir (removed with the
+  throwaway profile), REFLECT reports `draft → <path>` / `already drafted`.
+  Evidence: `tmp/e2e_activation_ui.js` `U7` — see
+  [frontend_coverage.md](frontend_coverage.md) §4.
 - `python3 tests/source_lang_check.py` → locale packs parity for all new keys.
 - `python3 deploy/check_publish.py` → evolution artifacts are tracked under
   `overlay/**` (allow-classified) and pass the leak scan because the lint

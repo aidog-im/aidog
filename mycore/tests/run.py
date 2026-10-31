@@ -29,10 +29,19 @@ from mycore import compact, measure, build_registry, run_turn  # noqa: E402
 from mycore import subagent  # noqa: E402 — car 2-D6 assertions read its constants
 from mycore.model import (ChatClient, ModelConfig, ModelError,  # noqa: E402
                           first_choice_text, tool_calls)
+import mycore.model as _model_mod  # noqa: E402  (§1.8 slot-fallback seam)
 from mycore.loop import TurnResult  # noqa: E402
 
 PASS: list[str] = []
 FAIL: list[str] = []
+
+# Activation car §1.8: model keys may now fall back to the secrets.env slot,
+# so the suite pins that fallback to "" for EVERY leg — a host whose
+# MODEL_API_KEY slot is filled must still run the existing keyless /
+# placeholder legs hermetically. The dedicated slot-fallback legs below
+# re-enable the real reader explicitly and restore this stub before returning.
+_SLOT_KEY_REAL = _model_mod._slot_key
+_model_mod._slot_key = lambda name: ""
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
@@ -7901,6 +7910,119 @@ def test_envslots() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_model_key_slots() -> None:
+    """mycore.model._headers key resolution (activation car §1.8): the console
+    writes secrets.env, so an UNSET env var must fall back to the slot — env
+    always wins, an empty pair keeps the loopback placeholder and leaves a
+    remote endpoint unauthenticated, and no value is ever printed here."""
+    client = ChatClient(ModelConfig())
+    prof_root = Path(tempfile.mkdtemp(prefix="model_slot_"))
+    secrets = prof_root / "slots" / "secrets.env"
+    secrets.parent.mkdir(parents=True)
+    slot_secret = "slot-sentinel-0123456789"
+    secrets.write_text(f"MODEL_API_KEY={slot_secret}\nWEB_TOKEN=abcdefghijklmnop\n",
+                       encoding="utf-8")
+    keys = ("AIDOG_PROFILES_DIR", "AIDOG_PROFILE", "MODEL_API_KEY")
+    saved = {k: os.environ.get(k) for k in keys}
+    try:
+        os.environ["AIDOG_PROFILES_DIR"] = str(prof_root)
+        os.environ["AIDOG_PROFILE"] = "slots"
+        os.environ.pop("MODEL_API_KEY", None)
+        _model_mod._slot_key = _SLOT_KEY_REAL          # real reader for this leg
+        hdr = client._headers("https://far.example/v1", "MODEL_API_KEY")
+        check("model key: unset env falls back to the secrets.env slot",
+              hdr.get("Authorization") == f"Bearer {slot_secret}",
+              f"hdr_keys={sorted(hdr)}")
+        os.environ["MODEL_API_KEY"] = "env-sentinel-0987654321"
+        hdr_env = client._headers("https://far.example/v1", "MODEL_API_KEY")
+        check("model key: env always wins over the slot (slot value unused)",
+              hdr_env.get("Authorization") == "Bearer env-sentinel-0987654321"
+              and slot_secret not in json.dumps(hdr_env),
+              f"hdr_keys={sorted(hdr_env)}")
+        os.environ.pop("MODEL_API_KEY", None)
+        secrets.write_text("MODEL_API_KEY=\nWEB_TOKEN=abcdefghijklmnop\n",
+                           encoding="utf-8")
+        hdr_lb = client._headers("http://127.0.0.1:3460/v1", "MODEL_API_KEY")
+        hdr_rm = client._headers("https://far.example/v1", "MODEL_API_KEY")
+        check("model key: empty env+slot keeps the loopback placeholder",
+              hdr_lb.get("Authorization") == "Bearer local", f"hdr_keys={sorted(hdr_lb)}")
+        check("model key: empty env+slot leaves the remote unauthenticated",
+              "Authorization" not in hdr_rm, f"hdr_keys={sorted(hdr_rm)}")
+        secrets.unlink()
+        hdr_missing = client._headers("https://far.example/v1", "MODEL_API_KEY")
+        check("model key: absent secrets.env degrades to no header (fail-closed)",
+              "Authorization" not in hdr_missing, f"hdr_keys={sorted(hdr_missing)}")
+        check("model key: describe() reports presence only, never a value",
+              slot_secret not in client.cfg.describe()
+              and "sentinel" not in client.cfg.describe(),
+              client.cfg.describe())
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        _model_mod._slot_key = lambda name: ""        # suite stays hermetic
+        shutil.rmtree(prof_root, ignore_errors=True)
+
+
+def test_settings_models_budget() -> None:
+    """mycore.models / mycore.budget are first-class (activation car §1.6):
+    the raw-file consumers (service._budget / service._allowed_models /
+    subagent._allowed_models) read exactly one temp profile document — the
+    same one the console validates and writes — and absent keys degrade to the
+    same defaults the pre-schema behavior had. Nothing touches production
+    web/settings.json."""
+    from mycore import cli
+    from mycore import service as _service
+    from mycore import subagent as _sub
+
+    prof_root = Path(tempfile.mkdtemp(prefix="models_budget_"))
+    root = prof_root / "slots"
+    root.mkdir(parents=True)
+    settings = root / "settings.json"
+    settings.write_text(json.dumps({"mycore": {
+        "models": ["mimo-v2.6-flash", "model-b"], "budget": 40000}}),
+        encoding="utf-8")
+    keys = ("AIDOG_PROFILES_DIR", "AIDOG_PROFILE")
+    saved = {k: os.environ.get(k) for k in keys}
+    try:
+        os.environ["AIDOG_PROFILES_DIR"] = str(prof_root)
+        os.environ["AIDOG_PROFILE"] = "slots"
+
+        class _Fake:
+            repo = REPO
+            _settings_doc = _service.ChatService._settings_doc
+            _settings_block = _service.ChatService._settings_block
+            _budget = _service.ChatService._budget
+            _allowed_models = _service.ChatService._allowed_models
+
+        fake = _Fake()
+        check("settings models: service consumer sees the console list",
+              fake._allowed_models() == ["mimo-v2.6-flash", "model-b"],
+              str(fake._allowed_models()))
+        check("settings models: subagent whitelist sees the same list",
+              _sub._allowed_models() == ["mimo-v2.6-flash", "model-b"],
+              str(_sub._allowed_models()))
+        check("settings budget: service consumer sees the console budget",
+              fake._budget() == 40000, str(fake._budget()))
+        settings.write_text("{}", encoding="utf-8")
+        check("settings budget: absent -> cli default (absent = default)",
+              fake._budget() == cli.DEFAULT_BUDGET_CHARS, str(fake._budget()))
+        check("settings models: absent -> the configured model only",
+              fake._allowed_models() == [cli.resolve_model_config().model],
+              str(fake._allowed_models()))
+        check("settings models: {} document never crashes the consumers",
+              _sub._allowed_models() is None, str(_sub._allowed_models()))
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(prof_root, ignore_errors=True)
+
+
 def test_tools_toggle() -> None:
     """tools_off: settings disables a tool, env overrides settings, empty
     config = full-registry parity, unknown env name = ignored (never fatal)."""
@@ -8917,6 +9039,8 @@ def main() -> int:
     test_registry_and_tools()
     test_tools_toggle()
     test_envslots()
+    test_model_key_slots()
+    test_settings_models_budget()
     test_loop()
     test_compact()
     test_session()
