@@ -108,39 +108,59 @@
   var track = document.getElementById("factTrack");
   if (track) track.innerHTML += track.innerHTML; // seamless -50% loop
 
-  /* --------------------------------------------------- starfield ---- */
-  var cv = document.getElementById("stars");
+  /* --------------------------------------------------- droplet field -- */
+  /* Falling teardrops over the hero: soft blue/cyan drops drifting upward
+     like bubbles in water — the logo's water-drop motif, canvas edition. */
+  var cv = document.getElementById("drops");
   if (cv && cv.getContext) {
-    var ctx = cv.getContext("2d"), stars = [], raf = 0, w = 0, h = 0;
+    var ctx = cv.getContext("2d"), drops = [], raf = 0, w = 0, h = 0;
     function size() {
       var dpr = Math.min(window.devicePixelRatio || 1, 2);
       w = cv.clientWidth; h = cv.clientHeight;
       cv.width = w * dpr; cv.height = h * dpr;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      var n = Math.min(120, Math.round(w * h / 14000));
-      stars = [];
+      var n = Math.min(70, Math.round(w * h / 26000));
+      drops = [];
       for (var i = 0; i < n; i++) {
-        stars.push({
+        drops.push({
           x: Math.random() * w, y: Math.random() * h,
-          r: Math.random() * 1.4 + 0.3,
-          a: Math.random() * 0.6 + 0.2,
-          s: Math.random() * 0.22 + 0.04,
+          r: Math.random() * 7 + 3,
+          a: Math.random() * 0.28 + 0.14,
+          s: Math.random() * 0.22 + 0.05,
           p: Math.random() * Math.PI * 2,
-          c: Math.random() < 0.14 ? "250,178,140" : (Math.random() < 0.4 ? "199,227,250" : "143,235,255")
+          c: Math.random() < 0.45 ? "40,146,255" :
+             (Math.random() < 0.75 ? "112,228,253" : "147,233,249")
         });
       }
     }
+    /* teardrop path: pointed tip on top, round body below */
+    function dropPath(x, y, r) {
+      ctx.beginPath();
+      ctx.moveTo(x, y - r * 1.7);
+      ctx.bezierCurveTo(x + r * 0.95, y - r * 0.7,
+        x + r, y - r * 0.1, x + r, y + r * 0.1);
+      ctx.arc(x, y + r * 0.1, r, 0, Math.PI, false);
+      ctx.bezierCurveTo(x - r, y - r * 0.1, x - r * 0.95, y - r * 0.7,
+        x, y - r * 1.7);
+      ctx.closePath();
+    }
     function draw(t) {
       ctx.clearRect(0, 0, w, h);
-      for (var i = 0; i < stars.length; i++) {
-        var s = stars[i];
-        var tw = reduced ? s.a : s.a * (0.6 + 0.4 * Math.sin(t / 900 * s.s * 10 + s.p));
+      for (var i = 0; i < drops.length; i++) {
+        var d = drops[i];
+        var sway = reduced ? 0 : Math.sin(t / 1400 + d.p) * 6;
+        var tw = reduced ? d.a : d.a * (0.7 + 0.3 * Math.sin(t / 1000 + d.p));
+        dropPath(d.x + sway, d.y, d.r);
+        ctx.fillStyle = "rgba(" + d.c + "," + tw.toFixed(3) + ")";
+        ctx.fill();
+        /* specular highlight: the wet look */
         ctx.beginPath();
-        ctx.arc(s.x, s.y, s.r, 0, 6.2832);
-        ctx.fillStyle = "rgba(" + s.c + "," + tw.toFixed(3) + ")";
+        ctx.arc(d.x + sway - d.r * 0.3, d.y + d.r * 0.25,
+          Math.max(1, d.r * 0.22), 0, 6.2832);
+        ctx.fillStyle = "rgba(255,255,255," + (tw * 1.6).toFixed(3) + ")";
         ctx.fill();
         if (!reduced) {
-          s.y -= s.s; if (s.y < -2) { s.y = h + 2; s.x = Math.random() * w; }
+          d.y -= d.s; if (d.y < -20) { d.y = h + 20; d.x = Math.random() * w; }
         }
       }
       if (!reduced) raf = requestAnimationFrame(draw);
@@ -171,7 +191,7 @@
       ln.setAttribute("y1", (210 + Math.sin(rad) * r1).toFixed(1));
       ln.setAttribute("x2", (210 + Math.cos(rad) * r2).toFixed(1));
       ln.setAttribute("y2", (210 + Math.sin(rad) * r2).toFixed(1));
-      ln.setAttribute("stroke", (a % 30 === 0) ? "rgba(143,235,255,.55)" : "rgba(109,161,201,.3)");
+      ln.setAttribute("stroke", (a % 30 === 0) ? "rgba(40,146,255,.75)" : "rgba(165,183,202,.6)");
       ln.setAttribute("stroke-width", "1");
       frag.appendChild(ln);
     }

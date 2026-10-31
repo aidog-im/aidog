@@ -324,7 +324,7 @@ function renderStatus() {
     boot.textContent = t("head.boot", "BOOT") + " " + hh + " · UP " + upH + "h" +
       String(upM).padStart(2, "0") + "m";
     if ((sys.reboots || []).length) {
-      boot.style.color = "var(--amber)"; boot.style.borderColor = "rgba(255,176,32,.6)";
+      boot.style.color = "var(--amber)"; boot.style.borderColor = "rgba(194,116,10,.6)";
       boot.title = t("head.rebootSeen", "reboot detected (see stream)");
     }
   }

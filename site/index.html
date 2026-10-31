@@ -10,9 +10,6 @@
 </head>
 <body>
 
-<div class="fx-scanlines" aria-hidden="true"></div>
-<div class="fx-vignette" aria-hidden="true"></div>
-
 <header class="nav" id="nav">
   <a class="brand" href="#home">
     <img src="assets/logo.jpg" alt="I'm AiDog logo" width="30" height="30" data-i18n-alt="brand.logoAlt">
@@ -35,12 +32,15 @@
 
 <!-- ============================================ HERO -->
 <section class="hero" id="home">
-  <canvas class="hero-stars" id="stars" aria-hidden="true"></canvas>
+  <canvas class="hero-drops" id="drops" aria-hidden="true"></canvas>
   <div class="hero-glow" aria-hidden="true"></div>
   <div class="hero-inner">
     <div class="hero-orb reveal">
       <span class="orb-ring orb-ring-a" aria-hidden="true"></span>
       <span class="orb-ring orb-ring-b" aria-hidden="true"></span>
+      <span class="orb-drop od-1" aria-hidden="true"></span>
+      <span class="orb-drop od-2" aria-hidden="true"></span>
+      <span class="orb-drop od-3" aria-hidden="true"></span>
       <img src="assets/logo.jpg" alt="I'm AiDog logo" class="orb-img" data-i18n-alt="brand.logoAlt">
     </div>
     <p class="hero-kicker reveal" data-i18n="hero.kicker">PERSONAL · EMBODIED · LOCAL-FIRST</p>
@@ -173,13 +173,13 @@
                 <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
               </filter>
               <radialGradient id="coreGrad" cx="50%" cy="50%" r="50%">
-                <stop offset="0%" stop-color="#8febff" stop-opacity=".5"/>
-                <stop offset="60%" stop-color="#6da1c9" stop-opacity=".12"/>
-                <stop offset="100%" stop-color="#6da1c9" stop-opacity="0"/>
+                <stop offset="0%" stop-color="#70e4fd" stop-opacity=".55"/>
+                <stop offset="60%" stop-color="#2892ff" stop-opacity=".14"/>
+                <stop offset="100%" stop-color="#2892ff" stop-opacity="0"/>
               </radialGradient>
               <linearGradient id="scanGrad" x1="0" y1="0" x2="1" y2="1">
-                <stop offset="0%" stop-color="#8febff" stop-opacity=".8"/>
-                <stop offset="100%" stop-color="#8febff" stop-opacity="0"/>
+                <stop offset="0%" stop-color="#2892ff" stop-opacity=".8"/>
+                <stop offset="100%" stop-color="#2892ff" stop-opacity="0"/>
               </linearGradient>
             </defs>
             <circle class="ring-track" cx="210" cy="210" r="168"/>
