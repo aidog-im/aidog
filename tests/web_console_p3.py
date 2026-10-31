@@ -1030,6 +1030,48 @@ def main() -> int:
           and all(v not in med_text for v in med_slots),
           f"n_slots={len(med_slots)}")
 
+    # --- W1 Web3: capabilities.exchange — 8 read-only venue rows, keyless
+    # public data only; the serialized block is re-checked against every
+    # secrets.env slot value with the SAME rule as the catalog above. ---
+    s, caps_x = get("/api/capabilities")
+    exb = caps_x.get("exchange") if isinstance(caps_x, dict) else None
+    ex_venues = exb.get("venues") if isinstance(exb, dict) else None
+    exp_ex_keys = {"okx", "kraken", "jupiter", "velora", "hyperliquid",
+                   "dydx", "gmx", "rpc"}
+    row_fields = {"key", "label", "kind", "auth", "configured", "read_only"}
+    check("GET capabilities exchange block (8 read-only venue rows)",
+          s == 200 and isinstance(exb, dict)
+          and exb.get("read_only") is True
+          and isinstance(exb.get("tools"), list)
+          and isinstance(ex_venues, list) and len(ex_venues) == 8
+          and all(isinstance(v, dict) and row_fields <= set(v)
+                  and v.get("read_only") is True
+                  and v.get("kind") in ("cex", "chain")
+                  and v.get("auth") in ("key", "public")
+                  and isinstance(v.get("configured"), bool)
+                  for v in ex_venues)
+          and {v.get("key") for v in ex_venues} == exp_ex_keys,
+          f"exchange={exb}")
+    ex_text = json.dumps(exb, ensure_ascii=False) if isinstance(exb, dict) else ""
+    ex_leak_keys = re.findall(r'"[^"\"]*(?:token|secret|password|api_key|apikey)'
+                              r'[^"\"]*"\s*:', ex_text, flags=re.I)
+    check("GET capabilities exchange: no credential material",
+          bool(ex_text) and bool(slot_vals)
+          and all(v not in ex_text for v in slot_vals)
+          and not ex_leak_keys,
+          f"leak_keys={ex_leak_keys} n_slots={len(slot_vals)}")
+
+    # --- W1 Web3: GET /api/exchange/quote — route exists, unknown venue is
+    # an honest 400 with a non-empty error (offline: _check_venue rejects
+    # before any network I/O, so this never needs the internet). ---
+    s, q = get("/api/exchange/quote?venue=no_such_venue")
+    check("GET /api/exchange/quote route exists (not 404)",
+          s != 404, f"got {s} {str(q)[:120]}")
+    check("GET /api/exchange/quote unknown venue -> 400 + honest error",
+          s == 400 and isinstance(q, dict)
+          and bool(str(q.get("error") or "").strip()),
+          f"got {s} {str(q)[:200]}")
+
     # --- car 4c: /api/media served-file whitelist — unknown name, encoded
     # traversal and a non-image suffix all answer a plain 404. ---
     s, _b = get("/api/media/no_such_e2e_image.png")

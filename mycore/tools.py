@@ -57,7 +57,10 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "browser_open", "browser_snapshot", "browser_click", "browser_type",
     "browser_screenshot", "browser_close",
     # car 4c: media face (always / slot-gated registrants)
-    "generate_image", "connector_search"})
+    "generate_image", "connector_search",
+    # W1 Web3 read-only exchange car (markets always / portfolio+orders
+    # slot-gated on at least one CEX credential slot)
+    "exchange_markets", "exchange_portfolio", "exchange_orders"})
 
 # settings key mycore.tools_off + env MYCORE_TOOLS_OFF (owner-approved design)
 TOOLS_OFF_ENV = "MYCORE_TOOLS_OFF"
@@ -599,6 +602,41 @@ def _connector_search(query: str, source: str = "auto", limit: int = 5) -> str:
         raise ToolError(str(e)) from None
 
 
+def _exchange_markets(venue: str, symbol: str | None = None) -> str:
+    """`exchange_markets` handler (W1 Web3 car): READ-ONLY public market
+    data for one venue — keyless, works with zero credentials. ExchangeError
+    (unknown venue, bad symbol, upstream failure) becomes the honest ERROR
+    line; no order placement exists anywhere on this path."""
+    from . import exchanges  # local import: optional dependency path
+    try:
+        return exchanges.markets(venue, symbol)
+    except exchanges.ExchangeError as e:
+        raise ToolError(str(e)) from None
+
+
+def _exchange_portfolio(venue: str) -> str:
+    """`exchange_portfolio` handler (W1 Web3 car): READ-ONLY account
+    balances for one CEX venue (slot-gated at registration). ExchangeError
+    (missing slot, upstream failure) becomes the honest ERROR line."""
+    from . import exchanges  # local import: optional dependency path
+    try:
+        return exchanges.portfolio(venue)
+    except exchanges.ExchangeError as e:
+        raise ToolError(str(e)) from None
+
+
+def _exchange_orders(venue: str) -> str:
+    """`exchange_orders` handler (W1 Web3 car): READ-ONLY open-order list
+    for one CEX venue (slot-gated at registration). Listing reads only —
+    placing an order does not exist in W1. ExchangeError becomes the honest
+    ERROR line."""
+    from . import exchanges  # local import: optional dependency path
+    try:
+        return exchanges.orders(venue)
+    except exchanges.ExchangeError as e:
+        raise ToolError(str(e)) from None
+
+
 def resolve_disabled_tools(settings: dict | None = None) -> frozenset[str]:
     """Effective per-tool kill set (docs/features/tool_toggles.md).
 
@@ -846,6 +884,75 @@ def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
                                 "(LINEAR_API_KEY / NOTION_API_KEY)")
     except Exception as e:  # noqa: BLE001 — probe must never break the registry
         r.connector_note = f"connectors unavailable: {type(e).__name__}: {e}"
+    # --- W1 Web3 car: read-only exchange face (markets + account reads) ---
+    # exchange_markets registers ALWAYS: public, keyless market data (same
+    # always-register rationale as generate_image — configuration resolves
+    # at CALL time, so an unknown venue or a dead upstream surfaces as an
+    # honest ERROR line instead of a missing capability). exchange_portfolio
+    # and exchange_orders register ONLY when at least one CEX credential
+    # slot exists (exactly the connector_search slot-gating pattern:
+    # capability-honest registration), otherwise the registry carries
+    # r.exchange_note naming the unconfigured venues and their missing slots
+    # instead of a dead tool. READ-ONLY: no order placement exists in W1.
+    r.exchange_note: str | None = None
+    ex_rows: list[dict] = []
+    try:
+        from . import exchanges as ex_mod
+        ex_rows = [row for row in ex_mod.catalog() if isinstance(row, dict)]
+        ex_ready = any(ex_mod.status().values())
+    except Exception as e:  # noqa: BLE001 — probe must never break the registry
+        ex_mod = None
+        ex_ready = False
+        r.exchange_note = f"exchange unavailable: {type(e).__name__}: {e}"
+    # venue enum comes from the live catalog; the literal tuple is only the
+    # fail-soft fallback so exchange_markets still registers if the probe broke
+    ex_keys = [row.get("key") for row in ex_rows if row.get("key")] or [
+        "okx", "kraken", "jupiter", "velora", "hyperliquid", "dydx", "gmx", "rpc"]
+    r.register("exchange_markets",
+               "READ-ONLY public market data for one venue (8 venues: "
+               "okx, kraken, jupiter, velora, hyperliquid, dydx, gmx, "
+               "rpc). Keyless — works with zero credentials; no order "
+               "placement exists in W1. `symbol` defaults to the "
+               "venue's default pair.",
+               {"type": "object", "properties": {
+                   "venue": {"type": "string", "enum": ex_keys},
+                   "symbol": {"type": "string",
+                              "description": "Pair/ticker; defaults to "
+                                             "the venue's default pair."}},
+                "required": ["venue"]},
+               lambda venue, symbol=None: _exchange_markets(venue, symbol))
+    if r.exchange_note is None:  # probe healthy: gate the account reads on slots
+        try:
+            if ex_ready:
+                r.register("exchange_portfolio",
+                           "READ-ONLY account balances for one CEX venue "
+                           "(okx or kraken). Slots are read at call time; "
+                           "no order placement exists in W1.",
+                           {"type": "object", "properties": {
+                               "venue": {"type": "string",
+                                         "enum": ["okx", "kraken"]}},
+                            "required": ["venue"]},
+                           lambda venue: _exchange_portfolio(venue))
+                r.register("exchange_orders",
+                           "READ-ONLY list of open orders for one CEX venue "
+                           "(okx or kraken). Listing only — placing an order "
+                           "does not exist in W1.",
+                           {"type": "object", "properties": {
+                               "venue": {"type": "string",
+                                         "enum": ["okx", "kraken"]}},
+                            "required": ["venue"]},
+                           lambda venue: _exchange_orders(venue))
+            else:
+                # Honest note naming ONLY the unconfigured venues + missing
+                # slots (catalog rows carry `reason` only for key venues
+                # without a full slot set).
+                parts = [f"{row.get('key')} {row.get('reason')}"
+                         for row in ex_rows
+                         if row.get("configured") is False and row.get("reason")]
+                r.exchange_note = ("exchange account tools not configured: "
+                                   + "; ".join(parts))
+        except Exception as e:  # noqa: BLE001 — probe must never break the registry
+            r.exchange_note = f"exchange unavailable: {type(e).__name__}: {e}"
     # --- car 2-D5: MCP servers (fail-soft: notes, never a startup crash) ---
     r.mcp_notes: list[str] = []
     r.mcp_sessions: list = []

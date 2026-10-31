@@ -31,7 +31,7 @@
   </div>
 </div>
 
-<!-- app shell: slim topbar + fixed side nav + main view area (six views) -->
+<!-- app shell: slim topbar + fixed side nav + main view area (seven views) -->
 <div class="shell">
   <header class="topbar">
     <div class="brand">
@@ -84,6 +84,15 @@
           stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
           <path d="M8 1.9 9.7 6.3 14.1 8 9.7 9.7 8 14.1 6.3 9.7 1.9 8 6.3 6.3z"/></svg></span>
         <span class="nav-label" data-i18n="view.skills.title">Skills</span>
+        <span class="nav-drop" aria-hidden="true"></span>
+      </button>
+      <button class="nav-item" type="button" data-view="exchange">
+        <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"
+          stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4.6 1.9v12.2M11.4 1.9v12.2"/>
+          <rect x="3" y="4.7" width="3.2" height="5.6" rx=".8"/>
+          <rect x="9.8" y="5.9" width="3.2" height="4.4" rx=".8"/></svg></span>
+        <span class="nav-label" data-i18n="view.exchange.title">Exchange</span>
         <span class="nav-drop" aria-hidden="true"></span>
       </button>
       <button class="nav-item" type="button" data-view="evolution">
@@ -311,6 +320,61 @@
         <h2><span data-i18n="sec.gallery">SKILL ARMORY</span><span class="gal-count" id="galCount"></span></h2>
         <div class="gal-grid" id="galGrid"></div>
       </section>
+    </section>
+
+    <!-- EXCHANGE: Web3 phase-2 W1 read-only venue panel. It renders ONLY
+         from GET /api/capabilities -> exchange: when that backend block is
+         absent the panel says so honestly instead of pretending. Nothing
+         here ever places an order — reads only (see the disclosure). -->
+    <section class="view" id="view-exchange" data-view="exchange">
+      <div class="view-head">
+        <div class="view-titles">
+          <h2 data-i18n="view.exchange.title">Exchange</h2>
+          <p class="view-sub" data-i18n="view.exchange.sub">Read-only venues, tools and a market probe</p>
+        </div>
+      </div>
+      <div class="ov-grid">
+        <section class="card span-3">
+          <h2><span data-i18n="sec.exchange">READ-ONLY EXCHANGE</span>
+              <span class="chat-badge" data-i18n="ex.badge">read-only</span></h2>
+          <p class="auth-lead" data-i18n="ex.lead">This panel reads market data only: no order placement, no transfers, no withdrawals — this release ships no trading writes.</p>
+          <ul class="reason-list" id="exDisclosure">
+            <li data-i18n="ex.disc.fees">The product is permanently free, but exchange fees and on-chain gas are not zero: you settle them yourself with the exchange or the chain.</li>
+            <li data-i18n="ex.disc.advice">Nothing on this panel is investment advice.</li>
+            <li data-i18n="ex.disc.risk">Trading risk is borne by you: you are responsible for the outcome of any trade you make.</li>
+            <li data-i18n="ex.disc.creds">Credentials stay on this machine (secrets.env) and are never echoed into chats, logs or documents.</li>
+          </ul>
+        </section>
+
+        <section class="card span-3">
+          <h2><span data-i18n="ex.venues">VENUES</span><span class="gal-count" id="exVenueCount"></span></h2>
+          <div class="gal-grid" id="exVenues"></div>
+        </section>
+
+        <section class="card span-1">
+          <h2 data-i18n="ex.tools">REGISTERED TOOLS</h2>
+          <div class="stat-note" id="exTools">–</div>
+          <div class="reason-list" id="exNote" hidden></div>
+        </section>
+
+        <section class="card span-2">
+          <h2 data-i18n="ex.probe">MARKET PROBE</h2>
+          <div class="ctl-row">
+            <label data-i18n="ex.probe.venue">Venue</label>
+            <select id="exVenueSel" aria-label="venue"></select>
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="ex.probe.symbol">Symbol</label>
+            <input type="text" id="exSymbol" maxlength="64" autocomplete="off"
+                   spellcheck="false">
+          </div>
+          <div class="ctl-actions">
+            <button class="btn primary" id="exProbeBtn" type="button" data-i18n="ex.probe.go">FETCH QUOTE</button>
+            <span class="save-state" id="exProbeMsg" role="status"></span>
+          </div>
+          <pre class="vs-live evo-status" id="exQuoteOut"></pre>
+        </section>
+      </div>
     </section>
 
     <!-- EVOLUTION: institutional loop (learn -> reflect -> log; the Human

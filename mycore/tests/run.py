@@ -54,12 +54,15 @@ def expected_tool_names() -> frozenset[str]:
     """Core 11 + generate_image (always, car 4c) + the six browser_* tools
     IFF a browser binary is discoverable (car 4b capability-honest
     registration) + connector_search IFF connectors.status() reports at
-    least one credential slot (car 4c, mirrors the registration gate).
+    least one credential slot (car 4c, mirrors the registration gate) +
+    exchange_markets ALWAYS (keyless public market data, W1) and
+    exchange_portfolio / exchange_orders IFF at least one CEX credential
+    slot is present (W1, mirrors the same gate).
     The suite must be green both on hosts with a browser and without —
     with or without connector slots — and with AIDOG_BROWSER_BIN overridden
     to a dead path — so every count assertion derives from this, never a
     literal."""
-    out = set(CORE_TOOLS) | {"generate_image"}   # car 4c: always registered
+    out = set(CORE_TOOLS) | {"generate_image", "exchange_markets"}
     try:
         from mycore import browser as _br
         if _br.available():
@@ -71,6 +74,12 @@ def expected_tool_names() -> frozenset[str]:
         if any(_cn.status().values()):
             out |= {"connector_search"}
     except Exception:  # noqa: BLE001 — connectors probe must never break
+        pass
+    try:
+        from mycore import exchanges as _ex
+        if any(_ex.status().values()):
+            out |= {"exchange_portfolio", "exchange_orders"}
+    except Exception:  # noqa: BLE001 — exchange probe must never break
         pass
     return frozenset(out)
 
@@ -7843,11 +7852,14 @@ def test_tools_toggle() -> None:
 
     saved_env = os.environ.get("MYCORE_TOOLS_OFF")
     try:
-        # catalog sanity: 11 core + generate_image + connector_search + 6 browser
+        # catalog sanity: 11 core + generate_image + connector_search
+        # + 6 browser + 3 exchange_* (W1)
         check("tools_off: KNOWN_TOOL_NAMES covers core + conditional",
               {"read_file", "run_bash", "cron", "delegate", "execute_code",
                "generate_image", "connector_search", "browser_open",
-               "browser_close"} <= KNOWN_TOOL_NAMES and len(KNOWN_TOOL_NAMES) == 19,
+               "browser_close", "exchange_markets", "exchange_portfolio",
+               "exchange_orders"} <= KNOWN_TOOL_NAMES
+              and len(KNOWN_TOOL_NAMES) == 22,
               str(sorted(KNOWN_TOOL_NAMES)))
 
         # 1) settings dict path disables a core tool
@@ -7897,6 +7909,441 @@ def test_tools_toggle() -> None:
             os.environ["MYCORE_TOOLS_OFF"] = saved_env
 
 
+def test_exchanges() -> None:
+    """Web3 phase-2 W1 — read-only exchange & chain sources: catalog shape,
+    slot gating (values never surface), the OFFICIAL Kraken signature
+    vector, per-venue parsing through injected transports, symbol
+    validation, bounded upstream errors. Zero network, zero real keys:
+    every slot read is hermetic and every HTTP call is a fake transport."""
+    import base64
+    import hashlib
+    import hmac
+    from mycore import exchanges as ex
+
+    saved_slot = ex._slot
+    slots: dict = {}
+    captured: dict = {}
+
+    def fake_transport(url, method, headers, payload, timeout, fixture=""):
+        captured.update(url=url, method=method, headers=dict(headers),
+                        payload=payload, timeout=timeout)
+        return fixture
+
+    def unreachable(url, method, headers, payload, timeout):
+        raise AssertionError("transport must not be reached")
+
+    try:
+        # the test owns every slot read: hermetic against the host secrets.env
+        ex._slot = lambda name: slots.get(name, "")   # noqa: E731
+
+        # --- catalog: 8 venues, stable order, honest reasons ---
+        cat = ex.catalog()
+        check("exchanges: catalog has 8 venues in order",
+              [r["key"] for r in cat] ==
+              ["okx", "kraken", "jupiter", "velora", "hyperliquid",
+               "dydx", "gmx", "rpc"], str([r["key"] for r in cat]))
+        check("exchanges: every venue declares read_only",
+              all(r.get("read_only") is True for r in cat))
+        check("exchanges: cex/key vs chain/public split",
+              [r["kind"] for r in cat[:2]] == ["cex", "cex"]
+              and all(r["kind"] == "chain" for r in cat[2:])
+              and cat[0]["auth"] == "key" and cat[2]["auth"] == "public",
+              str([(r["key"], r["kind"], r["auth"]) for r in cat]))
+        check("exchanges: unconfigured key venue names its slots",
+              cat[0].get("configured") is False
+              and "OKX_API_KEY" in cat[0].get("reason", "")
+              and "secrets.env" in cat[0].get("reason", ""), str(cat[0]))
+        check("exchanges: keyless chain venues carry no reason",
+              all("reason" not in r and r.get("configured") is True
+                  for r in cat[2:]), str(cat[2]))
+        check("exchanges: status presence only, nothing leaks",
+              ex.status() == {"okx": False, "kraken": False}
+              and "SENTINEL" not in str(ex.status()), str(ex.status()))
+
+        # --- slots: presence-only status, reasons that name the gap ---
+        slots.update({"OKX_API_KEY": "OKXKEY-SENTINEL-000",
+                      "OKX_API_SECRET": "OKXSEC-SENTINEL-000",
+                      "OKX_API_PASSPHRASE": "OKXPP-SENTINEL-000"})
+        st = ex.status()
+        check("exchanges: status okx present / kraken absent",
+              st == {"okx": True, "kraken": False}, str(st))
+        check("exchanges: configured venue drops the reason",
+              [r for r in ex.catalog() if r["key"] == "okx"][0]
+              .get("configured") is True, str(st))
+        check("exchanges: no slot value in the whole catalog",
+              "SENTINEL" not in json.dumps(ex.catalog()))
+        check("exchanges: missing_slots names only what is absent",
+              ex.missing_slots("kraken") ==
+              ("KRAKEN_API_KEY", "KRAKEN_API_SECRET")
+              and ex.missing_slots("okx") == (),
+              str(ex.missing_slots("kraken")))
+
+        # --- Kraken OFFICIAL published example vector (independent truth) ---
+        sig = ex.kraken_sign(
+            "/0/private/AddOrder",
+            "nonce=1616492376594&ordertype=limit&pair=XBTUSD&price=37500"
+            "&type=buy&volume=1.25", "1616492376594",
+            "kQH5HW/8p1uGOVjbgWA7FunAmGO8lsSUXNsu3eow76sz84Q18fWxnyRzBHCd3p"
+            "d5nE9qa99HAZtuZuj6F1huXg==")
+        check("exchanges: kraken official signature vector matches",
+              sig == "4/dpxb3iT4tp/ZCVEwSnEsLxx0bqyhLpdfOpc6fn7OR8+UClSV5n9E"
+                     "6aSS8MPtnRfp32bAb0nmbRn6H8ndwLUQ==", sig)
+
+        # --- OKX pre-hash: Base64(HMAC-SHA256(secret, ts+method+path+body)) ---
+        ts0 = "2026-10-24T00:00:00.000Z"
+        path0 = "/api/v5/account/balance"
+        base = ex.okx_sign(ts0, "GET", path0, "", "SEC")
+        check("exchanges: okx sign decodes to 32 bytes",
+              len(base64.b64decode(base)) == 32)
+        expected = base64.b64encode(hmac.new(
+            b"SEC", ts0.encode() + b"GET" + path0.encode() + b"",
+            hashlib.sha256).digest()).decode()
+        check("exchanges: okx prehash = timestamp+method+path+body",
+              expected == base, f"{expected} != {base}")
+        variants = [ex.okx_sign("2026-10-24T00:00:01.000Z", "GET", path0, "", "SEC"),
+                    ex.okx_sign(ts0, "POST", path0, "", "SEC"),
+                    ex.okx_sign(ts0, "GET", path0 + "?ccy=BTC", "", "SEC"),
+                    ex.okx_sign(ts0, "GET", path0, "{}", "SEC"),
+                    ex.okx_sign(ts0, "GET", path0, "", "OTHER")]
+        check("exchanges: every pre-hash field changes the signature",
+              all(v != base for v in variants))
+
+        # --- nonce: strictly increasing (Kraken requirement) ---
+        n1, n2 = ex._nonce(), ex._nonce()
+        check("exchanges: nonce strictly increases",
+              int(n2) > int(n1) and n1.isdigit(), f"{n1} {n2}")
+
+        # --- validation rejected BEFORE any transport is reached ---
+        try:
+            ex.markets("nasdaq", transport=unreachable)
+            check("exchanges: unknown venue -> ExchangeError", False)
+        except ex.ExchangeError as e:
+            check("exchanges: unknown venue -> ExchangeError",
+                  "unknown venue" in str(e) and "okx" in str(e), str(e))
+        for bad in ("BTC; drop table", "a b", "x" * 65, "../../etc/passwd"):
+            try:
+                ex.markets("okx", bad, transport=unreachable)
+                check(f"exchanges: symbol {bad[:12]!r} rejected", False)
+            except ex.ExchangeError as e:
+                check(f"exchanges: symbol {bad[:12]!r} rejected",
+                      "symbol" in str(e), str(e))
+            except Exception as e:  # noqa: BLE001
+                check(f"exchanges: symbol {bad[:12]!r} rejected", False,
+                      type(e).__name__)
+
+        # --- okx public ticker: renders, and is UNAUTHENTICATED ---
+        captured.clear()
+        okx_fx = json.dumps({"code": "0", "data": [{
+            "instId": "BTC-USDT", "last": "80192.4", "askPx": "80192.2",
+            "bidPx": "80192.1", "open24h": "81750.0",
+            "high24h": "81916.6", "low24h": "79833.5",
+            "vol24h": "3150.889"}]})
+        out = ex.markets("okx",
+                         transport=lambda u, m, h, p, t: fake_transport(
+                             u, m, h, p, t, okx_fx))
+        check("exchanges: okx ticker line renders",
+              out.startswith("BTC-USDT last=80192.4")
+              and "high24h=81916.6" in out and "vol24h=3150.889" in out
+              and "chg24h=" in out, out)
+        check("exchanges: okx market request carries no credential",
+              "OK-ACCESS-KEY" not in captured["headers"]
+              and "OK-ACCESS-SIGN" not in captured["headers"]
+              and "SENTINEL" not in json.dumps(captured["headers"]))
+        check("exchanges: okx market url",
+              captured["url"].endswith("/api/v5/market/ticker?instId=BTC-USDT"),
+              captured["url"])
+
+        # --- kraken public ticker: BTC spelling + separator normalization ---
+        captured.clear()
+        kraken_fx = json.dumps({"error": [], "result": {"XXBTZUSD": {
+            "a": ["80143.7", "1", "1.0"], "b": ["80143.6", "1", "1.0"],
+            "c": ["80080.8", "0.1"], "v": ["1385.3", "1385.3"],
+            "p": ["1", "1"], "t": [1, 2], "l": ["79750", "79750"],
+            "h": ["81797.1", "81797.1"], "o": "81060.0"}}})
+        out = ex.markets("kraken",
+                         transport=lambda u, m, h, p, t: fake_transport(
+                             u, m, h, p, t, kraken_fx))
+        check("exchanges: kraken default pair normalized to XBTUSD",
+              captured["url"].endswith("/0/public/Ticker?pair=XBTUSD"),
+              captured["url"])
+        check("exchanges: kraken ticker line renders",
+              "XXBTZUSD last=80080.8" in out and "high24h=81797.1" in out
+              and "vol24h=1385.3" in out, out)
+        captured.clear()
+        ex.markets("kraken", "BTC/USD",
+                   transport=lambda u, m, h, p, t: fake_transport(
+                       u, m, h, p, t, kraken_fx))
+        check("exchanges: kraken accepts BTC/USD spelling",
+              captured["url"].endswith("pair=XBTUSD"), captured["url"])
+
+        # --- jupiter: symbol -> mint resolution, percent change rendered ---
+        captured.clear()
+        jup_fx = json.dumps({ex.JUPITER_MINTS["SOL"]: {
+            "usdPrice": 100.39835953, "priceChange24h": -3.95,
+            "liquidity": 917854773.45, "blockId": 460888359}})
+        out = ex.markets("jupiter",
+                         transport=lambda u, m, h, p, t: fake_transport(
+                             u, m, h, p, t, jup_fx))
+        check("exchanges: jupiter price line renders",
+              out.startswith("SOL price=100.39835953")
+              and "chg24h=-3.95%" in out, out)
+        check("exchanges: jupiter resolved SOL to its verified mint",
+              "ids=" + ex.JUPITER_MINTS["SOL"] in captured["url"],
+              captured["url"])
+        try:
+            ex.markets("jupiter", "NOTACOIN", transport=unreachable)
+            check("exchanges: jupiter unknown symbol rejected", False)
+        except ex.ExchangeError as e:
+            check("exchanges: jupiter unknown symbol rejected",
+                  "mint" in str(e) or "symbol" in str(e), str(e))
+
+        # --- velora: 1 unit in, USD read from the route ---
+        captured.clear()
+        vel_fx = json.dumps({"delta": {"route": {"origin": {
+            "input": {"amountUSD": "0.999678"},
+            "output": {"amount": "382520000000000",
+                       "amountUSD": "0.89842336"}}}}})
+        out = ex.markets("velora",
+                         transport=lambda u, m, h, p, t: fake_transport(
+                             u, m, h, p, t, vel_fx))
+        check("exchanges: velora quote line renders",
+              out.startswith("USDC/WETH 1 USDC -> 0.00038252 WETH")
+              and "usd_in=0.999678" in out, out)
+        check("exchanges: velora request pins chainId and source token",
+              "chainId=1" in captured["url"]
+              and ex.VELORA_TOKENS["USDC"][0] in captured["url"],
+              captured["url"])
+        for bad in ("USDC", "BTC/USD", "USDC/NOPE"):
+            try:
+                ex.markets("velora", bad, transport=unreachable)
+                check(f"exchanges: velora pair {bad!r} rejected", False)
+            except ex.ExchangeError:
+                check(f"exchanges: velora pair {bad!r} rejected", True)
+
+        # --- hyperliquid: FLAT coin -> mid map, POST /info ---
+        captured.clear()
+        hl_fx = json.dumps({"BTC": "80158.5", "ETH": "2340.1"})
+        out = ex.markets("hyperliquid",
+                         transport=lambda u, m, h, p, t: fake_transport(
+                             u, m, h, p, t, hl_fx))
+        check("exchanges: hyperliquid mid line renders",
+              out == "BTC mid=80158.5", out)
+        check("exchanges: hyperliquid posts the allMids info request",
+              captured["method"] == "POST" and captured["url"].endswith("/info")
+              and json.loads(captured["payload"]) == {"type": "allMids"},
+              str(captured["payload"]))
+
+        # --- dydx / gmx / public RPC chain head ---
+        captured.clear()
+        dy_fx = json.dumps({"markets": {"BTC-USD": {
+            "oraclePrice": "80099.23889", "priceChange24H": "-1673.37865",
+            "volume24H": "10185997.64", "nextFundingRate": "0.00001014",
+            "openInterest": "235.7758", "status": "ACTIVE"}}})
+        out = ex.markets("dydx",
+                         transport=lambda u, m, h, p, t: fake_transport(
+                             u, m, h, p, t, dy_fx))
+        check("exchanges: dydx market line renders",
+              out.startswith("BTC-USD last=80099.23889")
+              and "status=ACTIVE" in out, out)
+        check("exchanges: dydx url",
+              captured["url"].endswith("/v4/perpetualMarkets?market=BTC-USD"),
+              captured["url"])
+
+        captured.clear()
+        gmx_fx = json.dumps([{
+            "ticker_id": "BTC/USD [BTC-USDC]", "base_currency": "BTC",
+            "last_price": 80022.44, "high": 81811.13, "low": 79751.44,
+            "funding_rate": 0.00198572, "open_interest": 1778504,
+            "liquidity_in_usd": 123456}])
+        out = ex.markets("gmx",
+                         transport=lambda u, m, h, p, t: fake_transport(
+                             u, m, h, p, t, gmx_fx))
+        check("exchanges: gmx pair line renders",
+              out.startswith("BTC/USD [BTC-USDC] last=80022.44")
+              and "oi_usd=1778504" in out, out)
+        # gmx can only know its market list AFTER fetching the feed, so the
+        # unknown-market case is exercised against a real fixture, not a
+        # pre-fetch guard.
+        try:
+            ex.markets("gmx", "DOGE",
+                       transport=lambda u, m, h, p, t: fake_transport(
+                           u, m, h, p, t, gmx_fx))
+            check("exchanges: gmx unknown market rejected", False)
+        except ex.ExchangeError as e:
+            check("exchanges: gmx unknown market rejected",
+                  "no market" in str(e), str(e))
+
+        captured.clear()
+        rpc_fx = json.dumps({"jsonrpc": "2.0", "id": 1,
+                             "result": "0x3292cb1"})
+        out = ex.markets("rpc",
+                         transport=lambda u, m, h, p, t: fake_transport(
+                             u, m, h, p, t, rpc_fx))
+        check("exchanges: rpc chain head decodes hex",
+              out.startswith("base head=53030065"), out)
+        check("exchanges: rpc asks for the base chain head",
+              json.loads(captured["payload"])["method"] == "eth_blockNumber",
+              str(captured["payload"]))
+        try:
+            ex.markets("rpc", "dogechain", transport=unreachable)
+            check("exchanges: rpc unknown chain rejected", False)
+        except ex.ExchangeError as e:
+            check("exchanges: rpc unknown chain rejected",
+                  "chain must be one of" in str(e), str(e))
+
+        # --- account legs: slot-gated BEFORE any transport ---
+        # (run with an EMPTY slot map: these are the keyless-refusal paths)
+        configured = dict(slots)
+        slots.clear()
+        for venue in ("okx", "kraken"):
+            for fn in (ex.portfolio, ex.orders):
+                try:
+                    fn(venue, transport=unreachable)
+                    check(f"exchanges: {fn.__name__}({venue}) refuses keyless", False)
+                except ex.ExchangeError as e:
+                    check(f"exchanges: {fn.__name__}({venue}) refuses keyless",
+                          "not configured" in str(e)
+                          and ("OKX_API_KEY" in str(e)
+                               or "KRAKEN_API_KEY" in str(e)), str(e))
+        for venue in ("jupiter", "velora", "rpc"):
+            try:
+                ex.portfolio(venue, transport=unreachable)
+                check(f"exchanges: {venue} has no account surface", False)
+            except ex.ExchangeError as e:
+                check(f"exchanges: {venue} has no account surface",
+                      "no account surface" in str(e), str(e))
+        slots.update(configured)
+
+        # --- okx private reads: signed headers, no value in the output ---
+        slots.update({"KRAKEN_API_KEY": "KRKKEY-SENTINEL-000",
+                      "KRAKEN_API_SECRET":
+                          "c2VjcmV0LXNlbnRpbmVsLXNlY3JldC1zZWNyZXQ="})
+        captured.clear()
+        bal_fx = json.dumps({"code": "0", "data": [{
+            "totalEq": "55837.4355", "details": [
+                {"ccy": "USDT", "bal": "500000", "eq": "499999.1",
+                 "availBal": "4834.31", "ordFrozen": "158.573"},
+                {"ccy": "ETH", "bal": "0", "eq": "0",
+                 "availBal": "0", "ordFrozen": "0"}]}]})
+        out = ex.portfolio("okx",
+                           transport=lambda u, m, h, p, t: fake_transport(
+                               u, m, h, p, t, bal_fx))
+        check("exchanges: okx balance lines render",
+              out.startswith("total_eq_usd=55837.4355")
+              and "USDT bal=500000 eq_usd=499999.1" in out
+              and "ETH" not in out.splitlines()[1:],  # zero rows dropped
+              out)
+        check("exchanges: okx private request is signed",
+              captured["headers"].get("OK-ACCESS-KEY") == slots["OKX_API_KEY"]
+              and bool(captured["headers"].get("OK-ACCESS-SIGN"))
+              and bool(captured["headers"].get("OK-ACCESS-TIMESTAMP"))
+              and captured["headers"].get("OK-ACCESS-PASSPHRASE")
+              == slots["OKX_API_PASSPHRASE"], str(list(captured["headers"])))
+        check("exchanges: okx balance output carries no credential",
+              "SENTINEL" not in out and slots["OKX_API_SECRET"] not in out)
+        check("exchanges: okx balance url",
+              captured["url"].endswith("/api/v5/account/balance"),
+              captured["url"])
+
+        captured.clear()
+        ord_fx = json.dumps({"code": "0", "data": [{
+            "ordId": "1234", "instId": "BTC-USDT", "side": "buy",
+            "px": "79000", "sz": "0.01", "accFillSz": "0",
+            "state": "live"}]})
+        out = ex.orders("okx",
+                        transport=lambda u, m, h, p, t: fake_transport(
+                            u, m, h, p, t, ord_fx))
+        check("exchanges: okx open order line renders",
+              out == "1234 BTC-USDT buy px=79000 sz=0.01 filled=0 state=live",
+              out)
+        check("exchanges: okx orders url",
+              captured["url"].endswith(
+                  "/api/v5/trade/orders-pending?instType=SPOT"),
+              captured["url"])
+        empty = json.dumps({"code": "0", "data": []})
+        out = ex.orders("okx", transport=lambda u, m, h, p, t:
+                        fake_transport(u, m, h, p, t, empty))
+        check("exchanges: okx empty orders is an honest line",
+              out == "no open spot orders", out)
+
+        # --- kraken private reads: nonce form + API-Key/API-Sign ---
+        captured.clear()
+        kbal_fx = json.dumps({"error": [], "result": {
+            "ZUSD": "171288.6158", "XXBT": "0", "USDT": "500000.0"}})
+        out = ex.portfolio("kraken",
+                           transport=lambda u, m, h, p, t: fake_transport(
+                               u, m, h, p, t, kbal_fx))
+        check("exchanges: kraken balance lines render, zeros dropped",
+              out.splitlines() == ["ZUSD=171288.6158", "USDT=500000"], out)
+        check("exchanges: kraken private url",
+              captured["url"].endswith("/0/private/Balance"),
+              captured["url"])
+        kv = dict(p.split("=", 1)
+                  for p in str(captured["payload"], "utf-8").split("&"))
+        resign = ex.kraken_sign("/0/private/Balance",
+                                str(captured["payload"], "utf-8"), kv["nonce"],
+                                slots["KRAKEN_API_SECRET"])
+        check("exchanges: kraken request carries nonce + matching sign",
+              kv.get("nonce", "").isdigit()
+              and captured["headers"].get("API-Key") == slots["KRAKEN_API_KEY"]
+              and captured["headers"].get("API-Sign") == resign,
+              str(captured["headers"]))
+        check("exchanges: kraken balance output carries no credential",
+              "SENTINEL" not in out)
+
+        captured.clear()
+        kord_fx = json.dumps({"error": [], "result": {"open": {
+            "OQCLML-BW3P3-BUCMWZ": {"status": "open", "vol": "1.25",
+                                     "descr": {"pair": "XBTUSD", "type": "buy",
+                                               "ordertype": "limit",
+                                               "price": "30010.0"}}}}})
+        out = ex.orders("kraken",
+                        transport=lambda u, m, h, p, t: fake_transport(
+                            u, m, h, p, t, kord_fx))
+        check("exchanges: kraken open order line renders",
+              out.startswith("OQCLML-BW3P3-BUCMWZ XBTUSD buy limit")
+              and "vol=1.25" in out, out)
+        check("exchanges: kraken orders url",
+              captured["url"].endswith("/0/private/OpenOrders"),
+              captured["url"])
+        empty_k = json.dumps({"error": [], "result": {"open": {}}})
+        out = ex.orders("kraken", transport=lambda u, m, h, p, t:
+                        fake_transport(u, m, h, p, t, empty_k))
+        check("exchanges: kraken empty orders is an honest line",
+              out == "no open orders", out)
+
+        # --- upstream errors stay bounded and credential-free ---
+        long_err = json.dumps({"error": ["EAPI:Invalid key " + "x" * 900]})
+        try:
+            ex.portfolio("kraken", transport=lambda u, m, h, p, t:
+                         fake_transport(u, m, h, p, t, long_err))
+            check("exchanges: upstream error surfaces honestly", False)
+        except ex.ExchangeError as e:
+            check("exchanges: upstream error truncated to the cap",
+                  len(str(e)) <= len("kraken: ") + 160 and "x" * 161 not in str(e),
+                  f"len={len(str(e))}")
+        try:
+            ex.markets("okx", transport=lambda u, m, h, p, t:
+                       fake_transport(u, m, h, p, t, "<html>not json</html>"))
+            check("exchanges: invalid JSON -> ExchangeError", False)
+        except ex.ExchangeError as e:
+            check("exchanges: invalid JSON -> ExchangeError",
+                  "invalid JSON" in str(e), str(e))
+
+        # --- output cap: a 100-row feed renders at most MAX_LINES rows ---
+        big = json.dumps({"code": "0", "data": [
+            {"instId": f"ALT{i}-USDT", "last": "1", "askPx": "1",
+             "bidPx": "1", "open24h": "1", "high24h": "1",
+             "low24h": "1", "vol24h": "1"} for i in range(100)]})
+        out = ex.markets("okx", transport=lambda u, m, h, p, t:
+                         fake_transport(u, m, h, p, t, big))
+        check("exchanges: market output capped at MAX_LINES",
+              len(out.splitlines()) == ex.MAX_LINES,
+              str(len(out.splitlines())))
+    finally:
+        ex._slot = saved_slot
+
+
 def main() -> int:
     test_model()
     test_registry_and_tools()
@@ -7939,6 +8386,7 @@ def main() -> int:
     test_imagegen()
     test_connectors()
     test_media_tools()
+    test_exchanges()
     test_tg_media()
     test_service_media()
     test_profiles()

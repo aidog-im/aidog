@@ -52,6 +52,7 @@ async function loadLang(lang) {
   applyStaticText();
   renderStatus(); renderUsage(); renderVersion(); renderVoice();
   mediaLangRefresh();          // voice session + image badge texts follow too
+  renderExchange();            // venue rows / probe labels follow the language too
   chatBadge(chatBusy);            // badge label follows the active language
   refreshEventTexts();
   setView(currentView, false);    // re-resolve the view title in the new language
@@ -262,6 +263,7 @@ async function refreshCaps() {
   try { capsData = await fetch("/api/capabilities").then(r => r.json()); }
   catch (e) { capsData = null; }
   imgCapHint();
+  renderExchange();            // exchange block rides the same capability fetch
 }
 
 function mediaLangRefresh() {
@@ -709,6 +711,183 @@ async function imgGenerate() {
   } finally {
     imgBusy = false;
   }
+}
+
+/* ----------------------------------------------------------- exchange --
+   Web3 phase-2 W1 read-only venue panel. It renders ONLY from the
+   `exchange` block of GET /api/capabilities: when that block has not
+   shipped yet the panel states so honestly instead of pretending.
+   Server text (label / summary / reason / note / quote lines / error
+   strings) is rendered verbatim as DATA and never translated; every UI
+   label goes through t(key, fallback) and re-renders on a language switch
+   (renderExchange() is called from loadLang and refreshCaps).
+   The probe is a GET with an optional symbol: an empty input omits the
+   parameter so the venue default applies. No write, ever. */
+let exBusy = false;
+let exMsg = null;     // probe status: {k,f,a} translated · {raw} verbatim · null
+let exMsgErr = false;
+let exOut = null;     // last probe payload (string) · null = idle line
+
+function exBlock() { return (capsData && capsData.exchange) ? capsData.exchange : null; }
+
+function exRows() {
+  const ex = exBlock();
+  return ex && Array.isArray(ex.venues) ? ex.venues : [];
+}
+
+function exSetMsg(msg, err) {
+  exMsg = msg || null; exMsgErr = !!err;
+  const el = document.getElementById("exProbeMsg");
+  if (!el) return;
+  el.textContent = !msg ? ""
+    : (msg.raw !== undefined ? String(msg.raw)
+      : t(msg.k, msg.f).replace("{reason}", (msg.a && msg.a.reason) || ""));
+  el.classList.toggle("err", !!err);
+}
+
+/* one venue's honest state: an unconfigured key slot always shows the
+   server's reason string VERBATIM (exact why, never a vague label) */
+function exStateHtml(v) {
+  if (v && v.configured === false) {
+    const why = v.reason ? String(v.reason)
+      : t("ex.state.unconfigured", "not configured");
+    return `<div class="vs-state err">${escapeHtml(why)}</div>`;
+  }
+  if (v && (v.auth === "public" || v.kind === "chain")) {
+    return `<div class="vs-state">${escapeHtml(t("ex.state.keyless", "ready (keyless)"))}</div>`;
+  }
+  if (v && v.configured === true) {
+    return `<div class="vs-state">${escapeHtml(t("ex.state.configured", "configured"))}</div>`;
+  }
+  return `<div class="vs-state">${escapeHtml(t("ex.state.unknown", "state unknown"))}</div>`;
+}
+
+function exSyncSymbol() {
+  const inp = document.getElementById("exSymbol");
+  const sel = document.getElementById("exVenueSel");
+  if (!inp) return;
+  const key = sel ? String(sel.value || "") : "";
+  const v = exRows().find(x => String(x.key) === key);
+  const sym = v && v.symbol ? String(v.symbol) : "";
+  inp.placeholder = sym
+    ? t("ex.probe.symbolPh", "default {sym}").replace("{sym}", sym)
+    : t("ex.probe.symbolAny", "venue default symbol");
+}
+
+function renderExchange() {
+  const ex = exBlock();
+  const rows = exRows();
+
+  const count = document.getElementById("exVenueCount");
+  if (count) count.textContent = rows.length ? `\u00d7${rows.length}` : "";
+
+  const list = document.getElementById("exVenues");
+  if (list) {
+    if (!rows.length) {
+      list.innerHTML = `<div class="gal-empty">${escapeHtml(t(
+        "ex.unavailable",
+        "exchange capability not available yet — this build has no exchange backend block"))}</div>`;
+    } else {
+      list.innerHTML = rows.map(v => `
+        <div class="gal-card" data-venue="${escapeHtml(String(v.key))}" tabindex="0">
+          <span class="gal-tag">${escapeHtml(t("ex.kind." + v.kind, String(v.kind)))}</span>
+          <div class="gal-name">${escapeHtml(String(v.label || v.key))}</div>
+          <div><span class="chat-badge">${escapeHtml(t("ex.auth." + v.auth, String(v.auth)))}</span></div>
+          <div class="stat-note">${escapeHtml(t("ex.defaultPair", "default pair {sym}")
+            .replace("{sym}", String(v.symbol || "\u2014")))}</div>
+          <div class="gal-desc">${escapeHtml(String(v.summary || "\u2014"))}</div>
+          ${exStateHtml(v)}
+        </div>`).join("");
+      list.querySelectorAll(".gal-card").forEach(el => {
+        const flip = () => el.classList.toggle("open");
+        el.addEventListener("click", flip);
+        el.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault(); flip(); } });
+      });
+    }
+  }
+
+  const toolsEl = document.getElementById("exTools");
+  if (toolsEl) {
+    toolsEl.textContent = !ex
+      ? t("ex.unavailable",
+          "exchange capability not available yet — this build has no exchange backend block")
+      : (Array.isArray(ex.tools) && ex.tools.length ? ex.tools.join("  \u00b7  ")
+        : t("ex.toolsEmpty", "no exchange_* tool registered"));
+  }
+  const noteEl = document.getElementById("exNote");
+  if (noteEl) {
+    const note = ex && ex.note ? String(ex.note) : "";
+    noteEl.textContent = note;
+    noteEl.hidden = !note;
+  }
+
+  const sel = document.getElementById("exVenueSel");
+  if (sel) {
+    const prev = String(sel.value || "");
+    if (!rows.length) {
+      sel.innerHTML = `<option value="">${escapeHtml(
+        t("ex.probe.needVenue", "venue list not loaded"))}</option>`;
+      sel.disabled = true;
+    } else {
+      sel.disabled = false;
+      sel.innerHTML = rows.map(v => `<option value="${escapeHtml(String(v.key))}">${
+        escapeHtml(String(v.label || v.key))}</option>`).join("");
+      if (Array.prototype.some.call(sel.options, o => o.value === prev)) sel.value = prev;
+    }
+  }
+  exSyncSymbol();
+
+  const btn = document.getElementById("exProbeBtn");
+  if (btn) btn.disabled = exBusy || !rows.length;
+
+  const out = document.getElementById("exQuoteOut");
+  if (out) {
+    out.textContent = exOut !== null ? exOut
+      : t("ex.probe.idle", "pick a venue, then press FETCH QUOTE");
+  }
+  if (exMsg) exSetMsg(exMsg, exMsgErr);   // re-translate the live status line
+}
+
+async function exProbe() {
+  if (exBusy) return;
+  const sel = document.getElementById("exVenueSel");
+  const venue = sel ? String(sel.value || "") : "";
+  if (!venue) {
+    exSetMsg({ k: "ex.probe.needVenue", f: "venue list not loaded" }, true);
+    return;
+  }
+  const inp = document.getElementById("exSymbol");
+  const sym = (inp ? inp.value : "").trim();
+  const btn = document.getElementById("exProbeBtn");
+  const out = document.getElementById("exQuoteOut");
+  exBusy = true;
+  if (btn) btn.disabled = true;
+  exSetMsg({ k: "ex.probe.working", f: "fetching\u2026" }, false);
+  const url = "/api/exchange/quote?venue=" + encodeURIComponent(venue) +
+    (sym ? "&symbol=" + encodeURIComponent(sym) : "");
+  try {
+    const res = await fetch(url);
+    const body = await res.json().catch(() => null);
+    const lines = res.ok && body && Array.isArray(body.lines) ? body.lines : null;
+    if (lines) {
+      exOut = lines.length ? lines.map(String).join("\n")
+        : t("ex.probe.empty", "no lines returned");
+      exSetMsg({ k: "ex.probe.ok", f: "quote \u2713" }, false);
+    } else {
+      // honest failure: the server's own error string, verbatim, in the output box
+      const reason = body && body.error ? String(body.error) : "HTTP " + res.status;
+      exOut = reason;
+      exSetMsg({ k: "ex.probe.fail", f: "request failed" }, true);
+    }
+  } catch (e) {
+    exOut = String(e).slice(0, 200);
+    exSetMsg({ k: "ex.probe.fail", f: "request failed" }, true);
+  } finally {
+    exBusy = false;
+    if (btn) btn.disabled = !exRows().length;
+  }
+  renderExchange();
 }
 
 /* ---------------------------------------------------------------- status -- */
@@ -1603,10 +1782,10 @@ function reasonHtml(r) {
 function reasonLi(r) { return `<li>&gt; ${reasonHtml(r)}</li>`; }
 
 /* ---------------------------------------------------------------- views -- */
-/* All six views live in the same document; the inactive ones are hidden with
+/* All seven views live in the same document; the inactive ones are hidden with
    CSS, so every poller keeps writing into real DOM and ids stay stable.
    ?view=<name> deep-links the active view (default: overview). */
-const VIEWS = ["overview", "chat", "skills", "evolution", "stream", "settings"];
+const VIEWS = ["overview", "chat", "skills", "exchange", "evolution", "stream", "settings"];
 const QS_VIEW = (params.get("view") || "").toLowerCase();
 let currentView = VIEWS.includes(QS_VIEW) ? QS_VIEW : "overview";
 
@@ -1673,6 +1852,14 @@ const imgPromptEl = document.getElementById("imgPrompt");
 if (imgPromptEl) imgPromptEl.addEventListener("keydown", e => {
   if (e.key === "Enter") { e.preventDefault(); imgGenerate(); }
 });
+const exVenueSelEl = document.getElementById("exVenueSel");
+if (exVenueSelEl) exVenueSelEl.addEventListener("change", exSyncSymbol);
+const exProbeBtnEl = document.getElementById("exProbeBtn");
+if (exProbeBtnEl) exProbeBtnEl.addEventListener("click", exProbe);
+const exSymbolEl = document.getElementById("exSymbol");
+if (exSymbolEl) exSymbolEl.addEventListener("keydown", e => {
+  if (e.key === "Enter") { e.preventDefault(); exProbe(); }
+});
 document.getElementById("chatSend").addEventListener("click", chatSend);
 document.getElementById("chatClear").addEventListener("click", chatClear);
 document.getElementById("chatInput").addEventListener("keydown", e => {
@@ -1705,6 +1892,7 @@ refreshEvolution();
 loadChatHistory();   // console session restored at boot (read-only route)
 refreshVoiceCap();   // engine status visible before the first orb tap (#4)
 refreshCaps();       // media face: stt/image presence for the chat cards
+renderExchange();    // exchange panel paints its honest fallback at once
 setInterval(tickClock, 1000); tickClock();
 setInterval(refreshUsage, 60000);
 setInterval(refreshEvolution, 60000);

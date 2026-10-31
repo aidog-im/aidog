@@ -1,8 +1,8 @@
 # Capabilities Catalog
 
 Status: shipped in car 4a (`web/server.py`), extended in car 4b with the
-`browser` / `terminal` / `local_models` blocks and in car 4c with the
-`media` block. Companion pages:
+`browser` / `terminal` / `local_models` blocks, in car 4c with the
+`media` block and in the W1 Web3 car with the `exchange` block. Companion pages:
 [openai_api_server.md](openai_api_server.md),
 [browser_automation.md](browser_automation.md),
 [terminal_backends.md](terminal_backends.md),
@@ -10,7 +10,7 @@ Status: shipped in car 4a (`web/server.py`), extended in car 4b with the
 [voice_session.md](voice_session.md),
 [image_generation.md](image_generation.md),
 [tts_engines.md](tts_engines.md),
-[connectors.md](connectors.md).
+[connectors.md](connectors.md), [exchanges.md](exchanges.md).
 
 ## Endpoint
 
@@ -42,6 +42,16 @@ Status: shipped in car 4a (`web/server.py`), extended in car 4b with the
     "image": {"configured": false, "reason": "no image endpoint (set media.image_base_url in settings)"},
     "tts":  {"engines": {"edge": true, "byok": false}, "active": "edge"},
     "connectors": {"linear": false, "notion": false}
+  },
+  "exchange": {
+    "read_only": true,
+    "venues": [{"key": "okx", "label": "OKX", "kind": "cex", "auth": "key",
+                "configured": false, "read_only": true, "symbol": "BTC-USDT",
+                "summary": "Spot REST v5, signed with a Read-only API key",
+                "reason": "not configured (set OKX_API_KEY / OKX_API_SECRET / OKX_API_PASSPHRASE in secrets.env)"},
+               "… 7 more venue rows (kraken, jupiter, velora, hyperliquid, dydx, gmx, rpc)"],
+    "tools": ["exchange_markets"],
+    "note": "exchange account tools not configured: …"
   }
 }
 ```
@@ -62,6 +72,7 @@ Field sources:
 | `terminal` | `terminal.parse(settings mycore.shell)` | parsed backend **kind** (`local`/`docker`/`ssh`) + `spec_set` bool; the raw spec (user, host, identity path) **never serializes**; invalid line → `backend:null` + `note` — see [terminal_backends.md](terminal_backends.md) |
 | `local_models` | `mycore.localmodels.probe()` | `count` + `detected[]` of `{kind, base_url, model}` — loopback endpoints, `userinfo` stripped before serializing; probe failure → `count:0` + `note` (never fabricated) — see [zero_key_onboarding.md](zero_key_onboarding.md) |
 | `media` | `media_capability(settings)` | four sub-blocks, booleans and engine/model **names** only — see the next section; the serialized block is asserted to contain no URL and no slot value — see [voice_session.md](voice_session.md), [image_generation.md](image_generation.md), [tts_engines.md](tts_engines.md), [connectors.md](connectors.md) |
+| `exchange` | `mycore.exchanges.catalog()` + `build_registry().exchange_note` | the W1 read-only venue block: 8 catalog rows (names, kinds, presence booleans, honest per-venue `reason`), the live `exchange_*` tool names and the registry's honest `note` when account tools are withheld — **booleans, names and sentences only**, never a slot value and never a URL — see [exchanges.md](exchanges.md) |
 
 ## The `media` block (car 4c — four sub-blocks)
 
@@ -98,6 +109,24 @@ block is held to it on its own serialized text (§ *The `media` block*): the
 smoke asserts **no URL and no slot value** there independently of the full-
 catalog assertion.
 
+## The `exchange` block (W1 — read-only Web3 venues)
+
+| Field | Shape | Meaning |
+|---|---|---|
+| `read_only` | always `true` | the whole block describes read-only surfaces; W1 ships no order placement (hard code boundary, not a setting) |
+| `venues` | 8 rows `{key, label, kind, auth, configured, read_only, symbol, summary[, reason]}` | one row per catalog venue (OKX, Kraken, Jupiter, Velora, Hyperliquid, dYdX, GMX, public RPC); `configured` is slot **presence** (keyless chain venues are always `true`); `reason` appears only for a key venue without a full slot set and **names the missing slots** (e.g. `not configured (set OKX_API_KEY / OKX_API_SECRET / OKX_API_PASSPHRASE in secrets.env)`) |
+| `tools` | string array | the `exchange_*` names present in the **live** registry — `exchange_markets` always; `exchange_portfolio` / `exchange_orders` only when at least one CEX slot set exists |
+| `note` | string \| null | the registry's honest `exchange_note` when the account tools are withheld (naming exactly which slots are missing), else `null` |
+
+Fail-soft like every other probe: a broken exchange module degrades to an
+empty `venues`/`tools` plus `note: "exchange probe failed"` and one stderr
+line, never a 500. The smoke asserts the serialized block against every
+`secrets.env` slot value and rejects credential-bearing key names in it.
+The console's public market probe is a **separate** endpoint —
+`GET /api/exchange/quote` (200 lines / 400 honest error / 429 at 10 requests
+per minute); account reads never surface over HTTP — see
+[exchanges.md](exchanges.md) §5.
+
 ## Console display status
 
 **Wave 1 = API only.** The catalog ships as an endpoint + this document; no
@@ -115,6 +144,10 @@ types), the 7-route list, the car-4b block checks (`browser.available` agreed
 against the live registered tool list, `terminal` kind-only with the raw spec
 withheld, `local_models.count == len(detected)` with a loopback host per
 entry), the car-4c `media` block check (all four sub-blocks with their inner
-types, `active ∈ {edge, byok}`), and the zero-credential assertion (response
+types, `active ∈ {edge, byok}`), the W1 `exchange` block check (8 read-only
+venue rows with `read_only: true` and the `tools` list, serialized block free
+of slot values and credential-bearing key names, plus
+`GET /api/exchange/quote` answering an unknown venue with an honest 400), and
+the zero-credential assertion (response
 text contains no slot value and no secret-like keys) — applied to the
 serialized `media` block on its own as well: no URL, no slot value.

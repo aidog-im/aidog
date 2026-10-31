@@ -43,7 +43,11 @@ Routes:
                                    stateless, no client-side tool execution)
   GET  /api/capabilities        -> read-only capability catalog (tools, skills,
                                    channels, hooks, cron, browser, terminal,
-                                   local models; no auth, no secrets)
+                                   local models; no auth, no secrets) + the
+                                   `exchange` block (W1: venue rows + tools)
+  GET  /api/exchange/quote      -> READ-ONLY public market probe: venue +
+                                   optional symbol -> {venue, symbol, lines};
+                                   own 10/60s sliding window -> 429
   GET  /api/chat/history        -> current console session (read, loopback)
   GET  /api/voice               -> voice engine capability (edge-tts presence)
   POST /api/say                 -> synthesize speech -> audio/mpeg (cached,
@@ -1602,6 +1606,12 @@ STT_RATE_LIMIT = 30            # transcription requests per sliding minute
 STT_RATE_WINDOW = 60.0
 _stt_times: deque = deque()
 _stt_lock = threading.Lock()
+# W1 web3: /api/exchange/quote gets its OWN budget — sharing the STT window
+# would let a market probe starve the microphone (and vice versa).
+EXCHANGE_QUOTE_RATE_LIMIT = 10  # quote probes per sliding minute
+EXCHANGE_QUOTE_RATE_WINDOW = 60.0
+_exchange_quote_times: deque = deque()
+_exchange_quote_lock = threading.Lock()
 BYOK_VOICE = "alloy"           # single OpenAI-compatible voice slot (both langs)
 BYOK_MAX_AUDIO = 5_000_000     # upstream speech bytes read cap
 
@@ -1616,6 +1626,20 @@ def _stt_rate_ok() -> bool:
         if len(_stt_times) >= STT_RATE_LIMIT:
             return False
         _stt_times.append(now)
+        return True
+
+
+def _exchange_quote_rate_ok() -> bool:
+    """Independent sliding window for GET /api/exchange/quote — 10 probes
+    per minute on a private deque (never the STT or /api/say budget)."""
+    now = time.time()
+    with _exchange_quote_lock:
+        while (_exchange_quote_times and
+               now - _exchange_quote_times[0] > EXCHANGE_QUOTE_RATE_WINDOW):
+            _exchange_quote_times.popleft()
+        if len(_exchange_quote_times) >= EXCHANGE_QUOTE_RATE_LIMIT:
+            return False
+        _exchange_quote_times.append(now)
         return True
 
 
@@ -2020,8 +2044,10 @@ def collect_capabilities() -> dict:
         mcp_block["names"] = []
         mcp_block["note"] = "mcp config invalid"  # honest, reason-free
     # Tools: names + descriptions from the live registry schema.
+    reg = None
     try:
-        fns = [f.get("function", {}) for f in build_registry(disabled=resolve_disabled_tools()).schema()]
+        reg = build_registry(disabled=resolve_disabled_tools())
+        fns = [f.get("function", {}) for f in reg.schema()]
         tools = [{"name": f.get("name", ""), "description": f.get("description", "")}
                  for f in fns if isinstance(f, dict)]
     except Exception as e:  # noqa: BLE001
@@ -2099,6 +2125,26 @@ def collect_capabilities() -> dict:
     except Exception as e:  # noqa: BLE001
         sys.stderr.write(f"capabilities local_models failed err={type(e).__name__}\n")
         local_models = {"count": 0, "detected": [], "note": "probe failed"}
+    # W1 web3: read-only exchange block — venue rows exactly as mycore.
+    # exchanges returns them (names/kinds/booleans/sentences only, never a
+    # slot value), the exchange_* tools present in the live registry, and
+    # the registry's honest note when the account tools are withheld.
+    # Fail-soft like every other probe: a broken module degrades to an empty
+    # block + one stderr line, never a 500.
+    ex_tools = [str(t.get("name", "")) for t in tools
+                if str(t.get("name", "")).startswith("exchange_")]
+    try:
+        if reg is None:
+            raise RuntimeError("registry unavailable")
+        from mycore import exchanges as _exchanges
+        exchange_blk = {"read_only": True,
+                        "venues": list(_exchanges.catalog()),
+                        "tools": ex_tools,
+                        "note": getattr(reg, "exchange_note", None)}
+    except Exception as e:  # noqa: BLE001 — probe must never break the catalog
+        sys.stderr.write(f"capabilities exchange probe failed err={type(e).__name__}\n")
+        exchange_blk = {"read_only": True, "venues": [], "tools": [],
+                        "note": "exchange probe failed"}
     return {
         "version": VERSION,
         "mycore": {"model": model, "upstreams_configured": upstreams_ok,
@@ -2113,6 +2159,8 @@ def collect_capabilities() -> dict:
         "local_models": local_models,
         # car 4c media face: stt/image/tts/connectors — booleans and names only
         "media": media_capability(settings),
+        # W1 web3: 8 read-only venues + live exchange_* tool names
+        "exchange": exchange_blk,
     }
 
 
@@ -2188,6 +2236,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_openai_models()
         if path == "/api/capabilities":
             return self._json(collect_capabilities())
+        if path == "/api/exchange/quote":
+            return self._handle_exchange_quote()
         if path.startswith("/api/media/"):
             return self._serve_media(path[len("/api/media/"):])
         if path.startswith("/static/i18n/"):
@@ -3038,6 +3088,42 @@ class Handler(BaseHTTPRequestHandler):
             if IMAGE_NAME_RE.match(name):
                 images.append({"name": name, "url": "/api/media/" + name})
         return self._json({"images": images})
+
+    def _handle_exchange_quote(self) -> None:
+        """GET /api/exchange/quote?venue=<key>&symbol=<sym> — W1 public
+        market probe. READ-ONLY public data only: account reads (portfolio /
+        orders) never reach HTTP in this car. Answers 200 {venue, symbol,
+        lines} where `symbol` echoes the requested pair or the venue's
+        default; ExchangeError (unknown venue, bad symbol, dead upstream,
+        missing slot) -> 400 {error} with an honest message that names slots
+        but never carries a value; its OWN sliding window (10/60s) -> 429."""
+        if not _exchange_quote_rate_ok():
+            return self._json({"error": "rate limited"}, 429)
+        try:
+            from mycore import exchanges as _exchanges
+        except Exception as e:  # noqa: BLE001 — module absent = honest 503
+            sys.stderr.write(f"exchange quote import failed err={type(e).__name__}\n")
+            return self._json({"error": "exchange module unavailable"}, 503)
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        venue = (query.get("venue") or [""])[0].strip()
+        symbol = (query.get("symbol") or [""])[0].strip() or None
+        try:
+            text = _exchanges.quote(venue, symbol, timeout=10.0)
+        except _exchanges.ExchangeError as e:
+            return self._json({"error": str(e)}, 400)
+        except Exception as e:  # noqa: BLE001 — never a 500 on a probe
+            sys.stderr.write(f"exchange quote failed err={type(e).__name__}\n")
+            return self._json({"error": "exchange probe failed"}, 502)
+        # reported symbol: the request's, else the venue's default from the
+        # catalog (names only — never a credential, never a slot value).
+        if not symbol:
+            for row in _exchanges.catalog():
+                if isinstance(row, dict) and row.get("key") == venue:
+                    symbol = str(row.get("symbol") or "")
+                    break
+        lines = [ln for ln in str(text).splitlines() if ln.strip()]
+        return self._json({"venue": venue, "symbol": symbol or "",
+                           "lines": lines})
 
     def _serve_media(self, name: str) -> None:
         """GET /api/media/<name> — one generated image, and nothing else:
