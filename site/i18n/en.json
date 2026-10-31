@@ -91,6 +91,7 @@
   "models.p2B": "A free-tier edge worker receives the reports and writes them into a free-tier edge database. Free-tier only, consistent with the free constitution.",
   "models.p3T": "3 · This page",
   "models.p3B": "The chart above reads a public JSON endpoint from that database and renders aggregate model usage — published totals only, never per-user records.",
+  "i18n.toggle": "中文",
 
   "footer.free": "permanently free",
   "footer.aidogim": "aidog.im"

@@ -91,6 +91,7 @@
   "models.p2B": "免费层边缘 Worker 接收上报并写入免费层边缘数据库。全程只用免费层，与免费宪法一致。",
   "models.p3T": "3 · 本页面",
   "models.p3B": "上方图表从该数据库的公开 JSON 接口读取并渲染聚合用量——只发布总量，永不暴露单用户记录。",
+  "i18n.toggle": "EN",
 
   "footer.free": "永久免费",
   "footer.aidogim": "aidog.im"

@@ -38,7 +38,7 @@
     try { localStorage.setItem(LANG_KEY, l); } catch (e) { /* ignore */ }
     document.documentElement.lang = (l === "zh") ? "zh-Hans" : "en";
     var label = document.getElementById("langLabel");
-    if (label) label.textContent = (l === "en") ? "中文" : "EN";
+    if (label) label.textContent = (l === "en") ? "ZH" : "EN";  // pack value overwrites via data-i18n
     loadDict(l).then(applyDict);
   }
 
