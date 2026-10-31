@@ -1282,6 +1282,9 @@ class ChatService:
                           nowt: float) -> None:
         """Exactly one tick of one mission: promote -> budget gate -> mark
         first -> one run_turn slice -> fold markers -> report -> persist.
+        `degraded` executes like `running` (car 2 — a degraded point is a
+        record on the current subtask, never a stall; set_current moves the
+        queue on and the state back to running when the next subtask starts).
         Reports go through mission_mod.emit (tier + throttle + merge + scrub)
         into the shared fallback chain; delivery is best-effort by design."""
         state = rec.get("state")
@@ -1290,7 +1293,7 @@ class ChatService:
             mission_mod.append_event(path, rec["id"], "state",
                                      {"to": "running", "via": "tick"})
             state = "running"
-        if state != "running":        # paused_user / reserved dormant states
+        if state not in ("running", "degraded"):   # paused_user / paused_approve
             mission_mod.save(path, doc)   # persist the mark only, no work
             return
         guard = mission_mod.budget_breach(rec, nowt)
@@ -1315,7 +1318,7 @@ class ChatService:
         mission_mod.save(path, doc)
         mode = "plan" if not rec.get("tasks") else "exec"
         if mode == "exec":
-            mission_mod.set_current(rec)
+            mission_mod.set_current(rec, nowt)
         prompt = mission_mod.build_slice_prompt(rec, mode=mode)
         # constitution stack: assembly puts SOUL.md first; the goal text only
         # ever enters the USER layer (design 3.3).
@@ -1343,6 +1346,9 @@ class ChatService:
         mission_mod.append_event(path, rec["id"], "slice",
                                  {"n": counters["slices"], "mode": mode,
                                   "stop": res.stop, "iters": res.iterations,
+                                  # car 2: delegate usage on the slice event
+                                  "delegate": mission_mod.delegate_count(
+                                      res.tool_log),
                                   "preview": mission_mod.scrub(output)[:300]})
         finished = mode == "exec" and mission_mod.should_finish(rec, marks)
         if finished:

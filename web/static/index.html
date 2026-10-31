@@ -757,6 +757,31 @@
               <option value="final" data-i18n="mission.tierFinal">final — only the outcome</option>
             </select>
           </div>
+          <!-- car 2 (0.5.45 Lane I): optional per-mission budget override —
+               three number inputs ride along with START; blank = the settings
+               defaults (40 / 24 / 200). Out-of-range values are refused by
+               the SERVER and its 400 detail renders verbatim. -->
+          <div class="ctl-row token-row" style="margin-top:4px;">
+            <label data-i18n="mission.budgetLbl">Budget override (optional)</label>
+          </div>
+          <div class="mission-budget" id="missionBudgetRow">
+            <label class="mb-field">
+              <span data-i18n="mission.bSlices">max slices</span>
+              <input type="number" id="missionBudgetSlices" min="1" max="10000"
+                     step="1" placeholder="40" inputmode="numeric">
+            </label>
+            <label class="mb-field">
+              <span data-i18n="mission.bWall">max wall hours</span>
+              <input type="number" id="missionBudgetWall" min="0.1" max="8760"
+                     step="0.1" placeholder="24" inputmode="decimal">
+            </label>
+            <label class="mb-field">
+              <span data-i18n="mission.bCalls">max daily model calls</span>
+              <input type="number" id="missionBudgetCalls" min="1" max="100000"
+                     step="1" placeholder="200" inputmode="numeric">
+            </label>
+          </div>
+          <div class="stat-note" data-i18n="mission.budgetHint">leave blank to use the settings defaults (40 / 24 / 200)</div>
           <div class="ctl-actions">
             <button class="btn primary" id="missionStartBtn" type="button"
                     data-i18n="mission.start">START</button>
@@ -769,8 +794,22 @@
             <span class="save-state" id="missionMsg" role="status"></span>
           </div>
           <div class="stat-note" id="missionState" hidden></div>
+          <!-- car 2 task board: the detail pane for a selected mission
+               (recent row OR the active line) — milestones, budget usage,
+               methods and the event tail; hidden until an id is picked. -->
+          <div id="missionDetail" hidden></div>
           <div id="missionRecent" hidden></div>
           <div class="stat-note" data-i18n="mission.hint">runs overnight on its own · reports go through your configured bot · a missing capability degrades into an honest report, never a question</div>
+        </div>
+
+        <!-- Orchestration card (0.5.45 Lane I): READ-ONLY summary of what a
+             mission can draw on — every row deep-links to the EXISTING
+             control (tools_off grid, channel switches, exchange panel,
+             credential slots, skill armory). No second switchboard, ever. -->
+        <div class="card" id="orchCard">
+          <h2 data-i18n="orch.sec">ORCHESTRATION</h2>
+          <div id="orchList"></div>
+          <div class="stat-note" data-i18n="orch.hint">read-only summary — each row deep-links to its existing control (no second switchboard)</div>
         </div>
 
         <div class="card">

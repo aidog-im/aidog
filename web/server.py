@@ -60,11 +60,18 @@ Routes:
                                    (404 unknown id; create stays natural-language/CLI)
   GET  /api/mission             -> mission board (0.5.44): {reporting, active,
                                    recent}; fail-soft empty structure, no auth,
-                                   no credential/origin/manifest fields
+                                   no credential/origin/manifest fields.
+                                   Car 2: ?id=<mid> -> {mission: row + plan
+                                   (or null) + events (tail 20, scrubbed) +
+                                   budget + budget_used}; 404 unknown id;
+                                   WITHOUT id the list shape is unchanged
   POST /api/mission             -> Bearer; {action: start|stop|pause|resume,
-                                   goal?, id?, reporting?} -> mission row
-                                   (400 validation / 404 unknown id / 409
-                                   conflict — one active mission at a time)
+                                   goal?, id?, reporting?, budget?} -> mission
+                                   row (400 validation / 404 unknown id / 409
+                                   conflict — one active mission at a time;
+                                   start's budget{max_slices, max_wall_hours,
+                                   max_daily_model_calls} freezes into the
+                                   mission, defaults = settings at start time)
   GET  /api/exchange/quote      -> READ-ONLY public market probe: venue +
                                    optional symbol -> {venue, symbol, lines};
                                    own 10/60s sliding window -> 429
@@ -2532,6 +2539,29 @@ def collect_mission() -> dict:
             "count": len(rows)}
 
 
+def collect_mission_detail(mid: str) -> tuple[dict, int]:
+    """GET /api/mission?id=<mid> — one mission for the task board (car 2).
+    Same gate as the list (loopback GET, no auth) and the same whitelist
+    discipline: public_row PLUS the structured plan (null for a mission that
+    predates car 2 / was never planned), the scrubbed tail of the event
+    stream (<=20 {ts, kind, text}) and the resolved budget with honest usage.
+    Unknown id -> 404. Never credentials, origin, manifest or a path."""
+    try:
+        path = mission.default_path()
+        doc = mission.load(path)
+        rec = mission.find(doc.get("missions") or [], mid)
+        if rec is None:
+            return {"error": "not found", "details": ["unknown mission id"]}, 404
+        detail = dict(mission.public_row(rec))
+        detail["plan"] = mission.plan_detail(rec)
+        detail["events"] = mission.detail_events(path, rec["id"])
+        detail["budget_used"] = mission.budget_used(rec)
+        return {"mission": detail}, 200
+    except Exception as e:  # noqa: BLE001 — a bad record must not 500 the board
+        sys.stderr.write(f"mission detail failed err={type(e).__name__}\n")
+        return {"error": f"detail failed: {type(e).__name__}"}, 500
+
+
 # ------------------------------------- activation & operations (0.5.40) ----
 
 def endpoint_reachable(base: str, timeout: float = 1.0) -> bool:
@@ -2771,6 +2801,13 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/cron":
             return self._json(collect_cron())
         if path == "/api/mission":
+            mid = ""
+            if "?" in self.path:
+                mid = (urllib.parse.parse_qs(
+                    self.path.split("?", 1)[1]).get("id") or [""])[0].strip()
+            if mid:
+                payload, code = collect_mission_detail(mid)
+                return self._json(payload, code)
             return self._json(collect_mission())
         if path == "/api/exchange/quote":
             return self._handle_exchange_quote()
@@ -3100,9 +3137,26 @@ class Handler(BaseHTTPRequestHandler):
                 tier = block.get("reporting") if isinstance(block, dict) else None
                 if tier not in mission.REPORTING_TIERS:
                     tier = mission.DEFAULT_REPORTING
+                # Car 2 budget: settings defaults at THIS moment, overlaid by
+                # the optional per-start override; the resolved values are
+                # validated and frozen into the mission record (later settings
+                # edits never touch a running mission).
+                budget_doc = doc.get("budget")
+                if budget_doc is not None and not isinstance(budget_doc, dict):
+                    return self._json({"error": "validation failed",
+                                       "details": ["budget must be an object"]},
+                                      400)
+                try:
+                    eff_budget = mission.validate_budget(
+                        {**mission.settings_budget(block),
+                         **(budget_doc or {})})
+                except mission.MissionError as e:
+                    return self._json({"error": "validation failed",
+                                       "details": [str(e)]}, 400)
                 try:
                     rec = mission.create(missions, goal,
                                          reporting=reporting or tier,
+                                         budget=eff_budget,
                                          origin=None, manifest=manifest,
                                          now=now)
                     mission.transition(rec, "running", now,
@@ -3131,17 +3185,23 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "not found",
                                    "details": ["unknown mission id"]}, 404)
             state = rec.get("state")
-            if action == "pause" and state != "running":
+            if action == "pause" and state not in ("running", "degraded"):
                 return self._json({"error": "conflict",
-                                   "details": [f"pause requires a running "
-                                               f"mission (state: {state})"]}, 409)
+                                   "details": [f"pause: state {state} cannot "
+                                               "pause — allowed states: "
+                                               "running, degraded"]}, 409)
             if action == "resume" and state != "paused_user":
                 return self._json({"error": "conflict",
-                                   "details": [f"resume requires a paused "
-                                               f"mission (state: {state})"]}, 409)
+                                   "details": [f"resume: state {state} cannot "
+                                               "resume — allowed state: "
+                                               "paused_user"]}, 409)
             if action == "stop" and state in mission.TERMINAL_STATES:
                 return self._json({"error": "conflict",
-                                   "details": [f"mission already {state}"]}, 409)
+                                   "details": [f"stop: mission already {state} "
+                                               "— allowed from any non-terminal "
+                                               "state (planned, running, "
+                                               "paused_user, degraded, "
+                                               "paused_approve)"]}, 409)
             target = {"pause": "paused_user", "resume": "running",
                       "stop": "sealed"}[action]
             evidence = ["stopped via the console"] if action == "stop" else None

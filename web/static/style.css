@@ -552,6 +552,89 @@ body {
 .img-grid a:hover { border-color: var(--blue-dim); }
 .img-grid img { display: block; width: 100%; height: 92px; object-fit: cover; }
 
+/* ------------------------------------- mission board detail (0.5.45) ---- */
+/* The Lane I task-board pane inside #missionCard: header with a BACK
+   control + state chip, milestone/subtask rows with status symbols, budget
+   segments that warm at >=80% and turn red at the cap, and a scrollable
+   event tail. Colour classes only — everything else reuses card styles. */
+#missionDetail { margin-top: 12px; padding-top: 10px;
+  border-top: 1px dashed var(--line); }
+.md-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-bottom: 8px; }
+.md-back { cursor: pointer; }
+.md-meta { margin-top: 0; }
+.md-open { cursor: pointer; border-radius: 8px; padding: 4px 6px;
+  margin: -4px -6px; transition: background .15s; }
+.md-open:hover { background: var(--blue-wash); }
+.md-goal { font-size: 13px; color: var(--text); overflow-wrap: anywhere;
+  margin-bottom: 4px; }
+.md-sec { margin-top: 12px; font-size: 11px; letter-spacing: .14em;
+  color: var(--blue-ink); font-weight: 600; text-transform: uppercase; }
+.md-ms { margin-top: 8px; padding: 8px 10px; border: 1px solid var(--line-solid);
+  border-radius: 8px; background: #fff; }
+.md-ms-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 4px; }
+.md-ms-title { font-size: 13px; color: var(--navy); font-weight: 600;
+  overflow-wrap: anywhere; }
+.md-sub { display: flex; gap: 8px; font-size: 12.5px; color: var(--muted);
+  padding: 2px 0; overflow-wrap: anywhere; }
+.md-sub.st-done { color: var(--ok); }
+.md-sub.st-degraded { color: var(--amber); }
+.md-sub.st-blocked { color: var(--red); }
+.md-sym { flex: none; width: 1.1em; font-family: var(--mono); }
+.md-sub-st { margin-left: auto; font-family: var(--mono); font-size: 11px;
+  opacity: .75; white-space: nowrap; }
+.md-bud { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 8px;
+  font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
+.md-seg { white-space: nowrap; }
+.md-seg.warn { color: var(--amber); font-weight: 600; }
+.md-seg.over { color: var(--red); font-weight: 600; }
+.md-methods { margin-top: 8px; font-size: 12.5px; }
+.md-methods summary { cursor: pointer; color: var(--blue-ink);
+  font-family: var(--mono); font-size: 12px; }
+.md-meth { display: flex; gap: 8px; padding: 2px 0; color: var(--muted);
+  overflow-wrap: anywhere; }
+.md-meth.on { color: var(--ok); }
+.md-events { margin-top: 6px; max-height: 190px; overflow-y: auto;
+  border: 1px solid var(--line-solid); border-radius: 8px; padding: 6px 8px;
+  background: #fff; }
+.md-ev { display: flex; gap: 8px; font-family: var(--mono); font-size: 11.5px;
+  color: var(--muted); padding: 3px 0; border-bottom: 1px dashed var(--line);
+  overflow-wrap: anywhere; }
+.md-ev:last-child { border-bottom: none; }
+.md-ev-kind { flex: none; color: var(--blue-ink); min-width: 54px;
+  text-transform: uppercase; letter-spacing: .06em; }
+
+/* budget override inputs (start form) + clickable recent rows */
+.mission-budget { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
+.mission-budget .mb-field { display: flex; flex-direction: column; gap: 3px;
+  font-size: 11.5px; color: var(--muted); }
+.mission-budget .mb-field input { width: 118px; background: #fff;
+  border: 1px solid var(--line); color: var(--text); font: inherit;
+  font-size: 13px; padding: 6px 9px; border-radius: 6px; }
+.mission-budget .mb-field input:focus { outline: none;
+  border-color: var(--blue); box-shadow: var(--glow); }
+.mission-row { cursor: pointer; border-radius: 8px; padding: 6px 8px;
+  margin: 0 -8px; transition: background .15s; }
+.mission-row:hover { background: var(--blue-wash); }
+.mission-row.is-sel { background: var(--blue-wash);
+  box-shadow: inset 2px 0 0 var(--blue); }
+.mission-row:focus-visible, .md-open:focus-visible,
+.orch-row:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+
+/* ------------------------------------- orchestration card (0.5.45) ------- */
+/* Read-only rows: label left, honest count right, whole row is a deep link
+   to the EXISTING control (no second switchboard — design C). */
+.orch-row { width: 100%; text-align: left; background: none; border: none;
+  border-bottom: 1px dashed var(--line); border-radius: 0; padding: 8px 4px;
+  cursor: pointer; transition: background .15s; }
+.orch-row:last-child { border-bottom: none; }
+.orch-row:hover { background: var(--blue-wash); }
+.orch-row label { cursor: pointer; }
+.orch-val { margin-top: 0; font-family: var(--mono); font-size: 12.5px;
+  color: var(--navy); }
+.orch-val::after { content: " ↗"; color: var(--blue); }
+
 /* -------------------------------------------------------------- footer ---- */
 footer { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
   margin-top: 20px; padding-top: 12px;

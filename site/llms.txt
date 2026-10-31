@@ -16,8 +16,8 @@ I'm AiDog is a single companion you run yourself — not a platform, not an assi
 - Desktop, profiles, ops: an Electron HUD shell (desktop suite 15/15), fully isolated multi-profiles (isolation gate 63/63), `aidog doctor` health checks (0 FAIL · 0 WARN), watchdog and one-command upgrades.
 - Web3 exchanges: nine venues in one catalog — keyless chain reads (Jupiter, Velora, Hyperliquid, dYdX, GMX, public RPC) beside slot-gated CEX accounts (OKX, Kraken, Binance) behind six `exchange_*` tools. Orders only ever run prepare → human console approval → execute; thresholds fail closed (default 0 = every plan waits for a person), market orders never auto-approve, and withdrawals / on-chain transfers / transaction signing do not exist in the core at all. With no slot configured the order tool never registers.
 - Activation & operations: the console's Overview ACTIVATION card mirrors `aidog setup --check` (required slots, endpoint reachability, service state) with FIX deep-links; a credential-slot editor writes runtime slots with values never echoed; doctor-run, service-restart and update controls live in the panel.
-- Evidence (the same numbers shown in the site's fact strip): core tests 1318/1318 · console smoke 234/234 · skill router 30/30 · memory 58/58 · setup wizard 99/99 · profile isolation 63/63 · desktop shell 15/15 · doctor 0 FAIL · 0 WARN · 13 real-machine E2E suites · 562 locale keys per pack · 25 registered tools · 32 capability documents · 29 self-developed modules ≈ 14.5k LOC.
-- Current release: 0.5.44.
+- Evidence (the same numbers shown in the site's fact strip): core tests 1381/1381 · console smoke 234/234 · skill router 30/30 · memory 58/58 · setup wizard 99/99 · profile isolation 63/63 · desktop shell 15/15 · doctor 0 FAIL · 0 WARN · 14 real-machine E2E suites · 594 locale keys per pack · 25 registered tools · 32 capability documents · 29 self-developed modules ≈ 14.7k LOC.
+- Current release: 0.5.45.
 
 ## Interfaces
 

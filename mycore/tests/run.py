@@ -9123,20 +9123,36 @@ def test_mission() -> None:
     check("mission: sealed stores its evidence pack",
           m0["state"] == "sealed" and m0["evidence"] == ["budget guard reached"]
           and m0["ended_at"] == 1001.0)
+    # car 2: degraded entry/exit edges are OPEN (paused_approve stays car 3)
     m_deg = _at("running")
-    m_deg["state"] = "degraded"          # reserved car-2 slot, read defensively
-    check("mission: reserved degraded counts as active",
-          ms.active_mission({"missions": [m_deg]}) is m_deg)
-    try:
-        m_run = _at("running")
-        ms.transition(m_run, "degraded", 1001.0, evidence=["x"])
-        check("mission: entry into degraded stays closed in car 1",
-              False, "accepted")
-    except ms.MissionError:
-        check("mission: entry into degraded stays closed in car 1", True)
-    ms.transition(m_deg, "running", 1002.0)
-    check("mission: reserved degraded may exit to running",
+    ms.transition(m_deg, "degraded", 1001.0)
+    check("mission: running -> degraded entry is legal (car 2)",
+          m_deg["state"] == "degraded"
+          and ms.active_mission({"missions": [m_deg]}) is m_deg)
+    ms.transition(m_deg, "paused_user", 1002.0)
+    check("mission: degraded may pause (degraded -> paused_user)",
+          m_deg["state"] == "paused_user")
+    ms.transition(m_deg, "running", 1003.0)
+    check("mission: resume from a degraded-origin pause resumes running",
           m_deg["state"] == "running")
+
+    def _pa() -> dict:
+        """A mission parked in the reserved car-3 slot (defensive read)."""
+        m0 = ms.create([], "g", now=1000.0)
+        m0["state"] = "paused_approve"
+        return m0
+
+    for cur, nxt in (("planned", "degraded"), ("paused_user", "degraded"),
+                     ("degraded", "planned"), ("done", "degraded"),
+                     ("sealed", "degraded"), ("paused_approve", "degraded")):
+        m0 = _pa() if cur == "paused_approve" else _at(cur)
+        try:
+            ms.transition(m0, nxt, 1001.0, evidence=["x"])
+            check(f"mission: illegal transition {cur}->{nxt} refused", False,
+                  "accepted")
+        except ms.MissionError as e:
+            check(f"mission: illegal transition {cur}->{nxt} refused",
+                  "allowed" in str(e), str(e))
     check("mission: terminal states are exactly done+sealed",
           ms.TERMINAL_STATES == frozenset({"done", "sealed"}))
     try:
@@ -9249,7 +9265,13 @@ def test_mission() -> None:
               and ms.budget_breach(b_day, 1700000100.0 + 86400) is None)
         for why, bad in (("unknown key", {"nope": 1}),
                          ("out of range", {"max_slices": 0}),
-                         ("non-number", {"max_slices": "many"})):
+                         ("non-number", {"max_slices": "many"}),
+                         ("fractional slices", {"max_slices": 3.5}),
+                         ("slices above the ceiling", {"max_slices": 10001}),
+                         ("wall below the floor", {"max_wall_hours": 0.05}),
+                         ("wall with 2 decimals", {"max_wall_hours": 1.25}),
+                         ("daily calls out of range",
+                          {"max_daily_model_calls": 0})):
             try:
                 ms.validate_budget(bad)
                 check(f"mission: budget {why} refused", False, "accepted")
@@ -9351,7 +9373,8 @@ def test_mission() -> None:
           ms.parse_slice("just talking, no protocol lines at all")
           == {"tasks": [], "task_done": False, "mission_done": False,
               "gaps": [], "decisions": [], "blockers": [], "methods": [],
-              "tried": [], "unblock": []})
+              "tried": [], "unblock": [], "milestones": [],
+              "plan_lines": []})
     m_plan = ms.create([], "publish daily", now=0.0)
     evs = ms.apply_slice(m_plan, ms.parse_slice("no structure here"), 1.0,
                          mode="plan")
@@ -9366,6 +9389,54 @@ def test_mission() -> None:
           [(t["id"], t["status"]) for t in m_plan2["tasks"]]
           == [("t1", "pending"), ("t2", "pending")]
           and [e["kind"] for e in evs2] == ["plan_ready"])
+    # ---- car 2: MILESTONE parsing + the structured plan -------------------
+    pm = ms.parse_slice("MILESTONE: First\n- SUBTASK: a\n"
+                        "- MILESTONE: Second\nSUBTASK: b")
+    check("mission: marker parse keeps milestones in plan order",
+          pm["milestones"] == ["First", "Second"]
+          and pm["tasks"] == ["a", "b"]
+          and pm["plan_lines"] == [("milestone", "First"), ("task", "a"),
+                                   ("milestone", "Second"), ("task", "b")],
+          str(pm["plan_lines"]))
+    m_ms = ms.create([], "ship the release", now=0.0)
+    ms.apply_slice(m_ms, ms.parse_slice(
+        "MILESTONE: Prepare\n- SUBTASK: write notes\n"
+        "MILESTONE: Ship\n- SUBTASK: tag the repo\nSUBTASK: publish"),
+        1.0, mode="plan")
+    plan = m_ms.get("plan")
+    check("mission: plan slice writes milestone groups into the registry",
+          isinstance(plan, dict)
+          and [m["id"] for m in plan["milestones"]] == ["m1", "m2"]
+          and [m["title"] for m in plan["milestones"]] == ["Prepare", "Ship"]
+          and [m["subtasks"] for m in plan["milestones"]]
+          == [["t1"], ["t2", "t3"]]
+          and plan["generated_at"] == 1.0
+          and [t["text"] for t in m_ms["tasks"]]
+          == ["write notes", "tag the repo", "publish"], str(plan))
+    m_flat = ms.create([], "no milestones here", now=0.0)
+    ms.apply_slice(m_flat, ms.parse_slice("SUBTASK: a\nSUBTASK: b"), 1.0,
+                   mode="plan")
+    check("mission: a plan without MILESTONE collapses to one Plan bucket",
+          [m["title"] for m in m_flat["plan"]["milestones"]] == ["Plan"]
+          and m_flat["plan"]["milestones"][0]["subtasks"] == ["t1", "t2"])
+    m_fb = ms.create([], "fallback goal", now=0.0)
+    ms.apply_slice(m_fb, ms.parse_slice("nothing structured"), 1.0,
+                   mode="plan")
+    check("mission: a structureless plan still yields one Plan bucket",
+          m_fb["plan"]["milestones"]
+          == [{"id": "m1", "title": "Plan", "subtasks": ["t1"]}]
+          and m_fb["tasks"][0]["text"] == "fallback goal")
+    check("mission: an unplanned (car-1) mission details as null plan",
+          ms.plan_detail(ms.create([], "legacy", now=0.0)) is None)
+    m_ms["tasks"][0]["status"] = "in_progress"
+    m_ms["methods"] = [{"text": "try CI", "marked": True}]
+    m_ms["blockers"] = ["flaky runner"]
+    det_p = ms.plan_detail(m_ms)
+    check("mission: plan detail projects live statuses + exhaustion lists",
+          det_p["milestones"][0]["subtasks"][0]["status"] == "running"
+          and det_p["milestones"][1]["subtasks"][1]["status"] == "pending"
+          and det_p["methods"] == [{"text": "try CI", "marked": True}]
+          and det_p["blockers"] == ["flaky runner"], str(det_p))
     check("mission: MISSION DONE before a plan exists finishes nothing",
           not ms.should_finish(ms.create([], "gx", now=0.0),
                                {"mission_done": True}))
@@ -9403,6 +9474,52 @@ def test_mission() -> None:
     ms.apply_slice(m_un, ms.parse_slice("UNBLOCK: t1"), 2.0)
     check("mission: UNBLOCK returns a suspended subtask to pending",
           m_un["tasks"][0]["status"] == "pending")
+    # ---- car 2: degraded entry from a gap; the queue never stalls (F4) ----
+    m_gap = ms.create([], "g", tasks=["one", "two"], reporting="all", now=0.0)
+    ms.transition(m_gap, "running", 1.0)
+    ms.set_current(m_gap, 1.0)
+    ms.apply_slice(m_gap, ms.parse_slice("GAP: no cdn"), 2.0)
+    check("mission: a gap on the unfinished subtask enters degraded",
+          m_gap["state"] == "degraded"
+          and m_gap["tasks"][0]["status"] == "degraded")
+    nxt_t = ms.set_current(m_gap, 3.0)
+    check("mission: degraded never blocks the queue (F4) — the next subtask "
+          "starts and the state returns to running",
+          nxt_t is not None and nxt_t["id"] == "t2"
+          and m_gap["state"] == "running"
+          and [t["status"] for t in m_gap["tasks"]]
+          == ["degraded", "in_progress"])
+    m_gd = ms.create([], "g", tasks=["only"], reporting="all", now=0.0)
+    ms.transition(m_gd, "running", 1.0)
+    ms.set_current(m_gd, 1.0)
+    ms.apply_slice(m_gd, ms.parse_slice("done here\nGAP: minor\nTASK DONE"),
+                   2.0)
+    check("mission: a gap whose subtask completed keeps the mission running",
+          m_gd["state"] == "running" and m_gd["tasks"][0]["status"] == "done"
+          and m_gd["gaps"] == ["minor"])
+    m_ub2 = ms.create([], "g", tasks=["x"], now=0.0)
+    ms.transition(m_ub2, "running", 1.0)
+    ms.set_current(m_ub2, 1.0)
+    ms.apply_slice(m_ub2, ms.parse_slice("NEED DECISION: y"), 2.0)
+    ms.transition(m_ub2, "degraded", 3.0)
+    ms.apply_slice(m_ub2, ms.parse_slice("UNBLOCK: t1"), 4.0)
+    check("mission: UNBLOCK from degraded resumes the mission (running)",
+          m_ub2["tasks"][0]["status"] == "pending"
+          and m_ub2["state"] == "running")
+    check("mission: delegate count reads the run_turn tool log",
+          ms.delegate_count([{"name": "delegate"}, {"name": "read_file"},
+                             {"name": "delegate"}]) == 2
+          and ms.delegate_count(None) == 0)
+    check("mission: budget usage reports honest wall hours",
+          ms.budget_used({"created_at": 0.0, "ended_at": 7200.0,
+                          "counters": {"slices": 5, "daily_calls": 3}},
+                         99999.0)
+          == {"slices": 5, "wall_hours": 2.0, "daily_calls": 3})
+    check("mission: settings budget falls back defensively",
+          ms.settings_budget(None) == ms.DEFAULT_BUDGET
+          and ms.settings_budget({"max_slices": 7})["max_slices"] == 7
+          and ms.settings_budget({"max_slices": 0})["max_slices"]
+          == ms.DEFAULT_BUDGET["max_slices"])
 
     man = ms.build_manifest(
         {"mycore": {"tools_off": ["delegate"]},
@@ -9594,6 +9711,64 @@ def test_mission() -> None:
             log_txt = svc.log.read_text()
             check("mission leg: seal logged with its guard",
                   "MISSION_SEAL" in log_txt and "guard=max_slices" in log_txt)
+
+            # car 2: a declared gap degrades the subtask, yet the leg keeps
+            # ticking the rest of the queue (F4) — plan -> degraded -> done
+            doc_dg = {"missions": [], "last_tick": clock[0] - 700.0}
+            m_dg = ms.create(doc_dg["missions"], "degradable work",
+                             reporting="all", origin=424242,
+                             manifest=man, now=clock[0])
+            ms.transition(m_dg, "running", clock[0])
+            ms.save(reg_path, doc_dg)
+            dg_script = ScriptedChat([
+                fake_response(text="plan\nMILESTONE: Phase A\n"
+                                   "SUBTASK: alpha\nSUBTASK: beta"),
+                fake_response(text="alpha is partial\nGAP: missing tool X"),
+                fake_response(text="beta complete\nTASK DONE\nMISSION DONE"),
+            ])
+            svc.chat = dg_script.chat
+            fake.sends.clear()
+            svc._mission_check = 0.0
+            svc._maybe_tick_missions()
+            mrow_dg = ms.load(reg_path)["missions"][0]
+            check("mission leg: plan slice lands the milestone structure",
+                  mrow_dg["counters"]["slices"] == 1
+                  and len(mrow_dg["tasks"]) == 2
+                  and [m["title"] for m in mrow_dg["plan"]["milestones"]]
+                  == ["Phase A"], str(mrow_dg.get("plan")))
+            clock[0] += 130.0
+            svc._mission_check = 0.0
+            svc._maybe_tick_missions()
+            mrow_dg = ms.load(reg_path)["missions"][0]
+            check("mission leg: a declared gap enters degraded (subtask too)",
+                  mrow_dg["state"] == "degraded"
+                  and mrow_dg["tasks"][0]["status"] == "degraded"
+                  and mrow_dg["tasks"][1]["status"] == "pending",
+                  str([(t["id"], t["status"]) for t in mrow_dg["tasks"]]))
+            check("mission leg: degraded report delivered (never silent)",
+                  any(ms.ZH["gap"] in s[1] for s in fake.sends))
+            clock[0] += 130.0
+            svc._mission_check = 0.0
+            svc._maybe_tick_missions()
+            mrow_dg = ms.load(reg_path)["missions"][0]
+            check("mission leg: degraded does not stall the queue — the next "
+                  "subtask runs through to done",
+                  mrow_dg["state"] == "done" and dg_script.calls == 3
+                  and mrow_dg["tasks"][1]["status"] == "done"
+                  and mrow_dg["tasks"][0]["status"] == "degraded")
+            check("mission leg: slice turns keep the full toolset incl. delegate",
+                  bool(dg_script.seen_tools)
+                  and all("delegate" in tools for tools in dg_script.seen_tools)
+                  and all(len(tools) > 5 for tools in dg_script.seen_tools),
+                  str(dg_script.seen_tools[:1]))
+            ev_dg = [json.loads(line) for line in
+                     ms.events_path(reg_path).read_text(
+                         encoding="utf-8").splitlines()]
+            check("mission leg: slice events carry the delegate count",
+                  any(r.get("kind") == "slice"
+                      and isinstance(r.get("delegate"), int) for r in ev_dg)
+                  and all("delegate" in r for r in ev_dg
+                          if r.get("kind") == "slice"))
 
             # paused mission: the leg does zero work
             doc_p = {"missions": [], "last_tick": clock[0] - 700.0}
@@ -9804,6 +9979,245 @@ def test_mission() -> None:
                   s == 200
                   and (caps.get("mission") or {}).get("reporting") == "all",
                   str(caps.get("mission")))
+            # ---- car 2: budget settings partition + start override ----------
+            check("mission settings: defaults carry reporting + 3 guards",
+                  ms.DEFAULT_SETTINGS
+                  == {"reporting": "milestones", "max_slices": 40,
+                      "max_wall_hours": 24.0,
+                      "max_daily_model_calls": 200},
+                  str(ms.DEFAULT_SETTINGS))
+            clean_ok, errs_ok = ws.validate_settings_patch(
+                {"mission": {"reporting": "final", "max_slices": 10,
+                             "max_wall_hours": 0.5,
+                             "max_daily_model_calls": 100000}})
+            check("mission settings: a full budget block is accepted",
+                  clean_ok == {"mission": {"reporting": "final",
+                                           "max_slices": 10,
+                                           "max_wall_hours": 0.5,
+                                           "max_daily_model_calls": 100000}}
+                  and not errs_ok, str(errs_ok))
+            for bad, frag in (({"max_slices": 0}, "mission.max_slices"),
+                              ({"max_slices": "7"}, "mission.max_slices"),
+                              ({"max_slices": 3.5}, "mission.max_slices"),
+                              ({"max_wall_hours": 0.05},
+                               "mission.max_wall_hours"),
+                              ({"max_wall_hours": 8761},
+                               "mission.max_wall_hours"),
+                              ({"max_wall_hours": 1.25},
+                               "mission.max_wall_hours"),
+                              ({"max_daily_model_calls": 0},
+                               "mission.max_daily_model_calls")):
+                clean_b, errs_b = ws.validate_settings_patch({"mission": bad})
+                check(f"mission settings: {bad} refused with a named reason",
+                      not clean_b and any(frag in e for e in errs_b),
+                      str(errs_b))
+            s, body = call("/api/settings",
+                           {"mission": {"max_slices": 0}}, auth=token)
+            check("mission settings: console write refuses a bad guard",
+                  s == 400 and any("mission.max_slices" in str(d)
+                                   for d in body.get("details", [])),
+                  f"{s} {body}")
+            s, body = call("/api/settings",
+                           {"mission": {"max_slices": 7,
+                                        "max_wall_hours": 1.5}}, auth=token)
+            s2, st = call("/api/settings")
+            mis_st = st.get("mission") or {}
+            check("mission budget: guards land and read back from settings",
+                  s == 200 and s2 == 200
+                  and mis_st.get("max_slices") == 7
+                  and mis_st.get("max_wall_hours") == 1.5
+                  and mis_st.get("reporting") == "all"
+                  and mis_st.get("max_daily_model_calls")
+                  == ms.DEFAULT_BUDGET["max_daily_model_calls"], str(mis_st))
+            # start WITHOUT an override -> the settings values freeze in
+            s, body = call("/api/mission",
+                           {"action": "start",
+                            "goal": "budget from settings"}, auth=token)
+            b1row = body.get("mission") or {}
+            b1id = b1row.get("id")
+            check("mission budget: start freezes the settings values",
+                  s == 200 and b1row.get("budget")
+                  == {"max_slices": 7, "max_wall_hours": 1.5,
+                      "max_daily_model_calls":
+                          ms.DEFAULT_BUDGET["max_daily_model_calls"]},
+                  f"{s} {b1row.get('budget')}")
+            s, body = call("/api/mission", {"action": "stop", "id": b1id},
+                           auth=token)
+            check("mission budget: settings-budgeted mission stops",
+                  s == 200, str(body))
+            # start WITH an explicit per-mission override
+            s, body = call("/api/mission",
+                           {"action": "start", "goal": "budget override",
+                            "budget": {"max_slices": 3,
+                                       "max_wall_hours": 0.5,
+                                       "max_daily_model_calls": 10}},
+                           auth=token)
+            b2row = body.get("mission") or {}
+            b2id = b2row.get("id")
+            check("mission budget: start override wins over settings",
+                  s == 200 and b2row.get("budget")
+                  == {"max_slices": 3, "max_wall_hours": 0.5,
+                      "max_daily_model_calls": 10},
+                  f"{s} {b2row.get('budget')}")
+            # a later settings edit must NOT touch the started mission
+            call("/api/settings",
+                 {"mission": {"max_slices": 9, "max_wall_hours": 2.5}},
+                 auth=token)
+            s, det = call(f"/api/mission?id={b2id}")
+            drow = det.get("mission") or {}
+            check("mission detail: budget stays frozen after a settings edit",
+                  s == 200 and drow.get("budget")
+                  == {"max_slices": 3, "max_wall_hours": 0.5,
+                      "max_daily_model_calls": 10}, f"{s} {drow.get('budget')}")
+            check("mission detail: shape = row + plan/events/budget_used",
+                  drow.get("plan") is None     # started, never planned -> null
+                  and isinstance(drow.get("events"), list)
+                  and set(drow.get("budget_used") or {})
+                  == {"slices", "wall_hours", "daily_calls"}
+                  and isinstance((drow.get("budget_used") or {})
+                                 .get("wall_hours"), float)
+                  and isinstance(drow.get("progress"), dict), str(drow)[:300])
+            det_text = json.dumps(det, ensure_ascii=False)
+            check("mission detail: zero credentials / origin / manifest / path",
+                  token not in det_text and "/mnt/" not in det_text
+                  and "origin" not in drow and "manifest" not in drow,
+                  det_text[:200])
+            s, det404 = call("/api/mission?id=nope00")
+            check("mission detail: unknown id -> 404", s == 404,
+                  str(det404))
+            s, body = call("/api/mission", {"action": "stop", "id": b2id},
+                           auth=token)
+            check("mission budget: overridden mission stops", s == 200,
+                  str(body))
+            for payload, frag in (
+                    ({"action": "start", "goal": "x", "budget": "all"},
+                     "budget must be an object"),
+                    ({"action": "start", "goal": "x",
+                      "budget": {"max_slices": 0}}, "out of range"),
+                    ({"action": "start", "goal": "x",
+                      "budget": {"nope": 1}}, "unknown budget key"),
+                    ({"action": "start", "goal": "x",
+                      "budget": {"max_wall_hours": 1.25}},
+                     "at most 1 decimal")):
+                s, body = call("/api/mission", payload, auth=token)
+                check(f"mission budget: 400 on {frag}",
+                      s == 400 and any(frag in str(d)
+                                       for d in body.get("details", [])),
+                      f"{s} {body}")
+            # pause/resume from the degraded state (car 2 entry edges)
+            s, body = call("/api/mission",
+                           {"action": "start", "goal": "degrade me"},
+                           auth=token)
+            b3id = (body.get("mission") or {}).get("id")
+            check("mission api: degraded-pause scenario starts",
+                  s == 200 and bool(b3id), f"{s} {body}")
+            reg_g = ms.load(ms.default_path())
+            r3 = ms.find(reg_g["missions"], b3id)
+            ms.transition(r3, "degraded",
+                          r3.get("updated_at") or 1700000000.0)
+            ms.save(ms.default_path(), reg_g)
+            s, body = call("/api/mission",
+                           {"action": "pause", "id": b3id}, auth=token)
+            check("mission api: pause is legal from degraded (car 2)",
+                  s == 200 and body["mission"]["state"] == "paused_user",
+                  f"{s} {body}")
+            s, body = call("/api/mission",
+                           {"action": "resume", "id": b3id}, auth=token)
+            check("mission api: resume from a degraded-origin pause runs",
+                  s == 200 and body["mission"]["state"] == "running",
+                  f"{s} {body}")
+            s, body = call("/api/mission",
+                           {"action": "pause", "id": b3id}, auth=token)
+            check("mission api: pause while running lands paused_user",
+                  s == 200 and body["mission"]["state"] == "paused_user",
+                  f"{s} {body}")
+            s, body = call("/api/mission",
+                           {"action": "pause", "id": b3id}, auth=token)
+            check("mission api: pause again -> 409 naming the allowed states",
+                  s == 409 and any("allowed states: running, degraded"
+                                   in str(d)
+                                   for d in body.get("details", [])),
+                  f"{s} {body}")
+            call("/api/mission", {"action": "stop", "id": b3id}, auth=token)
+            # ---- car 2: detail of a planned mission + a car-1 legacy row ----
+            board_path = ms.default_path()
+            reg_c = ms.load(board_path)
+            legacy = {"id": "legacy1", "goal": "car one leftover",
+                      "state": "sealed", "origin": 424242,
+                      "reporting": "final",
+                      "tasks": [{"id": "t1", "text": "old task",
+                                 "status": "done"}],
+                      "gaps": [], "methods": [], "blockers": [],
+                      "evidence": ["retired in car 1"],
+                      "created_at": 1700000000.0,
+                      "updated_at": 1700000100.0,
+                      "ended_at": 1700000100.0}
+            reg_c["missions"].append(legacy)
+            planned = ms.create(reg_c["missions"], "plan me",
+                                reporting="all", now=1700000200.0)
+            ms.transition(planned, "running", 1700000201.0)
+            ms.apply_slice(planned, ms.parse_slice(
+                "MILESTONE: Draft\nSUBTASK: write it\n"
+                "MILESTONE: Ship\nSUBTASK: publish it"),
+                1700000202.0, mode="plan")
+            planned["methods"] = [{"text": "try CI", "marked": False}]
+            planned["blockers"] = ["flaky runner"]
+            ms.save(board_path, reg_c)
+            for i in range(25):
+                ms.append_event(board_path, planned["id"], "report",
+                                {"event": "task_done", "delivered": "sent",
+                                 "tier": "all", "n": i})
+            ms.append_event(board_path, planned["id"], "slice",
+                            {"n": 1, "mode": "plan", "stop": "end",
+                             "iters": 3, "delegate": 2,
+                             "preview": "tok " + tok_sentinel + " at "
+                                        + path_sentinel})
+            s, det = call(f"/api/mission?id={planned['id']}")
+            prow = det.get("mission") or {}
+            pplan = prow.get("plan")
+            ms_rows = (pplan or {}).get("milestones") or []
+            check("mission detail: plan = milestone groups with live subtasks",
+                  s == 200 and isinstance(pplan, dict)
+                  and [m.get("id") for m in ms_rows] == ["m1", "m2"]
+                  and [m.get("title") for m in ms_rows] == ["Draft", "Ship"]
+                  and [[t.get("id") for t in m.get("subtasks") or []]
+                       for m in ms_rows] == [["t1"], ["t2"]]
+                  and ms_rows[0]["subtasks"][0]["status"] == "pending"
+                  and pplan.get("methods")
+                  == [{"text": "try CI", "marked": False}]
+                  and pplan.get("blockers") == ["flaky runner"],
+                  str(pplan))
+            ev_rows = prow.get("events") or []
+            check("mission detail: event tail capped at 20, {ts,kind,text}",
+                  len(ev_rows) == 20
+                  and all(set(r) == {"ts", "kind", "text"}
+                          for r in ev_rows)
+                  and all(isinstance(r.get("ts"), (int, float))
+                          for r in ev_rows), str(len(ev_rows)))
+            ev_blob = json.dumps(ev_rows, ensure_ascii=False)
+            check("mission detail: event text is scrubbed + delegate counted",
+                  tok_sentinel not in ev_blob
+                  and path_sentinel not in ev_blob
+                  and "/mnt/" not in ev_blob and "delegate=2" in ev_blob,
+                  ev_blob[:200])
+            s, det_old = call("/api/mission?id=legacy1")
+            orow = det_old.get("mission") or {}
+            check("mission detail: car-1 row -> plan null + default budget",
+                  s == 200 and orow.get("plan") is None
+                  and orow.get("budget") == ms.DEFAULT_BUDGET
+                  and (orow.get("budget_used") or {}).get("slices") == 0
+                  and orow.get("state") == "sealed"
+                  and isinstance((orow.get("budget_used") or {})
+                                 .get("wall_hours"), float),
+                  f"{s} {str(orow)[:200]}")
+            s, board2 = call("/api/mission")
+            rows_all = [board2.get("active")] + list(board2.get("recent") or [])
+            check("mission list: no-id shape unchanged (Lane I contract)",
+                  s == 200 and set(board2)
+                  == {"reporting", "active", "recent", "count"}
+                  and all(r is None or ("plan" not in r and "events" not in r
+                                        and "budget_used" not in r)
+                          for r in rows_all), str(sorted(board2)))
         finally:
             if srv is not None:
                 srv.shutdown()

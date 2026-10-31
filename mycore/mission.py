@@ -6,14 +6,28 @@ owns everything that does NOT need the live service:
 
   * registry       <state>/missions.json — atomic writes (tmp + os.replace),
                     cap MAX_MISSIONS history rows, at most ONE active mission.
-  * state machine  planned -> running <-> paused_user -> done | sealed
-                    (`degraded` / `paused_approve` are reserved enum slots —
-                    transitions into them open in cars 2/3, see TRANSITIONS).
+  * state machine  planned -> running <-> paused_user -> done | sealed,
+                    plus running -> degraded -> running (car 2 entry: a
+                    declared gap degrades the current subtask while the
+                    queue keeps advancing — F4). Degraded may also pause
+                    (degraded -> paused_user) and exits to done/sealed.
+                    `paused_approve` remains a reserved car-3 slot with
+                    out-edges only (see TRANSITIONS).
                     `done` and `sealed` are the ONLY terminal states, and
                     sealing REQUIRES an evidence list (never a silent stop).
+  * plan           the plan slice yields a structured plan written into the
+                    registry: {milestones: [{id, title, subtasks: [task
+                    ids]}], generated_at}. METHOD/TRIED/BLOCKER marks feed
+                    the method-exhaustion lists (mission.methods /
+                    mission.blockers), which the detail API reports
+                    alongside the milestones. A plan without any MILESTONE
+                    line collapses to one bucket ("Plan"); missions that
+                    predate car 2 carry no plan key and detail as null.
   * serial queue   mission.tasks[] (id/text/status: pending | in_progress |
-                    done | blocked). This car never parallelizes and never
-                    delegates: one subtask in flight, one slice per tick.
+                    done | degraded | blocked). The plan groups these flat
+                    task ids under milestones (single source of truth for
+                    status). One subtask in flight, one slice per tick —
+                    a degraded point never stalls the queue.
   * slice protocol one slice = one run_turn executed by the service leg
                     (mycore.service._maybe_tick_missions). The slice prompt
                     carries goal + current subtask + gaps + capability
@@ -34,6 +48,8 @@ owns everything that does NOT need the live service:
 Marker protocol (model-facing, ASCII, fail-soft — a missing marker simply
 keeps the subtask in flight and the budget guards bound the loop):
 
+    MILESTONE: <title>     group the queue into a milestone (plan slice;
+                           a leading "- " bullet is tolerated)
     SUBTASK: <text>       decompose (planning slice; falls back to the goal)
     TASK DONE             current subtask finished
     MISSION DONE          whole goal achieved
@@ -87,33 +103,39 @@ TERMINAL_STATES = frozenset({"done", "sealed"})
 ACTIVE_STATES = frozenset({"planned", "running", "paused_user",
                            "degraded", "paused_approve"})
 
-# Legal moves. `degraded` (car 2) and `paused_approve` (car 3) are readable
-# states with reserved OUT-edges, but no transition of this car ever ENTERS
-# them — the entry edges are intentionally absent below.
+# Legal moves. `degraded` entry opened in car 2 (a declared gap on the
+# unfinished current subtask; the queue and the leg keep going — F4).
+# `paused_approve` entry opens in car 3; its out-edges are reserved meanwhile.
 TRANSITIONS: dict[str, frozenset[str]] = {
     "planned": frozenset({"running", "sealed"}),
-    "running": frozenset({"paused_user", "done", "sealed"}),
+    "running": frozenset({"paused_user", "degraded", "done", "sealed"}),
     "paused_user": frozenset({"running", "sealed"}),
-    "degraded": frozenset({"running", "done", "sealed"}),        # car 2 opens entry
+    "degraded": frozenset({"running", "paused_user", "done", "sealed"}),
     "paused_approve": frozenset({"running", "done", "sealed"}),  # car 3 opens entry
     "done": frozenset(),
     "sealed": frozenset(),
 }
 
-TASK_STATUSES = ("pending", "in_progress", "done", "blocked")
+TASK_STATUSES = ("pending", "in_progress", "done", "degraded", "blocked")
 
 REPORTING_TIERS = ("all", "milestones", "final")
 DEFAULT_REPORTING = "milestones"                 # owner decision (car contract #3)
-DEFAULT_SETTINGS: dict = {"reporting": DEFAULT_REPORTING}
+
+# Budget guards (car 2: configurable via the settings `mission` partition and
+# overridable per start — the parsed values freeze into the mission record).
+# BUDGET_BOUNDS is the single range source for BOTH write paths.
+DEFAULT_BUDGET: dict = {"max_slices": 40, "max_wall_hours": 24.0,
+                        "max_daily_model_calls": 200}
+BUDGET_BOUNDS: dict = {"max_slices": (1, 10000),
+                       "max_wall_hours": (0.1, 8760.0),
+                       "max_daily_model_calls": (1, 100000)}
+
+# settings `mission` partition — tier + the three budget guards; the console
+# always renders this block (no absence checks upstream).
+DEFAULT_SETTINGS: dict = {"reporting": DEFAULT_REPORTING, **DEFAULT_BUDGET}
 # Per-tier throttle: seconds between REPORTS (0 = no throttle). Terminal and
 # escalation reports bypass it entirely (THROTTLE_BYPASS) — never swallowed.
 MIN_INTERVAL = {"all": 120.0, "milestones": 900.0, "final": 0.0}
-
-DEFAULT_BUDGET: dict = {"max_slices": 40, "max_wall_hours": 24.0,
-                        "max_daily_model_calls": 200}
-BUDGET_BOUNDS: dict = {"max_slices": (1, 5000),
-                       "max_wall_hours": (0.01, 8760.0),
-                       "max_daily_model_calls": (1, 100000)}
 
 # event kind -> tiers that report it (design doc 3.4 table, car-1 mapping:
 # `milestone` in car 1 = plan_ready; subtask granularity is the `all` tier).
@@ -129,6 +151,7 @@ REPORTABLE: dict[str, frozenset[str]] = {
 THROTTLE_BYPASS = frozenset({"decision", "final"})
 
 # model-facing ASCII markers (see module doc)
+MARK_MILESTONE = "MILESTONE:"
 MARK_SUBTASK = "SUBTASK:"
 MARK_TASK_DONE = "TASK DONE"
 MARK_MISSION_DONE = "MISSION DONE"
@@ -313,7 +336,32 @@ def validate_budget(budget) -> dict:
         lo, hi = BUDGET_BOUNDS[key]
         if not lo <= float(val) <= hi:
             raise MissionError(f"budget.{key} out of range {lo}..{hi}")
-        out[key] = float(val) if key == "max_wall_hours" else int(val)
+        if key == "max_wall_hours":
+            if round(float(val), 1) != float(val):
+                raise MissionError(
+                    f"budget.{key} allows at most 1 decimal")
+            out[key] = float(val)
+        else:
+            if not float(val).is_integer():
+                raise MissionError(f"budget.{key} must be a whole number")
+            out[key] = int(val)
+    return out
+
+
+def settings_budget(block) -> dict:
+    """Effective default budget from the settings `mission` block (car 2).
+    Defensive by design: an absent, non-object or out-of-range stored value
+    falls back to DEFAULT_BUDGET — a mission never starts without guards."""
+    out = dict(DEFAULT_BUDGET)
+    if not isinstance(block, dict):
+        return out
+    for key in DEFAULT_BUDGET:
+        if key not in block:
+            continue
+        try:
+            out[key] = validate_budget({key: block[key]})[key]
+        except MissionError:
+            continue
     return out
 
 
@@ -392,7 +440,11 @@ def transition(mission_: dict, new_state: str, now: float, *,
     if new_state not in STATES:
         raise MissionError(f"unknown state {new_state!r}")
     if new_state not in TRANSITIONS.get(cur, frozenset()):
-        raise MissionError(f"illegal transition {cur} -> {new_state}")
+        allowed = ", ".join(sorted(TRANSITIONS.get(cur, frozenset()))) \
+            or "none (terminal)"
+        raise MissionError(
+            f"illegal transition {cur} -> {new_state} — allowed from "
+            f"{cur}: {allowed}")
     if new_state == "sealed":
         ev = [str(e).strip()[:MAX_EVIDENCE_CHARS]
               for e in (evidence or []) if str(e).strip()]
@@ -515,19 +567,26 @@ def build_manifest(settings: dict, slot_names=(), present=None, *,
 
 
 # --------------------------------------------------------------- slicing ----
-def set_current(mission_: dict) -> dict | None:
+def set_current(mission_: dict, now: float | None = None) -> dict | None:
     """Promote the first pending subtask to in_progress — but only when no
     task is in flight already (a mid-slice retry keeps its target). Returns
-    the current task; None when nothing is pending (all done / all blocked)."""
+    the current task; None when nothing is pending (all done / all blocked /
+    all degraded). Car 2: starting a subtask while the mission sits in
+    `degraded` returns it to `running` (the next-subtask edge — a degraded
+    point is a record, never a stall)."""
     tasks = mission_.get("tasks") or []
     running = next((t for t in tasks if t.get("status") == "in_progress"), None)
-    if running is not None:
-        return running
-    for task in tasks:
-        if task.get("status") == "pending":
-            task["status"] = "in_progress"
-            return task
-    return None
+    if running is None:
+        for task in tasks:
+            if task.get("status") == "pending":
+                task["status"] = "in_progress"
+                running = task
+                break
+    if running is not None and mission_.get("state") == "degraded":
+        transition(mission_, "running",
+                   time.time() if now is None else now,
+                   reason="subtask started")
+    return running
 
 
 def current_task(mission_: dict) -> dict | None:
@@ -580,6 +639,10 @@ def build_slice_prompt(mission_: dict, mode: str = "exec") -> str:
         lines += [
             "Planning: decompose the goal into a SERIAL queue of actionable",
             f"subtasks. One line per subtask, exactly: {MARK_SUBTASK} <text>",
+            "Group subtasks into phases when the goal has them: one line",
+            f"exactly: {MARK_MILESTONE} <title> (a leading '-' bullet is",
+            "tolerated); every SUBTASK after it belongs to that milestone.",
+            "Without any MILESTONE line the plan is a single milestone.",
             "Then stop. Execution begins on the next slice.", ""]
     else:
         cur = current_task(mission_)
@@ -593,6 +656,12 @@ def build_slice_prompt(mission_: dict, mode: str = "exec") -> str:
                       "For each, decide: if the blocker is cleared output "
                       f"{MARK_UNBLOCK} <tid>; if it still needs a person output "
                       f"{MARK_DECISION} <what> once and move on.", ""]
+            degraded_rows = _task_rows(mission_, ("degraded",))
+            if degraded_rows:
+                lines += ["Degraded items (fallback in effect — keep them "
+                          "reported as gaps, do not re-ask; finish the goal "
+                          "honestly):",
+                          *["  " + d for d in degraded_rows], ""]
         pending = _task_rows(mission_, ("pending",))
         if pending:
             lines += ["Queued subtasks:", *["  " + p for p in pending], ""]
@@ -626,10 +695,13 @@ def build_slice_prompt(mission_: dict, mode: str = "exec") -> str:
 
 def parse_slice(text: str) -> dict:
     """Slice output -> marker marks (fail-soft: prose without markers yields
-    empty marks — the subtask simply stays in flight)."""
+    empty marks — the subtask simply stays in flight). `plan_lines` keeps the
+    MILESTONE/SUBTASK lines IN ORDER so the plan can group subtasks under the
+    milestone they were written after; `milestones` is the bare title list."""
     out: dict = {"tasks": [], "task_done": False, "mission_done": False,
                  "gaps": [], "decisions": [], "blockers": [], "methods": [],
-                 "tried": [], "unblock": []}
+                 "tried": [], "unblock": [], "milestones": [],
+                 "plan_lines": []}
     for raw in (text or "").splitlines():
         line = raw.strip()
         if not line or len(line) > 400:
@@ -639,7 +711,9 @@ def parse_slice(text: str) -> dict:
         if MARK_TASK_DONE in line:
             out["task_done"] = True
         low = line.lstrip("-* \t")          # tolerate bullets before prefixes
-        for key, prefix in (("tasks", MARK_SUBTASK), ("gaps", MARK_GAP),
+        for key, prefix in (("tasks", MARK_SUBTASK),
+                            ("milestones", MARK_MILESTONE),
+                            ("gaps", MARK_GAP),
                             ("decisions", MARK_DECISION),
                             ("blockers", MARK_BLOCKER),
                             ("methods", MARK_METHOD), ("tried", MARK_TRIED),
@@ -648,6 +722,10 @@ def parse_slice(text: str) -> dict:
                 val = low[len(prefix):].strip()[:MAX_MARK_TEXT]
                 if val:
                     out[key].append(val)
+                    if key == "tasks":
+                        out["plan_lines"].append(("task", val))
+                    elif key == "milestones":
+                        out["plan_lines"].append(("milestone", val))
                 break
     return out
 
@@ -660,17 +738,48 @@ def apply_slice(mission_: dict, marks: dict, now: float, *,
     honors MISSION DONE — there is nothing to finish before the plan exists."""
     events: list[dict] = []
     tasks = mission_.setdefault("tasks", [])
+    plan = mission_.get("plan") if isinstance(mission_.get("plan"), dict) else None
     if mode == "plan":
         marks = dict(marks)
         marks["mission_done"] = False
-        for text in marks["tasks"]:
-            text = scrub(str(text).strip())[:MAX_TASK_TEXT]
-            if text and len(tasks) < MAX_TASKS:
-                tasks.append({"id": f"t{len(tasks) + 1}", "text": text,
-                              "status": "pending"})
+        # Structured plan (car 2): walk the ordered plan lines, grouping each
+        # SUBTASK under the MILESTONE it follows. No MILESTONE at all (or no
+        # tasks) collapses to one bucket titled "Plan" — car-1 protocol
+        # compatibility; the preview semantics stay F2 (show = execute).
+        groups: list[dict] = [{"title": None, "tasks": []}]
+        for kind, val in (marks.get("plan_lines") or []):
+            if kind == "milestone":
+                title = scrub(str(val).strip())[:MAX_TASK_TEXT]
+                head = groups[-1]
+                if head["title"] is None and not head["tasks"]:
+                    head["title"] = title
+                else:
+                    groups.append({"title": title, "tasks": []})
+                continue
+            if len(tasks) >= MAX_TASKS:
+                continue
+            text = scrub(str(val).strip())[:MAX_TASK_TEXT]
+            if not text:
+                continue
+            row = {"id": f"t{len(tasks) + 1}", "text": text,
+                   "status": "pending"}
+            tasks.append(row)
+            groups[-1]["tasks"].append(row)
         if not tasks:
-            tasks.append({"id": "t1", "text": str(mission_.get("goal", ""))[:MAX_TASK_TEXT],
+            tasks.append({"id": "t1",
+                          "text": str(mission_.get("goal", ""))[:MAX_TASK_TEXT],
                           "status": "pending"})
+            groups = [{"title": "Plan", "tasks": [tasks[0]]}]
+        milestones: list[dict] = []
+        n = 0
+        for g in groups:
+            if not g["tasks"]:
+                continue
+            n += 1
+            milestones.append({"id": f"m{n}",
+                               "title": g["title"] or "Plan",
+                               "subtasks": [t["id"] for t in g["tasks"]]})
+        mission_["plan"] = {"milestones": milestones, "generated_at": now}
         events.append({"kind": "plan_ready", "level": "INFO",
                        "fact": ZH["plan_ready"] + " — "
                                + ZH["total_tasks"].format(n=len(tasks)),
@@ -680,13 +789,19 @@ def apply_slice(mission_: dict, marks: dict, now: float, *,
         for text in marks["tasks"]:
             text = scrub(str(text).strip())[:MAX_TASK_TEXT]
             if text and len(tasks) < MAX_TASKS:
-                tasks.append({"id": f"t{len(tasks) + 1}", "text": text,
-                              "status": "pending"})
+                row = {"id": f"t{len(tasks) + 1}", "text": text,
+                       "status": "pending"}
+                tasks.append(row)
+                # a mid-mission decomposition joins the last milestone (plans
+                # that predate car 2 simply have no plan to join)
+                if plan and plan.get("milestones"):
+                    plan["milestones"][-1]["subtasks"].append(row["id"])
     # gaps: dedupe by normalized text, one degraded event per NEW gap.
     # Every model-derived string is scrubbed at storage (credential shapes
     # and machine paths never persist — registry and reports stay clean).
     gaps = mission_.setdefault("gaps", [])
     seen = {str(g).strip().lower() for g in gaps}
+    new_gap = False
     for text in marks["gaps"]:
         text = scrub(text)
         key = text.strip().lower()
@@ -694,6 +809,7 @@ def apply_slice(mission_: dict, marks: dict, now: float, *,
             continue
         seen.add(key)
         gaps.append(text)
+        new_gap = True
         events.append({"kind": "degraded", "level": "WARN",
                        "fact": ZH["degraded_fact"].format(g=text[:200]),
                        "impact": ZH["degraded_impact"],
@@ -739,6 +855,8 @@ def apply_slice(mission_: dict, marks: dict, now: float, *,
         for task in tasks:
             if task.get("id") == tid and task.get("status") == "blocked":
                 task["status"] = "pending"
+                if mission_.get("state") == "degraded":
+                    transition(mission_, "running", now, reason="unblock")
     # subtask completion: current in_progress (or first pending) -> done
     if marks["task_done"] and mode != "plan":
         target = next((t for t in tasks if t.get("status") == "in_progress"), None)
@@ -755,6 +873,17 @@ def apply_slice(mission_: dict, marks: dict, now: float, *,
                 "impact": f"{ZH['progress']} {done_n}/{len(tasks)}",
                 "next": (ZH["continue"] + " " + str(nxt.get("id")))
                         if nxt is not None else ZH["report_progress"]})
+    # degraded entry (car 2): a NEW gap on the still-unfinished current
+    # subtask marks that subtask degraded and enters `degraded` (from
+    # `running` only — the machine owns every move). The queue, the leg and
+    # every other subtask keep going: one degraded point never stalls (F4).
+    if new_gap and mode != "plan":
+        cur_deg = next((t for t in tasks if t.get("status") == "in_progress"),
+                       None)
+        if cur_deg is not None:
+            cur_deg["status"] = "degraded"
+            if mission_.get("state") == "running":
+                transition(mission_, "degraded", now, reason="gap declared")
     return events
 
 
@@ -801,7 +930,8 @@ def fmt_final(mission_: dict, done: bool) -> str:
     mid = mission_.get("id", "?")
     tasks = mission_.get("tasks") or []
     done_rows = _task_rows(mission_, ("done",))
-    open_rows = _task_rows(mission_, ("pending", "in_progress", "blocked"))
+    open_rows = _task_rows(mission_,
+                           ("pending", "in_progress", "degraded", "blocked"))
     gaps = [str(g)[:200] for g in (mission_.get("gaps") or [])]
     done_n = len(done_rows)
     sec_done = ZH["tasks_done"].format(d=done_n, t=len(tasks))
@@ -863,8 +993,9 @@ def emit(mission_: dict, kind: str, fragment: str, deliver, now: float) -> str:
 # ------------------------------------------------------------- settings -----
 def validate_mission_settings(doc) -> tuple[dict, list[str]]:
     """Strict validation for the settings `mission` partition (evolution
-    parity): unknown keys and out-of-enum tiers are refused with chat-safe
-    messages; the tier defaults to `milestones` at read time when absent."""
+    parity): unknown keys, out-of-enum tiers and out-of-range budget guards
+    are refused with chat-safe messages; absent keys fall back to
+    DEFAULT_SETTINGS at read time (the console always renders them)."""
     if not isinstance(doc, dict):
         return {}, ["mission must be an object"]
     errors: list[str] = []
@@ -879,7 +1010,148 @@ def validate_mission_settings(doc) -> tuple[dict, list[str]]:
         else:
             errors.append("mission.reporting must be one of: "
                           + "|".join(REPORTING_TIERS))
+    for key in ("max_slices", "max_daily_model_calls"):
+        if key not in doc:
+            continue
+        val = doc[key]
+        lo, hi = BUDGET_BOUNDS[key]
+        bad = (isinstance(val, bool) or not isinstance(val, (int, float))
+               or (isinstance(val, float) and not val.is_integer())
+               or not lo <= float(val) <= hi)
+        if bad:
+            errors.append(f"mission.{key} must be an integer in "
+                          f"{int(lo)}..{int(hi)}")
+        else:
+            clean[key] = int(val)
+    if "max_wall_hours" in doc:
+        val = doc["max_wall_hours"]
+        lo, hi = BUDGET_BOUNDS["max_wall_hours"]
+        bad = (isinstance(val, bool) or not isinstance(val, (int, float))
+               or not lo <= float(val) <= hi
+               or round(float(val), 1) != float(val))
+        if bad:
+            errors.append(
+                f"mission.max_wall_hours must be a number in "
+                f"{lo}..{int(hi)} with at most 1 decimal")
+        else:
+            clean["max_wall_hours"] = float(val)
     return clean, errors
+
+
+# ------------------------------------------------------------ detail view ---
+def plan_detail(mission_: dict) -> dict | None:
+    """Structured plan projection for GET /api/mission?id= — milestones with
+    LIVE subtask rows (the flat tasks[] stays the single source of status;
+    `in_progress` projects as the board's `running` word), plus the method
+    exhaustion lists (methods/blockers, scrubbed at storage). Returns None
+    for a mission that predates car 2 or was never planned — the board
+    shows "no plan yet" honestly instead of inventing one."""
+    plan = mission_.get("plan")
+    if not isinstance(plan, dict):
+        return None
+    tasks = {t.get("id"): t for t in mission_.get("tasks") or []
+             if isinstance(t, dict)}
+    milestones: list[dict] = []
+    raw = plan.get("milestones")
+    for m in raw if isinstance(raw, list) else []:
+        if not isinstance(m, dict):
+            continue
+        subs: list[dict] = []
+        for tid in m.get("subtasks") or []:
+            t = tasks.get(tid)
+            if t is None:
+                continue
+            status = str(t.get("status") or "pending")
+            if status == "in_progress":
+                status = "running"
+            subs.append({"id": str(t.get("id", "")),
+                         "text": str(t.get("text", "")),
+                         "status": status})
+        milestones.append({"id": str(m.get("id", "")),
+                           "title": str(m.get("title", "")),
+                           "subtasks": subs})
+    methods = [{"text": str(r.get("text", "")),
+                "marked": bool(r.get("marked"))}
+               for r in mission_.get("methods") or [] if isinstance(r, dict)]
+    blockers = [str(b) for b in mission_.get("blockers") or []]
+    return {"milestones": milestones, "methods": methods,
+            "blockers": blockers, "generated_at": plan.get("generated_at")}
+
+
+def event_text(rec: dict) -> str:
+    """One event-stream row -> a short human line for the detail view.
+    Best-effort by design: an unknown shape degrades to its scalar fields."""
+    kind = str(rec.get("kind", ""))
+    if kind == "slice":
+        line = (f"slice #{rec.get('n')} mode={rec.get('mode')} "
+                f"stop={rec.get('stop')} iters={rec.get('iters')}")
+        if rec.get("delegate"):
+            line += f" delegate={rec['delegate']}"
+        prev = rec.get("preview")
+        if prev:
+            line += f" | {prev}"
+        return line
+    if kind == "report":
+        return (f"report {rec.get('event')} delivered={rec.get('delivered')} "
+                f"tier={rec.get('tier')}")
+    if kind == "state":
+        return f"state -> {rec.get('to')} via {rec.get('via')}"
+    if kind == "sealed":
+        return f"sealed guard={rec.get('guard')}"
+    tail = ", ".join(f"{k}={rec[k]}" for k in rec
+                     if k not in ("ts", "mission", "kind"))
+    return tail[:400]
+
+
+def detail_events(registry_path: str | Path, mission_id: str,
+                  limit: int = 20) -> list[dict]:
+    """Tail of the event stream for ONE mission: [{ts, kind, text}] with
+    text scrubbed (the stream is model-derived). The stream file is shared
+    by all missions, so rows are filtered by id; a missing/unreadable stream
+    answers [] (fail-soft, like every catalog read)."""
+    try:
+        lines = events_path(registry_path).read_text(
+            encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    rows: list[dict] = []
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(rec, dict) and rec.get("mission") == mission_id:
+            rows.append(rec)
+    out: list[dict] = []
+    for rec in rows[-int(limit):]:
+        out.append({"ts": rec.get("ts"), "kind": str(rec.get("kind", "")),
+                    "text": scrub(event_text(rec))})
+    return out
+
+
+def budget_used(mission_: dict, now: float | None = None) -> dict:
+    """Honest budget usage: slice + daily counters from the registry, wall
+    hours as created -> ended (terminal missions) or created -> now."""
+    counters = mission_.get("counters") or {}
+    created = mission_.get("created_at")
+    created = float(created) if isinstance(created, (int, float)) else 0.0
+    end = mission_.get("ended_at")
+    if not isinstance(end, (int, float)):
+        end = time.time() if now is None else now
+    return {"slices": int(counters.get("slices") or 0),
+            "wall_hours": round(max(0.0, float(end) - created) / 3600.0, 2),
+            "daily_calls": int(counters.get("daily_calls") or 0)}
+
+
+def delegate_count(tool_log) -> int:
+    """How many `delegate` dispatches a slice performed (run_turn tool_log)
+    — recorded on the slice event so the board can show parallel subagent
+    use without parsing previews. Fail-soft on any shape."""
+    try:
+        return sum(1 for e in tool_log or []
+                   if isinstance(e, dict) and e.get("name") == "delegate")
+    except TypeError:
+        return 0
 
 
 # ----------------------------------------------------------------- rows ------
@@ -901,6 +1173,8 @@ def public_row(mission_: dict) -> dict:
         "ended_at": mission_.get("ended_at"),
         "last_report_at": mission_.get("last_report_at"),
         "progress": {"done": done_n, "total": len(tasks),
+                     "degraded": sum(1 for t in tasks
+                                     if t.get("status") == "degraded"),
                      "current": ({"id": cur.get("id"),
                                   "status": cur.get("status")}
                                  if cur is not None else None)},
@@ -908,6 +1182,8 @@ def public_row(mission_: dict) -> dict:
         "daily_calls": int(counters.get("daily_calls") or 0),
         "gaps": len(mission_.get("gaps") or []),
         "blocked": sum(1 for t in tasks if t.get("status") == "blocked"),
-        "budget": dict(mission_.get("budget") or DEFAULT_BUDGET),
+        "budget": {**DEFAULT_BUDGET,
+                   **{k: v for k, v in (mission_.get("budget") or {}).items()
+                      if k in DEFAULT_BUDGET}},
         "evidence": [str(e) for e in (mission_.get("evidence") or [])],
     }

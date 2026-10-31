@@ -270,6 +270,7 @@ async function refreshCaps() {
   renderToolsOff();            // B1: tools_off grid + env-override note ride along
   renderEnvOverride();
   renderCapGrid();             // B2: Overview system card rides along too
+  renderOrch();                // Lane I: orchestration summary repaints too
 }
 
 function mediaLangRefresh() {
@@ -2459,6 +2460,7 @@ async function loadCreds() {
     credHintReason = "unavailable";
   }
   paintCredHint();
+  renderOrch();                 // Lane I: slot count rides this fetch
 }
 
 async function credWrite(name, value, wrap, input) {
@@ -2648,6 +2650,7 @@ async function loadChanStatus() {
     chanStatusRows = (body && Array.isArray(body.channels)) ? body.channels : [];
   } catch (e) { chanStatusRows = []; }
   paintChanChips();
+  renderOrch();                 // Lane I: channel count rides this fetch
 }
 
 /* The channels block joins the payload ALL-OR-NOTHING on the server, so the
@@ -3023,6 +3026,7 @@ function settingsRelang() {
   renderCronList();
   renderSetup();               // activation car: checklist rows re-translate
   renderMission();             // mission card: dynamic lines follow the pack
+  renderOrch();                // Lane I: orchestration rows follow the pack
   evoCrossCheck();
 }
 
@@ -3782,6 +3786,11 @@ async function cronDel(id) {
    names the state rule — never a value). `goal` is user input: escaped here,
    never a credential, and capped at the server's 4000-char limit. */
 let missionData = null, missionSeen = false, missionBusy = false;
+/* car 2 task board (0.5.45 Lane I): the selected mission's DETAIL pane.
+   `missionDetailId` is the selection (null = list view, unchanged),
+   `missionDetail` the last honest GET /api/mission?id= payload, and
+   `missionDetailErr` the verbatim failure (404/network) — never a guess. */
+let missionDetailId = null, missionDetail = null, missionDetailErr = null;
 
 function missionTrunc(s, n) {
   const str = String(s == null ? "" : s);
@@ -3802,9 +3811,232 @@ async function refreshMission() {
     if (!missionSeen) missionData = null;
   }
   renderMission();
+  // an OPEN detail rides the same poll cadence — refreshed in place (the
+  // loading state only ever shows before the first successful fetch)
+  if (missionDetailId) await missionFetchDetail();
+}
+
+/* one GET /api/mission?id= round trip for the current selection; a failure
+   replaces the pane content with the server's own words (404 detail /
+   error / HTTP code / exception text) — the board never invents rows. */
+async function missionFetchDetail() {
+  const mid = missionDetailId;
+  if (!mid) return;
+  try {
+    const res = await fetch("/api/mission?id=" + encodeURIComponent(mid));
+    const body = await res.json().catch(() => null);
+    if (missionDetailId !== mid) return;          // the user switched away
+    const m = (body && typeof body === "object" && body.mission
+      && typeof body.mission === "object") ? body.mission : null;
+    if (!res.ok || !m) {
+      const err = (body && ((Array.isArray(body.details) && body.details.length
+        && body.details.join("; ")) || body.error)) || ("HTTP " + res.status);
+      missionDetailErr = String(err);
+      missionDetail = null;
+    } else {
+      missionDetail = m;
+      missionDetailErr = null;
+    }
+  } catch (e) {
+    missionDetailErr = String(e).slice(0, 140);
+    missionDetail = null;
+  }
+  renderMission();
+}
+
+async function missionOpen(mid) {
+  missionDetailId = String(mid || "");
+  missionDetail = null;
+  missionDetailErr = null;
+  renderMission();                            // loading state, no claim yet
+  await missionFetchDetail();
+}
+
+function missionBack() {
+  missionDetailId = null;
+  missionDetail = null;
+  missionDetailErr = null;
+  renderMission();
+}
+
+/* localized relative time for `last_report_at` (epoch seconds): compact
+   units (m/h/d) travel inside the template so every locale reads "N unit
+   ago" naturally. */
+function missionAgo(ts) {
+  const n = Number(ts);
+  if (!Number.isFinite(n) || n <= 0) return t("mission.never", "never");
+  const s = Math.max(0, Date.now() / 1000 - n);
+  if (s < 90) return t("mission.agoNow", "just now");
+  const v = s < 3600 ? Math.round(s / 60) + "m"
+    : s < 86400 ? Math.round(s / 3600) + "h"
+    : Math.round(s / 86400) + "d";
+  return t("mission.ago", "{v} ago").replace("{v}", v);
+}
+
+/* milestone-level status is NOT in the API payload (Lane H returns
+   id/title/subtasks only) — derive it deterministically from the subtask
+   rows so the badge never claims more than the server said: a gap blocks
+   the read, then any blocked, then any running, then all-done. */
+function missionMsStatus(m) {
+  const subs = (m && Array.isArray(m.subtasks)) ? m.subtasks : [];
+  if (!subs.length) return "pending";
+  if (subs.some(s => s && s.status === "degraded")) return "degraded";
+  if (subs.some(s => s && s.status === "blocked")) return "blocked";
+  if (subs.some(s => s && s.status === "running")) return "running";
+  if (subs.every(s => s && s.status === "done")) return "done";
+  return "pending";
+}
+
+const MISSION_SYM = { done: "✓", running: "▸", degraded: "⊘",
+                      blocked: "⛔", pending: "○" };
+
+function missionStateChip(st) {
+  const tone = (st === "running" || st === "done") ? "ok"
+    : (st === "degraded") ? "warn"
+    : (st === "sealed") ? "bad" : "";
+  return actChip(missionStateLabel(st), tone);
+}
+
+/* one budget segment: used/max with a warning colour at >=80% and red at
+   the limit — numbers are the server's own (budget vs budget_used). */
+function missionBudSeg(label, used, max, fmt) {
+  const u = Number(used), m = Number(max);
+  const uu = Number.isFinite(u) ? u : 0;
+  const mm = Number.isFinite(m) ? m : 0;
+  const pct = mm > 0 ? uu / mm : 0;
+  const cls = pct >= 1 ? " over" : pct >= 0.8 ? " warn" : "";
+  const txt = t(label.k, label.f)
+    .replace("{u}", fmt(uu)).replace("{m}", fmt(mm));
+  return `<span class="md-seg${cls}">${escapeHtml(txt)}</span>`;
+}
+
+function renderMissionDetail() {
+  const box = document.getElementById("missionDetail");
+  if (!box) return;
+  if (!missionDetailId) { box.hidden = true; box.innerHTML = ""; return; }
+  box.hidden = false;
+  const back = `<span class="btn md-back" id="missionDetailBack" role="button"` +
+    ` tabindex="0">${escapeHtml(t("mission.back", "← back to list"))}</span>`;
+  if (missionDetailErr) {
+    box.innerHTML = `<div class="md-head">${back}</div>` +
+      `<div class="stat-note" role="alert">${escapeHtml(
+        t("mission.err", "mission request failed: {e}")
+          .replace("{e}", missionDetailErr))}</div>`;
+    return;
+  }
+  if (!missionDetail) {                 // first fetch in flight: no claim
+    box.innerHTML = `<div class="md-head">${back}</div>` +
+      `<div class="stat-note">…</div>`;
+    return;
+  }
+  const m = missionDetail;
+  const prog = (m.progress && typeof m.progress === "object") ? m.progress : {};
+  const meta = [String(m.id || ""), String(m.reporting || ""),
+    t("mission.tasks", "tasks {d}/{t}")
+      .replace("{d}", String(prog.done == null ? 0 : prog.done))
+      .replace("{t}", String(prog.total == null ? 0 : prog.total))]
+    .map(escapeHtml).join(" · ");
+  const deg = Number(prog.degraded || 0);
+  const degChip = deg > 0
+    ? ` ${actChip(t("mission.st.degraded", "degraded") + " " + deg, "warn")}` : "";
+  const lastRep = m.last_report_at
+    ? t("mission.lastReport", "last report {ago}")
+        .replace("{ago}", missionAgo(m.last_report_at))
+    : t("mission.lastReport", "last report {ago}")
+        .replace("{ago}", t("mission.never", "never"));
+
+  /* budget + usage: the resolved guard values (frozen at start) vs honest
+     counters — >=80% amber, >=100% red (missionBudSeg paints it). */
+  const b = (m.budget && typeof m.budget === "object") ? m.budget : {};
+  const bu = (m.budget_used && typeof m.budget_used === "object")
+    ? m.budget_used : {};
+  const oneDec = v => String(Math.round(Number(v) * 10) / 10);
+  const budHtml = `<div class="md-bud">` +
+    missionBudSeg({ k: "mission.buSlices", f: "slices {u}/{m}" },
+      bu.slices, b.max_slices, v => String(Math.round(v))) +
+    missionBudSeg({ k: "mission.buWall", f: "wall {u}/{m}h" },
+      bu.wall_hours, b.max_wall_hours, oneDec) +
+    missionBudSeg({ k: "mission.buCalls", f: "calls {u}/{m}" },
+      bu.daily_calls, b.max_daily_model_calls, v => String(Math.round(v))) +
+    `</div>`;
+
+  /* milestones + subtask check-states: symbols only, statuses projected
+     exactly as the server sent them (in_progress -> running upstream). */
+  const plan = (m.plan && typeof m.plan === "object") ? m.plan : null;
+  let planHtml;
+  if (!plan || !Array.isArray(plan.milestones) || !plan.milestones.length) {
+    planHtml = `<div class="stat-note">${escapeHtml(
+      t("mission.noPlan", "no plan yet — this mission has not been planned"))}</div>`;
+  } else {
+    const items = plan.milestones.map(ms => {
+      const title = String((ms && (ms.title || ms.text)) || "");
+      const stt = missionMsStatus(ms);
+      const subs = (ms && Array.isArray(ms.subtasks)) ? ms.subtasks : [];
+      const subHtml = subs.map(s => {
+        const ss = String((s && s.status) || "pending");
+        const sym = MISSION_SYM[ss] || MISSION_SYM.pending;
+        return `<div class="md-sub s-${escapeHtml(ss)}">` +
+          `<span class="md-sym" aria-hidden="true">${sym}</span>` +
+          `<span>${escapeHtml(String((s && s.text) || ""))}</span>` +
+          `<span class="md-sub-st">${escapeHtml(
+            t("mission.st." + ss, ss))}</span></div>`;
+      }).join("");
+      return `<div class="md-ms">` +
+        `<div class="md-ms-head">${missionStateChip(stt)}` +
+        `<span class="md-ms-title">${escapeHtml(title)}</span></div>` +
+        subHtml + `</div>`;
+    }).join("");
+    planHtml = `<div class="md-sec">${escapeHtml(
+      t("mission.milestones", "MILESTONES"))}</div>${items}`;
+  }
+
+  /* method-exhaustion summary: marked/total in a native <details>, blockers
+     listed verbatim when present (both scrubbed server-side). */
+  const methods = (plan && Array.isArray(plan.methods)) ? plan.methods : [];
+  const blockers = (plan && Array.isArray(plan.blockers)) ? plan.blockers : [];
+  let methHtml = "";
+  if (methods.length) {
+    const mk = methods.filter(x => x && x.marked).length;
+    const rowsM = methods.map(x =>
+      `<div class="md-meth${x && x.marked ? " on" : ""}">` +
+      `<span aria-hidden="true">${x && x.marked ? "✓" : "○"}</span> ` +
+      `${escapeHtml(missionTrunc(String((x && x.text) || ""), 160))}</div>`).join("");
+    methHtml = `<details class="md-methods"><summary>${escapeHtml(
+      t("mission.methods", "methods {m}/{t} marked")
+        .replace("{m}", String(mk)).replace("{t}", String(methods.length)))}` +
+      `</summary>${rowsM}`;
+    if (blockers.length) {
+      methHtml += `<div class="md-sec">${escapeHtml(
+        t("mission.blockers", "blockers"))}</div>` +
+        blockers.map(x => `<div class="md-meth">${escapeHtml(
+          missionTrunc(String(x), 160))}</div>`).join("");
+    }
+    methHtml += `</details>`;
+  }
+
+  /* event tail (≤20, scrubbed upstream): kind + text, escaped, scrollable */
+  const events = Array.isArray(m.events) ? m.events : [];
+  const evHtml = events.length
+    ? `<div class="md-events">` + events.map(ev => {
+        const e = (ev && typeof ev === "object") ? ev : {};
+        return `<div class="md-ev"><span class="md-ev-kind">${escapeHtml(
+          String(e.kind || ""))}</span>${escapeHtml(String(e.text || ""))}</div>`;
+      }).join("") + `</div>`
+    : `<div class="stat-note">${escapeHtml(
+        t("mission.noEvents", "no events yet"))}</div>`;
+
+  box.innerHTML =
+    `<div class="md-head">${back}${missionStateChip(String(m.state || ""))}` +
+    `<span class="stat-note md-meta">${meta}${degChip}</span></div>` +
+    `<div class="md-goal">${escapeHtml(missionTrunc(m.goal, 400))}</div>` +
+    `<div class="stat-note">${escapeHtml(lastRep)}</div>` +
+    budHtml + planHtml + methHtml +
+    `<div class="md-sec">${escapeHtml(t("mission.events", "EVENT TAIL"))}</div>` +
+    evHtml;
 }
 
 function renderMission() {
+  renderMissionDetail();               // the pane follows its own state
   const stateEl = document.getElementById("missionState");
   const recentEl = document.getElementById("missionRecent");
   const sel = document.getElementById("missionReporting");
@@ -3848,8 +4080,11 @@ function renderMission() {
       String(active.reporting || missionData.reporting || ""),
     ].map(escapeHtml).join(" · ");
     stateEl.hidden = false;
-    stateEl.innerHTML = `<div>${meta}</div>` +
-      `<div style="opacity:.85;">${escapeHtml(goal)}</div>`;
+    // the ACTIVE line opens its own detail too (the board's primary target)
+    stateEl.innerHTML = `<div class="md-open" role="button" tabindex="0"` +
+      ` data-mid="${escapeHtml(String(active.id || ""))}">` +
+      `<div>${meta}</div>` +
+      `<div style="opacity:.85;">${escapeHtml(goal)}</div></div>`;
   }
 
   // recent tail: a compact honest table, never invented rows
@@ -3862,9 +4097,12 @@ function renderMission() {
       recentEl.hidden = false;
       recentEl.innerHTML = rows.map(r => {
         const row = (r && typeof r === "object") ? r : {};
-        const meta = [String(row.id || ""), missionStateLabel(row.state)]
+        const mid = String(row.id || "");
+        const meta = [mid, missionStateLabel(row.state)]
           .map(escapeHtml).join(" · ");
-        return `<div class="ctl-row" style="align-items:flex-start;">` +
+        const sel = (mid && mid === missionDetailId) ? " is-sel" : "";
+        return `<div class="ctl-row mission-row${sel}" role="button" tabindex="0"` +
+          ` data-mid="${escapeHtml(mid)}">` +
           `<label style="flex:1;min-width:0;overflow-wrap:anywhere;">` +
           `${escapeHtml(missionTrunc(row.goal, 90))}</label>` +
           `<span class="stat-note" style="margin-top:0;">${meta}</span></div>`;
@@ -3873,7 +4111,9 @@ function renderMission() {
   }
 
   if (startBtn) startBtn.disabled = missionBusy || !!active;
-  if (pauseBtn) pauseBtn.disabled = missionBusy || !active || active.state !== "running";
+  // car 2: pause is legal from running AND degraded (Lane H edge)
+  if (pauseBtn) pauseBtn.disabled = missionBusy || !active ||
+    (active.state !== "running" && active.state !== "degraded");
   if (resumeBtn) resumeBtn.disabled = missionBusy || !active || active.state !== "paused_user";
   if (stopBtn) stopBtn.disabled = missionBusy || !active;
 }
@@ -3899,6 +4139,26 @@ async function missionAction(action) {
     payload.goal = goal;
     const sel = document.getElementById("missionReporting");
     if (sel) payload.reporting = sel.value;
+    // car 2 budget override: only the FILLED fields travel — blank means
+    // "use the settings defaults" (the server merges over settings anyway).
+    // A non-numeric entry in a number input yields "" (skipped); an
+    // out-of-range NUMBER is sent and the SERVER refuses it 400 — its
+    // detail renders verbatim below, never a local guess.
+    const bget = id => {
+      const el = document.getElementById(id);
+      const v = el ? String(el.value || "").trim() : "";
+      if (v === "") return null;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    };
+    const budget = {};
+    const bs = bget("missionBudgetSlices");
+    if (bs !== null) budget.max_slices = bs;
+    const bw = bget("missionBudgetWall");
+    if (bw !== null) budget.max_wall_hours = bw;
+    const bc = bget("missionBudgetCalls");
+    if (bc !== null) budget.max_daily_model_calls = bc;
+    if (Object.keys(budget).length) payload.budget = budget;
   } else {
     const active = missionData && missionData.active;
     if (!active || !active.id) return;
@@ -3925,8 +4185,9 @@ async function missionAction(action) {
       return;
     }
     if (!res.ok) {
-      const err = (body && (body.error || (Array.isArray(body.details) &&
-        body.details.length && body.details.join("; ")))) || ("HTTP " + res.status);
+      const det = (Array.isArray(body.details) && body.details.length)
+        ? body.details.join("; ") : null;
+      const err = det || body.error || ("HTTP " + res.status);
       if (msg) { msg.className = "save-state err";
         msg.textContent = t("mission.err", "mission request failed: {e}")
           .replace("{e}", String(err)); }
@@ -3984,6 +4245,94 @@ async function missionTierWrite(value) {
       msg.textContent = String(e).slice(0, 120); }
   }
   await refreshMission();
+}
+
+/* ------------------------------------------- orchestration card (0.5.45) --
+   READ-ONLY summary of what a mission can draw on (Lane I / design C):
+   tools / enabled channels / web3 surface / credential slots / skills.
+   Every value comes from an existing catalog fetch (refreshCaps /
+   loadChanStatus / loadCreds) — NO second switchboard is built here; each
+   row is a DEEP LINK to the control that already owns that setting.
+   Shape discipline (actChip posture): a source whose payload shape does
+   not match simply omits its row — never an invented value. */
+function orchLink(kind, label, value) {
+  return `<button type="button" class="ctl-row orch-row" data-orch="${escapeHtml(kind)}"` +
+    ` title="${escapeHtml(t("orch.open", "open the control that owns this"))}">` +
+    `<label>${escapeHtml(label)}</label>` +
+    `<span class="stat-note orch-val">${escapeHtml(value)}</span></button>`;
+}
+
+function renderOrch() {
+  const list = document.getElementById("orchList");
+  if (!list) return;
+  const c = (capsData && typeof capsData === "object") ? capsData : null;
+  if (!c) {
+    // before the first catalog fetch: no claim; after it failed: honest note
+    list.innerHTML = capsSeen ? `<div class="stat-note">${escapeHtml(
+      t("orch.unavail", "orchestration data unavailable"))}</div>` : "";
+    return;
+  }
+  const rows = [];
+  // tools: the live registry count (tools_off already applied server-side)
+  if (Array.isArray(c.tools)) {
+    rows.push(orchLink("tools", t("orch.tools", "available tools"),
+      String(c.tools.length)));
+  }
+  // channels: enabled count from the capabilities block; the /api/channels
+  // rows (when loaded) are the fallback source for the same number
+  const capChan = (c.channels && typeof c.channels === "object") ? c.channels : null;
+  let enabledN = null;
+  if (capChan && Array.isArray(capChan.enabled)) enabledN = capChan.enabled.length;
+  else if (Array.isArray(chanStatusRows) && chanStatusRows.length) {
+    enabledN = chanStatusRows.filter(r => r && r.enabled).length;
+  }
+  if (enabledN !== null) {
+    rows.push(orchLink("chan", t("orch.chan", "channels enabled"),
+      String(enabledN)));
+  }
+  // web3 surface: read-only vs orderable-behind-the-approval-gate — from
+  // the exchange block of the capability catalog (W2 truth)
+  const ex = (c.exchange && typeof c.exchange === "object") ? c.exchange : null;
+  if (ex && typeof ex.read_only === "boolean") {
+    const orderable = Array.isArray(ex.orderable) ? ex.orderable.length : 0;
+    const val = (orderable > 0)
+      ? t("orch.w3Order", "orderable ({n}) · approval gate")
+          .replace("{n}", String(orderable))
+      : t("orch.w3ro", "read-only");
+    rows.push(orchLink("web3", t("orch.web3", "web3 surface"), val));
+  }
+  // credential slots: set count over the writable catalog (32) — the
+  // presence-only rows from GET /api/secrets (never a value)
+  const cr = (credsData && Array.isArray(credsData.slots)) ? credsData : null;
+  if (cr) {
+    const writable = cr.slots.filter(s => s && s.writable !== false);
+    const setN = writable.filter(s => s.set).length;
+    rows.push(orchLink("slots", t("orch.slots", "credential slots set"),
+      `${setN}/${writable.length}`));
+  }
+  // skills: the capabilities field decides — absent field = row hidden
+  if (Array.isArray(c.skills)) {
+    rows.push(orchLink("skills", t("orch.skills", "skills installed"),
+      String(c.skills.length)));
+  }
+  list.innerHTML = rows.join("");
+}
+
+/* deep link: existing navigation only (setView + actFocusEl, the actFix
+   posture) — never a second switchboard. Unknown kinds are a no-op. */
+function orchGo(kind) {
+  const focusSettings = sel => {
+    setView("settings", true);
+    requestAnimationFrame(() => {
+      const el = document.querySelector(sel);
+      if (el) actFocusEl(el);
+    });
+  };
+  if (kind === "tools") focusSettings("#toolsOffRow");
+  else if (kind === "chan") focusSettings("#chanList");
+  else if (kind === "slots") focusSettings("#credList");
+  else if (kind === "web3") setView("exchange", true);
+  else if (kind === "skills") setView("skills", true);
 }
 
 /* --------------------------------------------------------------- polling -- */
@@ -4205,6 +4554,47 @@ if (cronListDelEl) cronListDelEl.addEventListener("click", e => {
 const missionReportingEl = document.getElementById("missionReporting");
 if (missionReportingEl) missionReportingEl.addEventListener("change",
   e => missionTierWrite(e.target.value));
+/* car 2 task board (Lane I): row -> detail wiring. Delegated on the three
+   containers (their innerHTML is rebuilt on every poll), so rows rendered
+   later stay live; Enter/Space on a focused row mirrors the click. */
+function missionRowPick(root, e) {
+  const row = e.target && e.target.closest
+    ? e.target.closest("[data-mid]") : null;
+  if (row && root.contains(row)) missionOpen(row.dataset.mid);
+}
+[["missionState", null], ["missionRecent", null]].forEach(pair => {
+  const el = document.getElementById(pair[0]);
+  if (!el) return;
+  el.addEventListener("click", e => missionRowPick(el, e));
+  el.addEventListener("keydown", e => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      missionRowPick(el, e);
+    }
+  });
+});
+const missionDetailEl = document.getElementById("missionDetail");
+if (missionDetailEl) {
+  const backAct = e => {
+    const b = e.target && e.target.closest
+      ? e.target.closest("#missionDetailBack") : null;
+    if (b) missionBack();
+  };
+  missionDetailEl.addEventListener("click", backAct);
+  missionDetailEl.addEventListener("keydown", e => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      backAct(e);
+    }
+  });
+}
+/* orchestration card: row -> existing control (deep link only) */
+const orchListEl = document.getElementById("orchList");
+if (orchListEl) orchListEl.addEventListener("click", e => {
+  const row = e.target && e.target.closest
+    ? e.target.closest("[data-orch]") : null;
+  if (row) orchGo(row.dataset.orch);
+});
 const chanTestBtnEl = document.getElementById("chanTestBtn");
 if (chanTestBtnEl) chanTestBtnEl.addEventListener("click", chanSendTest);
 const micBtnEl = document.getElementById("micBtn");
