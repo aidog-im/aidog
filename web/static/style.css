@@ -686,6 +686,11 @@ footer { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wr
   border-top: 1px solid var(--line-solid);
   font-size: 12px; color: var(--muted); letter-spacing: .08em;
   font-family: var(--mono); }
+/* X19: docs deep link — reuses the footer type, only borrows the brand blue. */
+footer .foot-docs { color: var(--blue); text-decoration: none; white-space: nowrap; }
+footer .foot-docs:hover, footer .foot-docs:focus { text-decoration: underline; }
+/* X3: the mycore service/watchdog readout under the Services panels. */
+#mycoreFacts { margin-top: 12px; }
 
 /* --------------------------------------------------------- responsive ----- */
 @media (max-width: 1180px) {
@@ -1115,3 +1120,40 @@ footer { border-top: 1px solid var(--ink); font-family: var(--mono); }
   *, *::before, *::after { animation: none !important; transition: none !important; }
   .card { opacity: 1; transform: none; }
 }
+
+/* ---------------------------------------------- Wave 4 lane gamma surfaces --
+   X5 endpoint test rows · X6 failover health · X7 chat model picker ·
+   X8 inbound webhook hint · X9 cron create · X14 context line. */
+.test-out { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+.test-out .test-row { font-family: var(--mono); font-size: 12px;
+  letter-spacing: .03em; overflow-wrap: anywhere; }
+.test-out .test-row.ok { color: var(--ok); }
+.test-out .test-row.bad { color: var(--red); }
+.test-out .test-note { margin-top: 0; }
+.mt-box { margin-top: 10px; padding-top: 8px;
+  border-top: 1px dashed var(--line); }
+.mt-head { font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--muted); }
+.mt-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 5px;
+  font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
+.mt-row .mt-name { color: var(--navy); }
+.mt-row .mt-state.ok { color: var(--ok); }
+.mt-row .mt-state.bad { color: var(--red); }
+.mt-row .mt-state.unknown { color: var(--muted); }
+.mt-row .mt-primary { color: var(--amber); font-size: 10.5px;
+  letter-spacing: .08em; align-self: center; }
+.chan-webhook { margin-top: 6px; font-family: var(--mono); font-size: 11.5px;
+  overflow-wrap: anywhere; }
+.chat-model { background: #fff; border: 1px solid var(--line); color: var(--text);
+  padding: 8px; font-size: 12.5px; font-family: var(--mono);
+  border-radius: 8px; max-width: 190px; }
+.chat-model:focus { outline: none; border-color: var(--blue);
+  box-shadow: var(--glow); }
+.cron-create { display: flex; flex-direction: column; gap: 6px;
+  margin-top: 8px; }
+.cron-create input { background: #fff; border: 1px solid var(--line);
+  color: var(--text); padding: 8px 10px; font-size: 12.5px;
+  font-family: var(--mono); border-radius: 8px; min-width: 0; }
+.cron-create input:focus { outline: none; border-color: var(--blue);
+  box-shadow: var(--glow); }
+#ctxMeta.ctx-over { color: var(--red); }

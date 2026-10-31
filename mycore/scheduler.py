@@ -86,7 +86,14 @@ SOURCES = ("command", "model", "ops")
 STATE_FILE_NAME = "cron_jobs.json"
 MAX_JOBS = 50
 MAX_TEXT = 4000
+MAX_NAME = 64                      # display label for a console-created job
 MAX_INTERVAL_MIN = 10080                 # 7 days
+
+# Job-name grammar (console create; ONE rule for every entry point): 1..64
+# visible chars, no control characters and no '/'. The '/' ban is a payload
+# rule, not an aesthetic one — the console's list sweep asserts that no
+# display field can carry a filesystem path.
+_NAME_RE = re.compile(r"[^\x00-\x1f\x7f/]{1,64}")
 
 _TIME_RE = re.compile(r"([01][0-9]|2[0-3]):[0-5][0-9]")
 _DATE_RE = re.compile(r"([0-9]{4})-([01][0-9])-([0-3][0-9])")
@@ -365,16 +372,25 @@ def new_id(jobs: list[dict]) -> str:
 def create_job(jobs: list[dict], spec: str, text: str, *,
                kind: str = "message", source: str = "command",
                origin: int | str | None = None,
-               now: float | None = None) -> dict:
+               now: float | None = None, name: str | None = None) -> dict:
     """Validate + append one job (mutates `jobs`, returns it).
 
     Refuses (SpecError): bad spec, once in the past, empty/oversized text,
-    unknown kind, or a full table. The new job's `id` is assigned here.
+    unknown kind, an invalid `name`, or a full table. The new job's `id`
+    is assigned here.
     `origin` is an int chat id or a str channel endpoint "route:target"
-    (anything else becomes None — JSON serialization keeps both)."""
+    (anything else becomes None — JSON serialization keeps both).
+    `name` is an OPTIONAL display label (console create): when given it is
+    validated against NAME grammar and stored as `job["name"]`; when omitted
+    the job dict is byte-identical to the pre-label shape, so the NL / CLI /
+    ops entry points keep their exact behavior and output."""
     fields = parse_spec(spec)
     if kind not in KINDS:
         raise SpecError(f"unknown kind {kind!r} — message | prompt")
+    label = name.strip() if isinstance(name, str) else ""
+    if name is not None and not _NAME_RE.fullmatch(label or ""):
+        raise SpecError(f"bad name — 1..{MAX_NAME} chars, no control "
+                        "characters and no '/'")
     body = (text or "").strip()
     if not body:
         raise SpecError("empty job text")
@@ -393,6 +409,8 @@ def create_job(jobs: list[dict], spec: str, text: str, *,
            "origin": origin if isinstance(origin, (int, str)) else None,
            "source": source if source in SOURCES else "command",
            "created_at": now, "last_fired": None, "done": False}
+    if label:
+        job["name"] = label
     jobs.append(job)
     return job
 

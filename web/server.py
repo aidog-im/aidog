@@ -24,12 +24,16 @@ Routes:
                                    memory artifact (evolution loop console leg)
   POST /api/evolution           -> Bearer; {action:"reflect", period} generates
                                    the period skeleton (same core as /reflect)
-  POST /api/chat                -> Bearer; {text} streams an agent turn as SSE
-                                   (meta/delta/tool/done/error); {action:"clear"}
-                                   archives the console session
+  POST /api/chat                -> Bearer; {text, model?} streams an agent turn
+                                   as SSE (meta/delta/tool/done/error);
+                                   {action:"clear"} archives the console session;
+                                   optional `model` is whitelist-gated (400 on
+                                   an unknown id — the TG /model rule)
   GET  /api/channels            -> channel adapter status (list of {name,
                                    enabled, configured, ...}; empty list +
-                                   "note" when the channel module is absent)
+                                   "note" when the channel module is absent) and
+                                   read-only inbound webhook facts ("webhook":
+                                   {url, secret_configured} — never a value)
   POST /api/channels/webhook    -> Bearer CHANNEL_WEBHOOK_SECRET; {text,
                                    sender?} -> one in-process turn ->
                                    {ok, reply} (no SSE, own session)
@@ -57,7 +61,16 @@ Routes:
                                    {checks, fail, warn, summary, lines} (200 even
                                    on a non-zero exit: FAIL/WARN are honest output)
   POST /api/cron                -> Bearer; {action:"del", id} deletes one job
-                                   (404 unknown id; create stays natural-language/CLI)
+                                   (404 unknown id) | {action:"create", name,
+                                   schedule, prompt, kind?} creates one through
+                                   the SAME registry/grammar as NL + CLI
+                                   (400 on a bad spec/name/size)
+  POST /api/mycore/upstreams/test
+                               -> Bearer; {url?} one 5s connectivity probe per
+                                   configured failover endpoint -> [{name, ok,
+                                   latency_ms, error_class}] — exception class /
+                                   HTTP status only: never a URL query, a body
+                                   or a key
   GET  /api/mission             -> mission board (0.5.44): {reporting, active,
                                    recent}; fail-soft empty structure, no auth,
                                    no credential/origin/manifest fields.
@@ -146,6 +159,7 @@ from lib import i18n  # noqa: E402
 from lib import profile_paths  # noqa: E402  (car F §13.1: per-profile path seams)
 from mycore import cli, evolution, hooks, mission, mcp, modeltier, terminal  # noqa: E402  (config + MCP/ hooks/ terminal/ mission grammar)
 from mycore.assembly import build_system_stack, resolve_context_dirs  # noqa: E402
+from mycore.compact import measure  # noqa: E402  (X14 context usage: the loop's own payload metric)
 from mycore.loop import run_turn  # noqa: E402
 from mycore.model import ChatClient  # noqa: E402
 from mycore.service import state_dir as mycore_state_dir  # noqa: E402
@@ -177,6 +191,12 @@ CHAT_MAX_CHARS = 4000                 # one console chat message (input cap)
 CHAT_HISTORY_CAP = 2000               # per-message chars returned by /history
 CHAT_SESSION_NAME = "web"             # console session file stem (numeric
                                       # chat_ids belong to the TG service)
+# Wave 3 backend (X5/X9/X14): caps for the new read/create faces.
+UPSTREAM_TEST_TIMEOUT = 5.0           # seconds allowed to ONE endpoint probe
+UPSTREAM_TEST_URL_MAX = 2048          # chars in an ad-hoc probe url
+CRON_PROMPT_MAX = 4096                # chars in a console-created job body
+                                      # (the registry's own MAX_TEXT=4000
+                                      # still applies inside create_job)
 _state_lock = threading.Lock()
 # Mission board mutations (0.5.44): the console is a ThreadingHTTPServer, so
 # read-modify-write on the registry runs under one lock (single active mission
@@ -1344,6 +1364,9 @@ def collect_status() -> dict:
         "advisory": {"level": level, "reasons": reasons},
         "system": sysfacts,
         "mycore": {"service": svc, "watchdog": wdf},
+        # Wave 3 (X6): failover health/cooling — tri-state healthy, in-process
+        # scope, zero key material (see collect_modeltier).
+        "modeltier": collect_modeltier(),
         "memory": {
             "curated_chars": len(mem.read_text()) if mem.exists() else 0,
             "curated_limit": 2200,
@@ -2267,10 +2290,44 @@ def chat_session_path() -> Path:
     return chat_sessions_dir() / f"{CHAT_SESSION_NAME}.jsonl"
 
 
+def chat_context_usage() -> dict:
+    """Wave 3 (X14): read-only context usage for the console session.
+
+    The number is the REAL one the next model call sees: `compact.measure()`
+    over (system stack + persisted session turns) — the same metric
+    `run_turn()` compacts with, against `chat_budget()` (the exact threshold
+    it fires at: `measure > budget`). Every field is derived from files read
+    here; when a read fails the block degrades to `available:false` + the
+    exception CLASS, and `budget_*` still reports the configured value —
+    never a fabricated number. No message content ever leaves this function:
+    counts and lengths only."""
+    budget = chat_budget()
+    out: dict = {"available": False, "used_chars": None, "system_chars": None,
+                 "session_chars": None, "messages": None,
+                 "budget_chars": budget, "threshold_chars": budget,
+                 "compaction_enabled": budget is not None,
+                 "over_budget": None}
+    try:
+        stack = build_system_stack(context_dirs=resolve_context_dirs())
+        history = [m for m in Session(chat_session_path()).load()
+                   if m.get("role") != "system"]
+        sys_chars = measure(stack)
+        ses_chars = measure(history)
+    except Exception as e:  # noqa: BLE001 — honest degradation, no numbers
+        out["note"] = f"context read failed: {type(e).__name__}"
+        return out
+    used = sys_chars + ses_chars
+    out.update(available=True, used_chars=used, system_chars=sys_chars,
+               session_chars=ses_chars, messages=len(stack) + len(history),
+               over_budget=(None if budget is None else used > budget))
+    return out
+
+
 def chat_history(limit: int = 200) -> dict:
     """Read-only session view for GET /api/chat/history: user/assistant turns
     only (system constitution and tool payloads never leave the server),
-    content capped at CHAT_HISTORY_CAP. Loopback read, no bearer needed."""
+    content capped at CHAT_HISTORY_CAP. Loopback read, no bearer needed.
+    `context` (X14) rides along: session-level usage counters, never content."""
     sess = Session(chat_session_path())
     out = []
     for m in sess.load()[-limit:]:
@@ -2281,7 +2338,8 @@ def chat_history(limit: int = 200) -> dict:
         if not isinstance(content, str):
             continue
         out.append({"role": role, "content": content[:CHAT_HISTORY_CAP]})
-    return {"messages": out, "count": len(out)}
+    return {"messages": out, "count": len(out),
+            "context": chat_context_usage()}
 
 
 def chat_budget() -> int | None:
@@ -2296,6 +2354,23 @@ def chat_budget() -> int | None:
     if isinstance(raw, str) and raw.isascii() and raw.isdigit():
         return int(raw) if int(raw) > 0 else None
     return cli.DEFAULT_BUDGET_CHARS
+
+
+def chat_model_whitelist() -> list[str]:
+    """Wave 4 (X7): allowed ids for POST /api/chat {model} — the SAME rule
+    service.ChatService._allowed_models enforces for the TG /model command:
+    web/settings.json mycore.models (non-empty strings; empty/absent = the
+    configured model only). It reads the very document that function reads
+    (see the MYCORE_KEYS note: raw-file consumers and this merged view stay
+    in agreement by construction), so a console turn can never accept an id
+    the TG pipeline would refuse — one whitelist, no parallel grammar."""
+    mc = load_settings().get("mycore")
+    raw = mc.get("models") if isinstance(mc, dict) else None
+    if isinstance(raw, list):
+        out = [m for m in raw if isinstance(m, str) and m]
+        if out:
+            return out
+    return [cli.resolve_model_config().model]
 
 
 def clear_chat_session() -> bool:
@@ -2370,20 +2445,32 @@ def collect_channels() -> dict:
     E3 poll-health view (null = never polled / unreadable = honest unknown,
     never a guessed false). The field is OMITTED entirely when the health
     read fails (shape-hide: the console shows nothing rather than a lie);
-    existing row fields are never altered."""
+    existing row fields are never altered.
+    Wave 4 (X8): the top-level `webhook` block is READ-ONLY inbound endpoint
+    truth — the loopback address of POST /api/channels/webhook plus a
+    secret_configured BOOL. The slot VALUE never enters this frame; the route
+    itself lives in this file, so the facts answer even when the channel
+    module does not."""
+    webhook_facts = {
+        "url": f"http://{HOST}:{PORT}/api/channels/webhook",
+        "secret_configured": bool(read_env_slot("CHANNEL_WEBHOOK_SECRET")),
+    }
     try:
         from mycore import channels as _channels
     except Exception as e:  # noqa: BLE001 — module may not exist yet
         sys.stderr.write(f"channels status unavailable err={type(e).__name__}\n")
-        return {"channels": [], "note": "channel module unavailable"}
+        return {"channels": [], "note": "channel module unavailable",
+                "webhook": webhook_facts}
     try:
         settings = load_settings()
         rows = _channels.status(settings, REPO)
     except Exception as e:  # noqa: BLE001 — status must never take the console down
         sys.stderr.write(f"channels status failed err={type(e).__name__}\n")
-        return {"channels": [], "note": "channel status unavailable"}
+        return {"channels": [], "note": "channel status unavailable",
+                "webhook": webhook_facts}
     if not isinstance(rows, list):
-        return {"channels": [], "note": "channel status unavailable"}
+        return {"channels": [], "note": "channel status unavailable",
+                "webhook": webhook_facts}
     try:
         health = _channels.inbound_health_map(settings, REPO)
     except Exception:  # noqa: BLE001 — honest absence, rows stay untouched
@@ -2393,7 +2480,7 @@ def collect_channels() -> dict:
             view = health.get(row.get("name")) if isinstance(row, dict) else None
             if isinstance(view, dict):
                 row["inbound_health"] = view
-    return {"channels": rows}
+    return {"channels": rows, "webhook": webhook_facts}
 
 
 # Local fallback route table for POST /api/channels/send validation, used only
@@ -2688,36 +2775,97 @@ def collect_capabilities() -> dict:
 
 
 
+def collect_modeltier() -> dict:
+    """GET /api/status -> `modeltier` block (Wave 3 X6): the failover chain's
+    health/cooling state, one row per CHAIN endpoint (primary first).
+
+    Facts come from the SAME structures ModelConfig.describe() logs:
+    HealthRegistry identities are `<base_url>|<slot NAME>` — slot NAMES only —
+    and the row label is sanitize_endpoint() output (no query/userinfo/
+    fragment, long path segments dropped), so this block serializes ZERO key
+    material by construction (the smoke sweeps it for sk-/key/secret).
+
+    `healthy` is tri-state BY DESIGN: null = never observed in THIS process
+    (cooldown state is deliberately not persisted — modeltier's stated scope),
+    false = a unit of that endpoint is cooling right now, true = observed and
+    not cooling. `scope` names that honesty: this is the console process's
+    registry — chat turns executed by the TG service live in THAT process.
+    `last_error_class` is deliberately absent: the registry stores counts and
+    clocks, not error classes, and inventing one would be a lie.
+    Fail-soft like every other status block: never a 500."""
+    out: dict = {"available": False, "scope": "console-process",
+                 "endpoints": [], "cooling": 0}
+    try:
+        cfg = cli.resolve_model_config()
+        health = modeltier.SHARED_HEALTH
+        now = time.time()
+        rows: list[dict] = []
+        for idx, (base_url, key_env, _model) in enumerate(cfg.chain()):
+            slots = tuple(s for s in (key_env or "").split(",") if s) or ("",)
+            idents = [modeltier.HealthRegistry.identity(base_url, s)
+                      for s in slots]
+            seen = any(health.observed(i) for i in idents)
+            remaining = max((health.remaining(i) for i in idents), default=0.0)
+            healthy = (None if not seen else
+                       False if remaining > 0 else True)
+            row: dict = {"name": sanitize_endpoint(base_url)
+                         or f"endpoint-{idx + 1}",
+                         "healthy": healthy, "primary": idx == 0}
+            if remaining > 0:
+                # registry clocks are monotonic; project the remainder onto
+                # wall time so the console can show a countdown.
+                row["cooling_remaining_s"] = round(remaining, 1)
+                row["cooling_until"] = round(now + remaining, 1)
+            rows.append(row)
+        out.update(available=True, endpoints=rows,
+                   cooling=sum(1 for r in rows if r.get("healthy") is False))
+        return out
+    except Exception as e:  # noqa: BLE001 — status must never 500 the console
+        sys.stderr.write(f"modeltier status failed err={type(e).__name__}\n")
+        out["note"] = f"unavailable: {type(e).__name__}"
+        return out
+
+
+def cron_row(job: dict, now: float | None = None) -> dict:
+    """One display row for GET /api/cron AND the create response — the SAME
+    fixed field whitelist for both, so a console-created job and a CLI/NL job
+    are indistinguishable in shape (the scheduler's own display fields plus
+    the optional `name` label); no filesystem path can enter the payload by
+    construction."""
+    from mycore import scheduler as _scheduler   # noqa: PLC0415 — lazy import
+    now = time.time() if now is None else now
+    return {
+        "id": str(job.get("id", "")),
+        "type": str(job.get("type", "")),
+        "spec": _scheduler.describe(job),
+        "name": str(job.get("name", "")),
+        "text": str(job.get("text", "")),
+        "kind": str(job.get("kind", "")),
+        "source": str(job.get("source", "")),
+        "origin": job.get("origin")
+                  if isinstance(job.get("origin"), (int, str)) else None,
+        "created_at": job.get("created_at"),
+        "last_fired": job.get("last_fired"),
+        "done": bool(job.get("done")),
+        "due": bool(_scheduler.is_due(job, now)),
+        "next": _scheduler.fmt_beijing(_scheduler.next_fire(job, now)),
+    }
+
+
 def collect_cron() -> dict:
     """GET /api/cron — read-only view of the natural-language cron registry
     (frontend coverage 1.4). Fail-soft by contract: an absent, unreadable or
     corrupt state file answers {"jobs": [], "count": 0}, never a 500, and
     nothing here mutates the registry (load_jobs hands back fresh dicts).
 
-    Rows are built from a fixed field whitelist — the scheduler's own display
-    fields (id/spec/schedule/text/origin/due marks) — so no filesystem path
-    can enter this payload by construction."""
+    Rows are built by `cron_row` — a fixed field whitelist (the scheduler's
+    own display fields: id/spec/name/text/origin/due marks) — so no
+    filesystem path can enter this payload by construction."""
     try:
         from mycore import scheduler as _scheduler
         jobs = _scheduler.load_jobs(_scheduler.default_jobs_path())
         now = time.time()
-        rows: list[dict] = []
-        for job in jobs:
-            rows.append({
-                "id": str(job.get("id", "")),
-                "type": str(job.get("type", "")),
-                "spec": _scheduler.describe(job),
-                "text": str(job.get("text", "")),
-                "kind": str(job.get("kind", "")),
-                "source": str(job.get("source", "")),
-                "origin": job.get("origin")
-                          if isinstance(job.get("origin"), (int, str)) else None,
-                "created_at": job.get("created_at"),
-                "last_fired": job.get("last_fired"),
-                "done": bool(job.get("done")),
-                "due": bool(_scheduler.is_due(job, now)),
-                "next": _scheduler.fmt_beijing(_scheduler.next_fire(job, now)),
-            })
+        rows = [cron_row(job, now) for job in jobs]
         return {"jobs": rows, "count": len(rows)}
     except Exception as e:  # noqa: BLE001 — catalog must not break the console
         sys.stderr.write(f"cron list failed err={type(e).__name__}\n")
@@ -2800,6 +2948,136 @@ def endpoint_reachable(base: str, timeout: float = 1.0) -> bool:
     if http_status(probe, timeout=timeout) is not None:
         return True
     return port_open(port)
+
+
+# ----------------------------------- upstream connectivity test (Wave 3 X5) -
+
+def sanitize_endpoint(url: object) -> str:
+    """Display label for an endpoint: scheme://host[:port]/path with userinfo,
+    query and fragment STRIPPED — a key or token parked anywhere in the URL
+    must never serialize into a response, a log line or an assertion payload.
+    Path segments of 16+ chars are dropped as well (a path-embedded credential
+    is the one shape stripping cannot recognize); the short segments stay, so
+    `/v1` survives while `/sk-...` does not. Empty string for a non-http(s)
+    or hostless value."""
+    try:
+        parts = urllib.parse.urlsplit(str(url or ""))
+    except ValueError:
+        return ""
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return ""
+    host = parts.hostname
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    try:
+        port = parts.port
+    except ValueError:
+        port = None
+    path = (parts.path or "").rstrip("/")
+    segments = [s for s in path.split("/") if s]
+    if any(len(seg) >= 16 for seg in segments):
+        # a path-embedded credential is the one shape stripping cannot
+        # recognize: drop only the suspicious segment(s), keep the rest
+        path = "/" + "/".join(s for s in segments if len(s) < 16)
+    return urllib.parse.urlunsplit(
+        (parts.scheme, f"{host}:{port}" if port else host, path, "", ""))
+
+
+def _probe_key(key_env: str) -> str:
+    """First populated slot of an endpoint's credential pool -> used for ONE
+    probe request header inside this process and dropped immediately. Env
+    wins over the secrets.env slot (mycore.model's own resolution order), a
+    missing slot degrades to no auth header. The value is never returned to
+    a caller other than this in-process probe, never logged, never echoed."""
+    for name in (s for s in (key_env or "").split(",") if s):
+        try:
+            value = os.environ.get(name, "") or (read_env_slot(name) or "")
+        except Exception:  # noqa: BLE001 — a failed read = probe without auth
+            value = ""
+        if value:
+            return value
+    return ""
+
+
+def probe_endpoint(base_url: str, key: str = "",
+                   timeout: float | None = None) -> dict:
+    """ONE connectivity probe: GET <base>/v1/models (the OpenAI-style list
+    endpoint every configured gateway answers; <base>/models when the base
+    already ends in /v1) with a 5s cap.
+
+    Returns {name, ok, latency_ms, error_class} where `error_class` is an
+    EXCEPTION CLASS NAME or "HTTP <status>" and nothing else — the response
+    body, the probed query string and `key` never leave this frame (X5 red
+    line). `key` rides one Authorization header in-process only; empty = an
+    unauthenticated probe of a public endpoint. Never raises: every failure
+    class is an honest row."""
+    budget = UPSTREAM_TEST_TIMEOUT if timeout is None else timeout
+    name = sanitize_endpoint(base_url) or "endpoint"
+    base = str(base_url or "").rstrip("/")
+    probe = f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
+    headers = {"User-Agent": "aidog-console/1"}
+    if key:
+        headers["Authorization"] = "Bearer " + key
+    req = urllib.request.Request(probe, headers=headers, method="GET")
+    started = time.monotonic()
+
+    def ms() -> int:
+        return int((time.monotonic() - started) * 1000)
+
+    try:
+        with urllib.request.urlopen(req, timeout=budget) as resp:
+            status = int(getattr(resp, "status", 200) or 200)
+            try:
+                resp.read(2048)       # drain a little; bytes are never returned
+            except Exception:  # noqa: BLE001 — a truncated body says nothing
+                pass
+    except urllib.error.HTTPError as e:
+        # HTTP class only: reason / body / url stay in this frame.
+        return {"name": name, "ok": False, "latency_ms": ms(),
+                "error_class": f"HTTP {int(e.code)}"}
+    except urllib.error.URLError as e:
+        reason = getattr(e, "reason", None)
+        cls = type(reason).__name__ if reason is not None else "URLError"
+        return {"name": name, "ok": False, "latency_ms": ms(),
+                "error_class": cls}
+    except Exception as e:  # noqa: BLE001 — class name only, never the text
+        return {"name": name, "ok": False, "latency_ms": ms(),
+                "error_class": type(e).__name__}
+    if 200 <= status < 300:
+        return {"name": name, "ok": True, "latency_ms": ms(),
+                "error_class": None}
+    return {"name": name, "ok": False, "latency_ms": ms(),
+            "error_class": f"HTTP {status}"}
+
+
+def upstream_probe_targets(url: str | None = None
+                           ) -> tuple[list[tuple[str, str]], str | None]:
+    """(targets, error_detail) for POST /api/mycore/upstreams/test.
+
+    Each target = (base_url, key value). With `url` given: exactly that
+    endpoint (ad-hoc probe, no credential — a URL we did not configure gets
+    no slot). With `url` omitted: the EFFECTIVE failover chain WITHOUT the
+    primary (env > settings, the same precedence mycore.cli resolves at run
+    time; the primary endpoint is already probed live by the status model
+    panel). An invalid spec answers its parse reason as the detail — the
+    parser never echoes a URL. Key VALUES are read here for one header and
+    never travel further (zero-echo)."""
+    if url is not None:
+        try:
+            parts = urllib.parse.urlsplit(url)
+        except ValueError:
+            return [], "url must be an http(s) endpoint"
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            return [], "url must be an http(s) endpoint with a host"
+        return [(url, "")], None
+    try:
+        cfg = cli.resolve_model_config()
+    except Exception as e:  # noqa: BLE001 — class name only
+        return [], f"model config unavailable: {type(e).__name__}"
+    if not cfg.upstreams and cfg.upstreams_note:
+        return [], f"mycore.upstreams: {cfg.upstreams_note}"
+    return [(base, _probe_key(key_env))
+            for base, key_env, _model in cfg.chain()[1:]], None
 
 
 def collect_setup() -> dict:
@@ -2917,8 +3195,7 @@ def _cron_jobs_path() -> Path:
 def cron_delete(job_id: str) -> tuple[int, dict]:
     """POST /api/cron {action:'del'} — mirrors the CLI `--del` semantics of
     mycore.scheduler exactly: load -> delete_job -> save, unknown id = a plain
-    refusal (404 here, rc 1 there) and NOTHING is written when nothing matched.
-    Create stays natural-language/CLI by design (no `add` action)."""
+    refusal (404 here, rc 1 there) and NOTHING is written when nothing matched."""
     from mycore import scheduler as _scheduler   # noqa: PLC0415 — lazy import
     try:
         jobs = _scheduler.load_jobs(_cron_jobs_path())
@@ -2929,6 +3206,33 @@ def cron_delete(job_id: str) -> tuple[int, dict]:
         sys.stderr.write(f"cron del failed err={type(e).__name__}\n")
         return 500, {"error": f"persist failed: {type(e).__name__}"}
     return 200, {"ok": True, "id": job_id, "count": len(jobs)}
+
+
+def cron_create(name: str, schedule: str, prompt: str,
+                kind: str = "message") -> tuple[int, dict]:
+    """POST /api/cron {action:'create'} — console-side create through the SAME
+    write path as every other entry point (one registry, one grammar):
+    load_jobs -> scheduler.create_job -> save_jobs on `_cron_jobs_path()`
+    (production: default_jobs_path, the file the CLI and the model tool use).
+    `parse_spec` decides the schedule, `create_job` decides name/text/kind —
+    its SpecError maps to 400 with the scheduler's own operator-facing
+    reason, so no second validation grammar exists. The response row comes
+    from `cron_row`, i.e. byte-identical in shape to a GET /api/cron row.
+    `source='command'` marks the structured console/CLI family (SOURCES)."""
+    from mycore import scheduler as _scheduler   # noqa: PLC0415 — lazy import
+    try:
+        jobs = _scheduler.load_jobs(_cron_jobs_path())
+        job = _scheduler.create_job(jobs, schedule, prompt, kind=kind,
+                                    source="command", name=name)
+        _scheduler.save_jobs(_cron_jobs_path(), jobs)
+    except _scheduler.SpecError as e:
+        return 400, {"error": "validation failed", "details": [str(e)]}
+    except OSError as e:  # noqa: BLE001 — type name only, never a path/value
+        sys.stderr.write(f"cron create failed err={type(e).__name__}\n")
+        return 500, {"error": f"persist failed: {type(e).__name__}"}
+    sys.stderr.write(f"cron create ok kind={job.get('kind')} "
+                     f"type={job.get('type')}\n")
+    return 200, {"ok": True, "job": cron_row(job)}
 
 
 # ----------------------------------------------------------------- server ----
@@ -3065,6 +3369,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_openai_chat()
         if path == "/api/cron":
             return self._handle_cron_post()
+        if path == "/api/mycore/upstreams/test":
+            return self._handle_upstreams_test()
         if path == "/api/mission":
             return self._handle_mission_post()
         if path == "/api/service/restart":
@@ -3263,21 +3569,23 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def _handle_cron_post(self) -> None:
-        """POST /api/cron {action:'del', id} — Bearer gate, then the CLI
-        `--del` semantics (404 unknown id, 400 missing/invalid fields). There
-        is deliberately no `add`: jobs are created by natural language (CHAT)
-        or `python3 -m mycore.scheduler --add`."""
+        """POST /api/cron {action:'del', id} | {action:'create', name,
+        schedule, prompt, kind?} — Bearer gate, then either the CLI `--del`
+        semantics (404 unknown id) or `cron_create` (400 on a bad spec/name/
+        size, 200 + the same row shape GET /api/cron serves). Any other
+        action is refused with the allowed set."""
         if not self._require_token():
             return
         doc = self._read_json_body()
         if doc is None:
             return
         action = doc.get("action")
+        if action == "create":
+            return self._cron_create(doc)
         if action != "del":
             return self._json({
                 "error": "validation failed",
-                "details": ["action must be 'del' (create jobs by asking in "
-                            "CHAT or with /cron — no add action here)"]}, 400)
+                "details": ["action must be one of: create | del"]}, 400)
         job_id = doc.get("id")
         if not isinstance(job_id, str) or not job_id.strip():
             return self._json({"error": "validation failed",
@@ -3289,6 +3597,70 @@ class Handler(BaseHTTPRequestHandler):
         else:
             sys.stderr.write(f"cron del ok count={out.get('count')}\n")
         return self._json(out, code)
+
+    def _cron_create(self, doc: dict) -> None:
+        """The create leg: shape/type checks here (all problems reported in
+        one `details` list), grammar/limits inside scheduler.create_job —
+        one source of truth for what a valid job IS."""
+        name = doc.get("name")
+        schedule = doc.get("schedule")
+        prompt = doc.get("prompt")
+        kind = doc.get("kind", "message")
+        details: list[str] = []
+        if not isinstance(name, str) or not name.strip():
+            details.append("name must be a non-empty string")
+        if not isinstance(schedule, str) or not schedule.strip():
+            details.append("schedule must be one of: every 30m | daily 08:00 | "
+                           "weekly mon 08:00 | once 2026-10-26 09:00")
+        if not isinstance(prompt, str) or not prompt.strip():
+            details.append("prompt must be a non-empty string")
+        elif len(prompt) > CRON_PROMPT_MAX:
+            details.append(f"prompt too long (max {CRON_PROMPT_MAX} chars)")
+        if details:
+            return self._json({"error": "validation failed",
+                               "details": details}, 400)
+        # name format / spec grammar / job limits / kind all belong to
+        # scheduler.create_job — one grammar, mapped straight to 400.
+        code, out = cron_create(name.strip(), schedule.strip(), prompt, kind)
+        if code != 200:
+            sys.stderr.write(f"cron create refused rc={code}\n")
+        return self._json(out, code)
+
+    def _handle_upstreams_test(self) -> None:
+        """POST /api/mycore/upstreams/test {url?} — Bearer gate, then ONE 5s
+        probe per configured failover endpoint (or only `url` when given),
+        answered as a bare JSON array [{name, ok, latency_ms, error_class}].
+        `error_class` is an exception class name or 'HTTP <status>' and
+        NOTHING else: never the probed query/userinfo, never a response body,
+        never a key — endpoint credentials resolve inside this frame for one
+        request header and are dropped."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        url = doc.get("url")
+        if url is not None:
+            if not isinstance(url, str) or not url.strip():
+                return self._json({"error": "validation failed",
+                                   "details": ["url must be a non-empty string"]},
+                                  400)
+            if len(url) > UPSTREAM_TEST_URL_MAX:
+                return self._json({"error": "validation failed",
+                                   "details": [f"url too long (max "
+                                               f"{UPSTREAM_TEST_URL_MAX} chars)"]},
+                                  400)
+            url = url.strip()
+        targets, detail = upstream_probe_targets(url)
+        if detail:
+            return self._json({"error": "validation failed",
+                               "details": [detail]}, 400)
+        results = [probe_endpoint(base, key=key) for base, key in targets]
+        # counts only — URL, key and body never enter this line
+        sys.stderr.write("upstream test n=%d ok=%d\n" %
+                         (len(results),
+                          sum(1 for r in results if r.get("ok"))))
+        return self._json(results)
 
     def _handle_mission_post(self) -> None:
         """POST /api/mission {action: start|stop|pause|resume, goal?, id?,
@@ -3603,12 +3975,29 @@ class Handler(BaseHTTPRequestHandler):
                 done {text, stop, iterations, tool_calls} · error {error}.
         `done` always carries the authoritative final text — deltas are only
         a live preview the browser replaces wholesale.
-        """
+
+        Wave 4 (X7): an OPTIONAL `model` field applies the whitelist gate
+        BEFORE anything else runs — unknown id answers 400 with the allowed
+        list verbatim, so the console picker and the TG /model command share
+        one accept/reject rule. A valid id rides into `_run_chat_turn` for
+        that turn only."""
         if not self._require_token():
             return
         doc = self._read_json_body()
         if doc is None:
             return
+        model = doc.get("model")
+        if model is not None:
+            if not isinstance(model, str) or not model.strip():
+                return self._json({"error": "validation failed",
+                                   "details": ["model must be a non-empty string"]},
+                                  400)
+            model = model.strip()
+            allowed = chat_model_whitelist()
+            if model not in allowed:
+                return self._json({"error": "validation failed",
+                                   "details": ["model must be one of: "
+                                               + ", ".join(allowed)]}, 400)
         if doc.get("action") == "clear":
             return self._json({"ok": True, "archived": clear_chat_session()})
         text = doc.get("text")
@@ -3623,7 +4012,7 @@ class Handler(BaseHTTPRequestHandler):
 
         self._sse_start()
         try:
-            ok = self._run_chat_turn(text)
+            ok = self._run_chat_turn(text, model)
         except Exception as e:  # noqa: BLE001 — never leak internals to the stream
             sys.stderr.write(f"chat turn failed err={type(e).__name__}\n")
             self._sse("error", {"error": "internal"})
@@ -3631,10 +4020,15 @@ class Handler(BaseHTTPRequestHandler):
         if not ok:
             return
 
-    def _run_chat_turn(self, text: str) -> bool:
+    def _run_chat_turn(self, text: str, model: str | None = None) -> bool:
         """Drive one turn over the console session and stream its events.
-        Returns False when the client disconnected (observers must stop)."""
+        Returns False when the client disconnected (observers must stop).
+        `model` (X7) is a whitelist member already validated by the caller:
+        only cfg.model moves for THIS turn — endpoint and failover chain stay
+        put, exactly like the TG per-chat override does."""
         cfg = cli.resolve_model_config()
+        if model:
+            cfg.model = model
         path = chat_session_path()
         sess = Session(path)
         history = sess.load()

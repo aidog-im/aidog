@@ -237,6 +237,12 @@ class HealthRegistry:
     def cooling(self, ident: str) -> bool:
         return self.remaining(ident) > 0.0
 
+    def observed(self, ident: str) -> bool:
+        """True when this unit has EVER been noted (a record exists).
+        Distinguishes 'never seen' (honest null upstream) from 'fine right
+        now' — remaining()/cooling() alone cannot (both read 0.0/False)."""
+        return ident in self._state
+
     def note(self, idents: tuple[str, ...] | list[str] | None = None) -> str:
         """Safe-to-log cooling summary: endpoints + slot names, never values.
         `idents` filters to one config's units (describe()); None = all."""

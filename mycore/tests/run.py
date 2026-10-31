@@ -11152,6 +11152,304 @@ def test_mission() -> None:
             os.environ["MYCORE_WD_CHAT"] = saved_wd
 
 
+def test_wave3() -> None:
+    """Wave 3 backend (parity lane beta): X5 upstream connectivity probe,
+    X6 modeltier health block, X9 console cron create, X14 context usage.
+    Loopback probes + throwaway registries only — production settings,
+    secrets and the cron registry are never touched (every seam is restored
+    in a finally, every sentinel swept out of the payloads)."""
+    import io as _io
+    import subprocess as _sp
+    import threading as _threading
+    from http.server import (BaseHTTPRequestHandler as _BHR,
+                             ThreadingHTTPServer as _THSrv)
+    import web.server as ws
+    from mycore import modeltier as _mt
+
+    TMP = Path(tempfile.mkdtemp(prefix="wave3_"))
+    SENT_QUERY = "sk-SENTINEL-QUERYVALUE"
+    SENT_SLOT = "sk-SENTINEL-SLOTVALUE"
+    TOKEN = "wave3-token-0123456789abcdef"
+    _secrets = TMP / "secrets.env"
+    _secrets.write_text(f"WEB_TOKEN={TOKEN}\n", encoding="utf-8")
+
+    def call(handler: str, doc, bearer: str | None = TOKEN):
+        """Run one Handler method in-process (module-surgery pattern): the
+        response lands in a box instead of a socket."""
+        raw = json.dumps(doc).encode() if doc is not None else b""
+        h = ws.Handler.__new__(ws.Handler)
+        h.headers = {"Content-Length": str(len(raw))}
+        if bearer is not None:
+            h.headers["Authorization"] = f"Bearer {bearer}"
+        h.rfile = _io.BytesIO(raw)
+        box: dict = {}
+        h._json = lambda obj, code=200: box.setdefault("res", (code, obj))
+        getattr(h, handler)()
+        return box.get("res")
+
+    class _Probe(_BHR):
+        """Loopback endpoint with knobs (class attrs: status / delay)."""
+        status = 200
+        delay = 0.0
+
+        def do_GET(self):  # noqa: N802
+            if _Probe.delay:
+                time.sleep(_Probe.delay)
+            self.send_response(_Probe.status)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *args):  # noqa: ARG002 — silent test server
+            pass
+
+    srv = _THSrv(("127.0.0.1", 0), _Probe)
+    _threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+    saved = {"secrets": ws.SECRETS, "timeout": ws.UPSTREAM_TEST_TIMEOUT,
+             "targets": ws.upstream_probe_targets,
+             "build": ws.build_system_stack,
+             "session": ws.chat_session_path,
+             "state": os.environ.get("AIDOG_MC_STATE"),
+             "base": os.environ.get("MYCORE_BASE_URL"),
+             "ups": os.environ.get("MYCORE_UPSTREAMS"),
+             "slot": os.environ.get("W3_SLOT_A")}
+    health_was_empty = not _mt.SHARED_HEALTH._state
+    try:
+        ws.SECRETS = _secrets
+
+        # ---------------- X5: probe three states + desensitization --------
+        ws.upstream_probe_targets = lambda url=None: (
+            [(f"http://127.0.0.1:{port}/v1?key={SENT_QUERY}", SENT_SLOT)], None)
+        r = call("_handle_upstreams_test", {})
+        code, rows = r if r else (None, None)
+        row = (rows or [{}])[0] if isinstance(rows, list) else {}
+        check("X5 route: success row {name, ok, latency_ms, error_class}",
+              code == 200 and isinstance(rows, list) and len(rows) == 1
+              and row.get("ok") is True and row.get("error_class") is None
+              and isinstance(row.get("latency_ms"), int)
+              and set(row) == {"name", "ok", "latency_ms", "error_class"},
+              str(r))
+        blob = json.dumps(r)
+        check("X5 route: success payload carries no key/query/body",
+              SENT_QUERY not in blob and SENT_SLOT not in blob
+              and "sk-" not in blob and "?" not in blob
+              and "Authorization" not in blob, blob[:200])
+        _Probe.status = 503
+        r = call("_handle_upstreams_test", {})
+        row = (r[1] or [{}])[0] if isinstance(r[1], list) else {}
+        check("X5 route: HTTP error -> error_class 'HTTP 503', no body",
+              r[0] == 200 and row.get("ok") is False
+              and row.get("error_class") == "HTTP 503"
+              and SENT_QUERY not in json.dumps(r), str(r))
+        _Probe.status, _Probe.delay = 200, 2.0
+        ws.UPSTREAM_TEST_TIMEOUT = 0.3
+        r = call("_handle_upstreams_test", {})
+        row = (r[1] or [{}])[0] if isinstance(r[1], list) else {}
+        check("X5 route: timeout -> ok false + exception class, capped",
+              r[0] == 200 and row.get("ok") is False
+              and isinstance(row.get("error_class"), str)
+              and bool(row["error_class"])
+              and row.get("latency_ms", 10 ** 9) < 2000
+              and SENT_QUERY not in json.dumps(r), str(r))
+        _Probe.delay = 0.0
+        ws.UPSTREAM_TEST_TIMEOUT = saved["timeout"]
+        r = call("_handle_upstreams_test", {}, bearer=None)
+        check("X5 route: no bearer -> 401", r is not None and r[0] == 401,
+              str(r))
+        ws.upstream_probe_targets = saved["targets"]
+        r = call("_handle_upstreams_test", {"url": "ftp://nope"})
+        check("X5 route: non-http ad-hoc url -> 400 with the reason",
+              r is not None and r[0] == 400 and "details" in r[1], str(r))
+        lab = ws.sanitize_endpoint(
+            f"http://user:pass@host.example:8080/v1/{SENT_QUERY}?q=1#frag")
+        check("X5 label: userinfo/query/fragment stripped, long path dropped",
+              lab == "http://host.example:8080/v1"
+              and "pass" not in lab and "sk-" not in lab and "?" not in lab
+              and SENT_QUERY not in lab,
+              lab)
+        os.environ["MYCORE_UPSTREAMS"] = (
+            "https://up-a.example.test/v1|W3_SLOT_A,https://up-b.example.test/v1")
+        os.environ["W3_SLOT_A"] = SENT_SLOT
+        targets, detail = ws.upstream_probe_targets()
+        check("X5 targets: effective chain (env > settings), primary excluded",
+              detail is None and len(targets) == 2
+              and targets[0][0] == "https://up-a.example.test/v1"
+              and targets[1] == ("https://up-b.example.test/v1", "")
+              and targets[0][1] == SENT_SLOT,
+              f"{targets} {detail}")
+        del os.environ["MYCORE_UPSTREAMS"], os.environ["W3_SLOT_A"]
+
+        # ---------------- X6: modeltier health/cooling block ---------------
+        os.environ["MYCORE_BASE_URL"] = "http://127.0.0.1:39999/v1"
+        os.environ["MYCORE_UPSTREAMS"] = (
+            "https://up-a.example.test/v1|W3_SLOT_A,"
+            "https://cold.example.test/v1")
+        blk = ws.collect_modeltier()
+        check("X6: block shape (available/scope/endpoints, primary first)",
+              blk.get("available") is True
+              and blk.get("scope") == "console-process"
+              and isinstance(blk.get("endpoints"), list)
+              and len(blk["endpoints"]) == 3
+              and blk["endpoints"][0].get("primary") is True
+              and set(blk["endpoints"][0]) == {"name", "healthy", "primary"},
+              json.dumps(blk))
+        check("X6: never-observed upstreams report honest null (not false)",
+              all(r.get("healthy") is None for r in blk["endpoints"])
+              and blk.get("cooling") == 0, json.dumps(blk))
+        ident = _mt.HealthRegistry.identity("https://up-a.example.test/v1",
+                                            "W3_SLOT_A")
+        _mt.SHARED_HEALTH.record_failure(ident)
+        _mt.SHARED_HEALTH.record_failure(ident)   # 2nd fail starts cooldown
+        blk = ws.collect_modeltier()
+        row = blk["endpoints"][1]
+        check("X6: cooldown shows healthy=false + cooling_until projection",
+              row.get("healthy") is False and blk.get("cooling") == 1
+              and isinstance(row.get("cooling_until"), float)
+              and row.get("cooling_remaining_s", 0) > 0
+              and "last_error_class" not in row, json.dumps(blk))
+        _mt.SHARED_HEALTH.record_success(ident)
+        blk = ws.collect_modeltier()
+        check("X6: one success clears the endpoint to healthy=true",
+              blk["endpoints"][1].get("healthy") is True
+              and blk.get("cooling") == 0, json.dumps(blk))
+        status = ws.collect_status()
+        check("X6: /api/status carries the modeltier block",
+              isinstance(status.get("modeltier"), dict)
+              and status["modeltier"].get("available") is True
+              and len(status["modeltier"].get("endpoints") or []) == 3,
+              json.dumps(status.get("modeltier"))[:160])
+        sweep = json.dumps(status.get("modeltier")).lower()
+        check("X6: zero key material (no sk-/key/secret in the block)",
+              "sk-" not in sweep and "key" not in sweep
+              and "secret" not in sweep, sweep[:200])
+        del os.environ["MYCORE_BASE_URL"], os.environ["MYCORE_UPSTREAMS"]
+
+        # ---------------- X9: console cron create ---------------------------
+        _state = TMP / "cronstate"
+        _state.mkdir(exist_ok=True)
+        os.environ["AIDOG_MC_STATE"] = str(_state)
+        r = call("_handle_cron_post", {"action": "create",
+                                       "name": "wave3 probe",
+                                       "schedule": "daily 07:45",
+                                       "prompt": "report the overnight state"})
+        job = (r[1] or {}).get("job") if r else None
+        check("X9: create 200 -> {ok, job} row with name + spec",
+              r is not None and r[0] == 200 and r[1].get("ok") is True
+              and isinstance(job, dict) and job.get("name") == "wave3 probe"
+              and job.get("spec") == "daily 07:45" and job.get("kind") == "message"
+              and job.get("source") == "command" and bool(job.get("id")),
+              str(r))
+        job_id = str(job.get("id", ""))
+        listed = ws.collect_cron()
+        check("X9: create row == GET /api/cron row shape (same whitelist)",
+              listed.get("count") == 1
+              and set(listed["jobs"][0]) == set(job)
+              and listed["jobs"][0].get("name") == "wave3 probe",
+              f"{sorted(listed['jobs'][0]) if listed.get('jobs') else listed}")
+        proc = _sp.run([sys.executable, "-m", "mycore.scheduler", "--list",
+                        "--json"], cwd=str(REPO), capture_output=True,
+                       text=True, timeout=60,
+                       env={**os.environ})
+        cli_ids = [j.get("id") for j in json.loads(proc.stdout or "[]")]
+        check("X9: same registry as the CLI (one write path)",
+              proc.returncode == 0 and job_id in cli_ids,
+              f"rc={proc.returncode} ids={cli_ids}")
+        for payload, why in (
+                ({"action": "create", "name": "n", "schedule": "every 30 min",
+                  "prompt": "p"}, "non-spec schedule"),
+                ({"action": "create", "name": " ", "schedule": "daily 07:45",
+                  "prompt": "p"}, "blank name"),
+                ({"action": "create", "name": "a/b", "schedule": "daily 07:45",
+                  "prompt": "p"}, "name with a slash"),
+                ({"action": "create", "name": "n", "schedule": "daily 07:45",
+                  "prompt": "  "}, "blank prompt"),
+                ({"action": "create", "name": "n", "schedule": "daily 07:45",
+                  "prompt": "x" * 4097}, "overlong prompt"),
+                ({"action": "create", "name": "n", "schedule": "daily 07:45",
+                  "prompt": "p", "kind": "nope"}, "unknown kind"),
+                ({"action": "add", "id": "x"}, "unknown action")):
+            r = call("_handle_cron_post", payload)
+            ok = r is not None and r[0] == 400 and bool(r[1].get("details"))
+            if why == "unknown action":
+                ok = ok and "del" in str(r[1].get("details"))
+            check(f"X9: 400 on {why} with a clear detail", ok, str(r))
+        r = call("_handle_cron_post", {"action": "create", "name": "x",
+                                       "schedule": "daily 07:45",
+                                       "prompt": "p"}, bearer=None)
+        check("X9: create without bearer -> 401, registry untouched",
+              r is not None and r[0] == 401
+              and ws.collect_cron().get("count") == 1, str(r))
+        r = call("_handle_cron_post", {"action": "del", "id": job_id})
+        check("X9: del round trip empties the shared registry",
+              r is not None and r[0] == 200 and r[1].get("count") == 0
+              and ws.collect_cron().get("jobs") == [], str(r))
+        if saved["state"] is None:
+            os.environ.pop("AIDOG_MC_STATE", None)
+        else:
+            os.environ["AIDOG_MC_STATE"] = saved["state"]
+
+        # ---------------- X14: context usage --------------------------------
+        ctx = ws.chat_context_usage()
+        check("X14: shape {available, used, system, session, budget, threshold}",
+              set(ctx) == {"available", "used_chars", "system_chars",
+                           "session_chars", "messages", "budget_chars",
+                           "threshold_chars", "compaction_enabled",
+                           "over_budget"}
+              and ctx["available"] is True
+              and isinstance(ctx["used_chars"], int)
+              and isinstance(ctx["budget_chars"], int)
+              and ctx["threshold_chars"] == ctx["budget_chars"]
+              and ctx["compaction_enabled"] is True, json.dumps(ctx))
+        check("X14: used = constitution stack + session (the loop's metric)",
+              ctx["used_chars"] == ctx["system_chars"] + ctx["session_chars"]
+              and ctx["messages"] > 0
+              and isinstance(ctx["over_budget"], bool), json.dumps(ctx))
+        hist = ws.chat_history()
+        check("X14: GET /api/chat/history carries the context block",
+              isinstance(hist.get("context"), dict)
+              and hist["context"].get("available") is True
+              and isinstance(hist.get("count"), int),
+              str(hist.get("context"))[:160])
+        ws.chat_session_path = lambda: TMP / "absent" / "web.jsonl"
+        ctx = ws.chat_context_usage()
+        check("X14: missing session is honest zero, not a fabricated number",
+              ctx["available"] is True and ctx["session_chars"] == 0
+              and ctx["used_chars"] == ctx["system_chars"], json.dumps(ctx))
+        ws.chat_session_path = saved["session"]
+
+        def _boom(**kwargs):
+            raise ValueError("boom")
+
+        ws.build_system_stack = _boom
+        ctx = ws.chat_context_usage()
+        check("X14: read failure -> available:false + class, budget intact",
+              ctx["available"] is False and ctx["used_chars"] is None
+              and "ValueError" in str(ctx.get("note"))
+              and isinstance(ctx["budget_chars"], int), json.dumps(ctx))
+        ws.build_system_stack = saved["build"]
+    finally:
+        _Probe.delay = 0.0
+        _Probe.status = 200
+        srv.shutdown()
+        srv.server_close()
+        ws.SECRETS = saved["secrets"]
+        ws.UPSTREAM_TEST_TIMEOUT = saved["timeout"]
+        ws.upstream_probe_targets = saved["targets"]
+        ws.build_system_stack = saved["build"]
+        ws.chat_session_path = saved["session"]
+        for key, old in (("AIDOG_MC_STATE", saved["state"]),
+                         ("MYCORE_BASE_URL", saved["base"]),
+                         ("MYCORE_UPSTREAMS", saved["ups"]),
+                         ("W3_SLOT_A", saved["slot"])):
+            if old is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old
+        if health_was_empty:
+            _mt.SHARED_HEALTH.reset()
+
+
 def main() -> int:
     test_model()
     test_registry_and_tools()
@@ -11204,6 +11502,7 @@ def main() -> int:
     test_service_media()
     test_profiles()
     test_mission()
+    test_wave3()
     print(f"\n{len(PASS)} pass · {len(FAIL)} fail")
     if FAIL:
         print("failed: " + ", ".join(FAIL))

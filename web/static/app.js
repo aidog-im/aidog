@@ -55,6 +55,7 @@ async function loadLang(lang) {
   settingsRelang();            // rows built by JS keep their pack strings too
   renderExchange();            // venue rows / probe labels follow the language too
   chatBadge(chatBusy);            // badge label follows the active language
+  renderCtx(lastCtx);             // X14: context line label follows too
   refreshEventTexts();
   setView(currentView, false);    // re-resolve the view title in the new language
 }
@@ -1245,6 +1246,11 @@ function renderStatus() {
       <div class="m-detail">${escapeHtml(p.detail || "")}</div>
     </div>`).join("");
 
+  // Wave 3 (X3): the raw status.mycore block — the panels only summarize it.
+  renderMycoreFacts();
+  // Wave 4 (X6): failover health rows in Settings -> Model (shape-hides)
+  renderModeltier();
+
   // memory gauges
   const mem = statusData.memory || {};
   const pct = (v, l) => Math.min(100, Math.round((v / l) * 100));
@@ -1339,6 +1345,198 @@ function fmtCost(cny) {
   return d.sym + n;
 }
 
+/* Wave 3 (X3): status.mycore{service,watchdog} rendered as its own readout
+   under the Services panels — service pid / last event, watchdog liveness /
+   state-file age / per-target verdicts / last sanitized line.
+   Labels use reserved keys whose fallback is the English metric name: the
+   console packs stay frozen at 662 this lane (that number is pinned by the
+   site fact strip and site/llms.txt, neither in this lane's file set), so
+   t() honestly falls back in both locales.
+   Fail-soft by shape: no mycore object, or neither sub-object with a state,
+   hides the whole block — never a guessed state. */
+function renderMycoreFacts() {
+  const box = document.getElementById("mycoreFacts");
+  if (!box) return;
+  const m = statusData && statusData.mycore;
+  const svc = (m && typeof m.service === "object" && m.service) ? m.service : null;
+  const wdf = (m && typeof m.watchdog === "object" && m.watchdog) ? m.watchdog : null;
+  const cell = (key, label, value) =>
+    `<div><div class="k">${escapeHtml(t(key, label))}</div>` +
+    `<div class="v">${escapeHtml(value)}</div></div>`;
+  const out = [];
+  if (svc && svc.state) {
+    const bits = [String(svc.state)];
+    if (svc.pid) bits.push("pid " + svc.pid);
+    if (svc.last_event) {
+      bits.push("last " + String(svc.last_event) +
+        (svc.last_event_at ? " · " + String(svc.last_event_at) : ""));
+    }
+    out.push(cell("myc.svc", "MYCORE SERVICE", bits.join(" · ")));
+  }
+  if (wdf && wdf.state) {
+    const bits = [String(wdf.state), wdf.process ? "process on" : "process off"];
+    if (typeof wdf.age_sec === "number") bits.push("age " + wdf.age_sec + "s");
+    const tg = (wdf.targets && typeof wdf.targets === "object")
+      ? Object.entries(wdf.targets) : [];
+    if (tg.length) bits.push("targets " + tg.map(([k, v]) => k + ":" + v).join(", "));
+    if (wdf.last) bits.push("last " + String(wdf.last).slice(0, 140));
+    out.push(cell("myc.wd", "MYCORE WATCHDOG", bits.join(" · ").slice(0, 400)));
+  }
+  box.innerHTML = out.join("");
+  box.hidden = out.length === 0;
+}
+
+/* ---------------------------------------- Wave 4 lane gamma: X5 + X6 -----
+   Settings -> Model card. X5 = one connectivity probe of the EFFECTIVE
+   failover chain; X6 = the modeltier health/cooling readout from /api/status.
+   Red line: only the server's sanitized `name` and an error CLASS are ever
+   rendered — no URL rewriting, no key material, no response bodies. */
+async function upstreamTest() {
+  const btn = document.getElementById("upTestBtn");
+  const msg = document.getElementById("upTestMsg");
+  const out = document.getElementById("upTestOut");
+  if (!btn || !msg || !out) return;
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    msg.className = "save-state err";
+    msg.textContent = t("cred.needToken", "access token required — set it in Access");
+    return;
+  }
+  btn.disabled = true;                       // loading state until answered
+  msg.className = "save-state";
+  msg.textContent = t("chan.testWorking", "sending…");
+  out.hidden = false;
+  out.textContent = "";
+  try {
+    const res = await fetch("/api/mycore/upstreams/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: "{}" });
+    let body = null;
+    try { body = await res.json(); } catch (e) { body = null; }
+    if (!res.ok) {
+      const details = (body && Array.isArray(body.details)) ? body.details : [];
+      msg.className = "save-state err";
+      msg.textContent = res.status + " · " +
+        (details.length ? details[0]
+          : ((body && body.error) || t("myc.testFail", "test failed")));
+      return;
+    }
+    if (!Array.isArray(body)) {
+      msg.className = "save-state err";
+      msg.textContent = t("myc.testBadBody", "unexpected answer — honest failure");
+      return;
+    }
+    msg.className = "save-state";
+    msg.textContent = "";
+    if (!body.length) {
+      const note = document.createElement("div");
+      note.className = "stat-note test-note";
+      note.textContent = t("myc.noChain",
+        "no active failover chain — add endpoints in Failover upstreams above");
+      out.appendChild(note);
+      return;
+    }
+    body.forEach(r => {
+      const row = (r && typeof r === "object") ? r : {};
+      const ok = row.ok === true;
+      const name = String(row.name || "endpoint");
+      const tail = ok
+        ? (Number.isFinite(Number(row.latency_ms))
+            ? Math.round(Number(row.latency_ms)) + "ms" : "—")
+        : String(row.error_class || "failed");
+      const el = document.createElement("div");
+      el.className = "test-row " + (ok ? "ok" : "bad");
+      el.textContent = (ok ? "✓ " : "✗ ") + name + " · " + tail;
+      out.appendChild(el);
+    });
+  } catch (e) {
+    // network failure stays an honest error line, never a guessed result
+    msg.className = "save-state err";
+    msg.textContent = t("myc.testNet", "request failed — ") +
+      String((e && e.message) || e).slice(0, 80);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* X6 rows from statusData.modeltier (Wave 3 beta contract): tri-state by
+   design — true = observed & not cooling, false = cooling now (with a live
+   countdown), null = never observed in this process. available:false or an
+   absent block hides the whole box: an honest absence, never a guess. */
+function renderModeltier() {
+  const box = document.getElementById("modeltierBox");
+  if (!box) return;
+  const mt = statusData && statusData.modeltier;
+  const rows = (mt && typeof mt === "object" && Array.isArray(mt.endpoints))
+    ? mt.endpoints : [];
+  if (!mt || typeof mt !== "object" || mt.available !== true || !rows.length) {
+    box.hidden = true;
+    box.textContent = "";
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  const head = document.createElement("div");
+  head.className = "mt-head";
+  head.textContent = t("myc.tierHead", "failover health");
+  frag.appendChild(head);
+  rows.forEach(r => {
+    const row = (r && typeof r === "object") ? r : {};
+    const el = document.createElement("div");
+    el.className = "mt-row";
+    const name = document.createElement("span");
+    name.className = "mt-name";
+    name.textContent = String(row.name || "endpoint");
+    el.appendChild(name);
+    const state = document.createElement("span");
+    const healthy = row.healthy;
+    if (healthy === true) {
+      state.className = "mt-state ok";
+      state.textContent = t("myc.tierOk", "healthy ✓");
+    } else if (healthy === false) {
+      state.className = "mt-state bad";
+      const rem = Number(row.cooling_remaining_s);
+      const pattern = t("myc.tierCool", "cooling {s}s");
+      if (Number.isFinite(rem) && rem > 0) {
+        state.dataset.coolPattern = pattern;
+        state.dataset.coolUntil = String(Date.now() + rem * 1000);
+        state.textContent = pattern.replace("{s}", String(Math.ceil(rem)));
+      } else {
+        state.textContent = t("myc.tierCoolNow", "cooling");
+      }
+    } else {
+      state.className = "mt-state unknown";
+      state.textContent = t("myc.tierUnk", "not observed yet");
+    }
+    el.appendChild(state);
+    if (row.primary === true) {
+      const p = document.createElement("span");
+      p.className = "mt-primary";
+      p.textContent = t("myc.tierPrimary", "PRIMARY");
+      el.appendChild(p);
+    }
+    frag.appendChild(el);
+  });
+  box.textContent = "";
+  box.appendChild(frag);
+  box.hidden = false;
+}
+
+function tickModeltier() {
+  /* 1s countdown for cooling rows; the server stays the source of truth
+     (each status repaint re-projects the remainder from its own clock). */
+  const box = document.getElementById("modeltierBox");
+  if (!box || box.hidden) return;
+  box.querySelectorAll("[data-cool-until]").forEach(el => {
+    const until = Number(el.dataset.coolUntil);
+    if (!Number.isFinite(until)) return;
+    const left = Math.max(0, Math.ceil((until - Date.now()) / 1000));
+    el.textContent = String(el.dataset.coolPattern || "cooling {s}s")
+      .replace("{s}", String(left));
+  });
+}
+
 function renderUsage() {
   if (!usageData) return;
   document.getElementById("usageLive").hidden = !usageData.available;
@@ -1350,21 +1548,48 @@ function renderUsage() {
     unitEl.textContent = (d.code === "CNY" ? t("usage.unitCny", "CNY TODAY")
                                            : t("usage.unit", "{c} TODAY").replace("{c}", d.code));
   };
+  const st = (k, v) => `<div><div class="k">${escapeHtml(t(k[0], k[1]))}</div><div class="v">${escapeHtml(v)}</div></div>`;
+  /* Wave 3 (X4): the eight-key `pool` block of /api/usage (metrics source),
+     seven of which the card never showed. Reserved label keys with English
+     fallback (packs frozen at 662 this lane — see renderMycoreFacts). Each
+     chip hides itself when its value is null/absent; no `pool` object at all
+     = no pool chips (honest shape-hide, never an invented 0). The ACTIVE
+     KEYS chip travels here too, so the classic row keeps its fourth chip and
+     the card never shows it twice. */
+  const chip = (key, label, raw) => {
+    if (raw === null || raw === undefined || raw === "") return "";
+    if (typeof raw === "number" && !isFinite(raw)) return "";
+    return st([key, label], typeof raw === "number"
+      ? raw.toLocaleString("en-US") : String(raw));
+  };
+  const poolChips = () => {
+    const p = usageData.pool;
+    if (!p || typeof p !== "object") return "";
+    return chip("usage.pool", "ACTIVE KEYS", p.keys_active) +
+      chip("usage.queue", "QUEUE DEPTH", p.queue_depth) +
+      chip("usage.accounts", "ACCOUNTS", p.accounts_total) +
+      chip("usage.reqTotal", "REQUESTS TOTAL", p.requests_total) +
+      chip("usage.inTok", "INPUT TOKENS", p.input_tokens) +
+      chip("usage.outTok", "OUTPUT TOKENS", p.output_tokens) +
+      chip("usage.healthMin", "HEALTH MIN", p.health_min) +
+      chip("usage.healthAvg", "HEALTH AVG", p.health_avg);
+  };
   if (!today) {
     document.getElementById("costVal").textContent = "—";
     setUnit();
-    document.getElementById("usageStats").innerHTML = "";
+    // no daily log today — the pool is an independent source, so its chips
+    // still render (X4); the note keeps saying the *usage* source is down.
+    document.getElementById("usageStats").innerHTML = poolChips();
     document.getElementById("usageNote").textContent = t("usage.off", "usage source unavailable");
     return;
   }
   document.getElementById("costVal").textContent = fmtCost(today.cost);
   setUnit();
-  const st = (k, v) => `<div><div class="k">${escapeHtml(t(k[0], k[1]))}</div><div class="v">${escapeHtml(v)}</div></div>`;
   document.getElementById("usageStats").innerHTML =
     st(["usage.req", "REQUESTS"], String(today.requests)) +
     st(["usage.err", "ERRORS"], `${today.errors} (${today.requests ? Math.round(today.errors / today.requests * 100) : 0}%)`) +
     st(["usage.avg", "AVG LATENCY"], (today.avg_ms / 1000).toFixed(1) + "s") +
-    st(["usage.pool", "ACTIVE KEYS"], String(usageData.pool ? usageData.pool.keys_active : "—"));
+    poolChips();
   const numOf = (cny) => {   // vs7 puts the symbol separately via {s}
     const v = cny / d.rate;
     return v >= 100 ? Math.round(v).toLocaleString()
@@ -1725,11 +1950,89 @@ function chatProgress(data) {
 async function loadChatHistory() {
   try {
     const h = await fetch("/api/chat/history").then(r => r.json());
+    renderCtx(h.context);         // X14: context line rides the same fetch
     const msgs = (h.messages || []).slice(-40);
     if (!msgs.length) return;
     document.getElementById("chatEmpty")?.remove();
     for (const m of msgs) chatBubble(m.role, m.content);
   } catch (e) { /* empty state stays */ }
+}
+
+/* ------------------------------------ Wave 4 X7 + X14: chat card wiring ----
+   X7 picker: options = settings.mycore.models — the SAME document the
+   server gate and the TG /model pipeline read. Empty list = one honest
+   "default" row; value "" means the turn carries no model override.
+   X14 context line: renders GET /api/chat/history.context — a null counter
+   is NEVER drawn as 0, and available:false says so next to the budget. */
+function chatModelOptions() {
+  const sel = document.getElementById("chatModel");
+  if (!sel) return;
+  const prev = sel.value;
+  sel.textContent = "";
+  const def = document.createElement("option");
+  def.value = "";
+  def.setAttribute("data-i18n", "chat.modelDefault");
+  def.textContent = t("chat.modelDefault", "default model");
+  sel.appendChild(def);
+  const mc = (settings && typeof settings === "object" &&
+              settings.mycore && typeof settings.mycore === "object")
+    ? settings.mycore : {};
+  const models = Array.isArray(mc.models) ? mc.models : [];
+  models.forEach(m => {
+    if (typeof m !== "string" || !m) return;
+    const o = document.createElement("option");
+    o.value = m;
+    o.textContent = m;
+    sel.appendChild(o);
+  });
+  sel.value = Array.from(sel.options).some(o => o.value === prev) ? prev : "";
+}
+
+let lastCtx = null;   // latest history.context payload (repaints on relang)
+
+function fmtChars(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v) || v < 0) return "?";
+  if (v < 1000) return String(Math.round(v));
+  return (Math.round((v / 1000) * 10) / 10).toFixed(1)
+    .replace(/\.0$/, "") + "k";
+}
+
+function renderCtx(ctx) {
+  const el = document.getElementById("ctxMeta");
+  if (!el) return;
+  lastCtx = (ctx && typeof ctx === "object") ? ctx : null;
+  if (!lastCtx) {
+    el.hidden = true;
+    el.textContent = "";
+    return;
+  }
+  const lbl = t("chat.ctxLbl", "context");
+  el.classList.remove("ctx-over");
+  const bud = typeof lastCtx.budget_chars === "number"
+    ? fmtChars(lastCtx.budget_chars) : null;
+  if (lastCtx.available !== true || typeof lastCtx.used_chars !== "number") {
+    // honest degradation: budget stays, usage says it is unavailable now
+    el.textContent = lbl + (bud ? " " + bud + " ·" : "") + " " +
+      t("chat.ctxUnavail", "usage not available right now");
+    el.hidden = false;
+    return;
+  }
+  let text = lbl + " " + fmtChars(lastCtx.used_chars) + " / " +
+    (bud || "?");
+  if (lastCtx.over_budget === true) {
+    el.classList.add("ctx-over");
+    text += " · " + t("chat.ctxOver", "over budget");
+  }
+  el.textContent = text;
+  el.hidden = false;
+}
+
+async function refreshCtx() {
+  try {
+    const h = await fetch("/api/chat/history").then(r => r.json());
+    renderCtx(h && h.context);
+  } catch (e) { /* keep the last honest reading */ }
 }
 
 function chatSend() {
@@ -1785,11 +2088,13 @@ async function chatTurn(text) {
   };
   const token = localStorage.getItem(TOKEN_KEY) || "";
   try {
+    // X7: the picker's value rides THIS turn; "" (default) carries nothing
+    const model = ((document.getElementById("chatModel") || {}).value || "").trim();
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json",
                  "Authorization": "Bearer " + token },
-      body: JSON.stringify({ text }) });
+      body: JSON.stringify(model ? { text, model } : { text }) });
     if (!res.ok) {                       // 401/400 answered before the stream
       const body = await res.json().catch(() => ({}));
       chatNote("err", res.status === 401
@@ -1831,6 +2136,7 @@ async function chatTurn(text) {
   } finally {
     bubble.classList.remove("pending");
     chatProgressClear();
+    refreshCtx();                  // X14: usage follows the finished turn
     chatBusy = false;
     input.focus();
     chatBadge(false);
@@ -2080,6 +2386,7 @@ async function loadSettings() {
     }
     if (!settings.language) settings.language = document.documentElement.lang;
   } catch (e) { /* defaults stand */ }
+  chatModelOptions();   // X7 picker follows whatever resolved (default at minimum)
   const tok = localStorage.getItem(TOKEN_KEY);
   if (tok) document.getElementById("tokenInput").value = "";
 }
@@ -2223,8 +2530,12 @@ async function saveSettings() {
        never to a fake state;
      - only blocks the operator actually edited join the save payload;
        the legacy 16-key payload above is built exactly as before. */
+/* Server event ids: data, never translated. Kept in lockstep with
+   mycore/hooks.py::EVENTS (7 events — mission_tick landed in the server in
+   car 3; the editor array only ever held six, so the 7th event was API-only
+   until Wave 3 lane α / X1). */
 const HOOK_EVENTS = ["turn_start", "turn_end", "tool_call", "compact",
-                     "cron_fire", "error"];
+                     "cron_fire", "error", "mission_tick"];
 /* JS mirror of web/server.py::_CHANNEL_SCHEMA (9 routes): [field, kind]
    kinds: bool = checkbox · list = comma-separated strings ·
           port = integer 1..65535 · str = single-line string */
@@ -2263,6 +2574,7 @@ const CRED_HINTS = {
 let credsData = null;      // last GET /api/secrets payload (names/lengths only)
 let credHintReason = "";   // "" | unavailable | readOnly | needToken
 let chanStatusRows = [];   // GET /api/channels rows (name/enabled/configured/note)
+let chanWebhookMeta = null;   // X8: top-level .webhook {url, secret_configured}
 let chanDirty = false, usageDirty = false, mycDirty = false, toolsDirty = false;
 // activation car: only the keys the chat service reads AT START raise this
 // flag (tools_off / mcp / shell / context_dirs) — a models/budget edit must
@@ -2634,6 +2946,13 @@ function renderChannels() {
     blk.appendChild(note);
     CHAN_SCHEMA[route].forEach(([key, kind]) =>
       blk.appendChild(chanField(key, kind, sub[key])));
+    if (route === "webhook") {
+      // X8: endpoint hint line (plain note, never a form label/field)
+      const ep = document.createElement("div");
+      ep.className = "stat-note chan-webhook";
+      ep.hidden = true;
+      blk.appendChild(ep);
+    }
     list.appendChild(blk);
   });
   paintChanChips();
@@ -2656,6 +2975,32 @@ function paintChanChips() {
     chip.title = row.note ? String(row.note) : "";   // server note, verbatim
   });
   paintInboundNotes();
+  paintWebhookHint();
+}
+
+/* Wave 4 (X8): the INBOUND webhook endpoint hint on the webhook route row —
+   read-only address + one line of usage. The secret VALUE never renders
+   (slot name CHANNEL_WEBHOOK_SECRET only); an absent/unset slot reads as an
+   honest disabled note. Shape-hide: no .webhook facts = nothing shown. */
+function paintWebhookHint() {
+  const el = document.querySelector("#chanList .chan-webhook");
+  if (!el) return;
+  const m = chanWebhookMeta;
+  if (!m || typeof m.url !== "string" || !m.url) {
+    el.hidden = true;
+    el.textContent = "";
+    return;
+  }
+  const head = t("chan.webhookEp", "inbound endpoint: ") + m.url;
+  const tail = m.secret_configured === true
+    ? t("chan.webhookOn",
+        "auth: Authorization Bearer header carrying the CHANNEL_WEBHOOK_SECRET " +
+        "value (never shown here)")
+    : t("chan.webhookOff",
+        "inbound disabled — set the CHANNEL_WEBHOOK_SECRET slot in secrets.env " +
+        "to enable");
+  el.textContent = head + " · " + tail;
+  el.hidden = false;
 }
 
 /* Lane N (E3): channel-row inbound poll-health note. Shape-hide discipline —
@@ -2714,7 +3059,10 @@ async function loadChanStatus() {
   try {
     const body = await fetch("/api/channels").then(r => r.json());
     chanStatusRows = (body && Array.isArray(body.channels)) ? body.channels : [];
-  } catch (e) { chanStatusRows = []; }
+    // X8: read-only endpoint facts ride the same fetch; absent = shape-hide
+    chanWebhookMeta = (body && typeof body.webhook === "object" && body.webhook)
+      ? body.webhook : null;
+  } catch (e) { chanStatusRows = []; chanWebhookMeta = null; }
   paintChanChips();
   renderOrch();                 // Lane I: channel count rides this fetch
 }
@@ -3419,6 +3767,7 @@ function renderCronList() {
     const spec = String(job.spec || "");
     const title = String(job.text || spec);
     const meta = [];
+    if (job.name) meta.push(String(job.name));   // X9: create-form label rides the row
     if (spec && job.text) meta.push(spec);
     if (job.origin !== null && job.origin !== undefined && job.origin !== "") {
       meta.push(t("cron.origin", "origin {v}").replace("{v}", String(job.origin)));
@@ -3440,6 +3789,70 @@ function renderCronList() {
       del +
       `</div>`;
   }).join("");
+}
+
+/* Wave 4 (X9): structured cron create — POST /api/cron {action:"create"}.
+   The SAME registry/grammar as the NL/CLI paths, so one source of truth:
+   a refusal renders the server's details[0] VERBATIM, a success takes the
+   returned row (byte-identical to a GET row) straight into the list. The
+   natural-language hint above stays — both creation paths coexist. */
+async function cronCreate() {
+  const btn = document.getElementById("cronCreateBtn");
+  const msg = document.getElementById("cronCreateMsg");
+  if (!btn || !msg) return;
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    msg.className = "save-state err";
+    msg.textContent = t("cred.needToken", "access token required — set it in Access");
+    return;
+  }
+  const val = id => (((document.getElementById(id) || {}).value) || "");
+  const payload = {
+    action: "create",
+    name: val("cronName").trim(),
+    schedule: val("cronSpec").trim(),
+    prompt: val("cronPrompt"),
+  };
+  btn.disabled = true;
+  msg.className = "save-state";
+  msg.textContent = t("cron.creating", "creating…");
+  try {
+    const res = await fetch("/api/cron", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify(payload) });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const details = Array.isArray(body.details) ? body.details : [];
+      msg.className = "save-state err";
+      msg.textContent = details[0] || body.error || ("HTTP " + res.status);
+      return;
+    }
+    const job = body.job;
+    if (job && typeof job === "object") {
+      if (!cronData || typeof cronData !== "object" ||
+          !Array.isArray(cronData.jobs)) cronData = { jobs: [], count: 0 };
+      cronData.jobs.push(job);
+      cronData.count = cronData.jobs.length;
+      renderCronList();
+    } else {
+      refreshCron();                  // shape surprise: re-read, never guess
+    }
+    const set = (id, v) => {
+      const el = document.getElementById(id);
+      if (el) el.value = v;
+    };
+    set("cronName", ""); set("cronSpec", ""); set("cronPrompt", "");
+    msg.className = "save-state";
+    msg.textContent = t("cron.created", "created ✓");
+  } catch (e) {
+    msg.className = "save-state err";
+    msg.textContent = t("cron.fail", "request failed — ") +
+      String((e && e.message) || e).slice(0, 80);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 /* ------------------------------------ activation & operations (0.5.40) --
@@ -4891,6 +5304,17 @@ const updApplyEl = document.getElementById("updateApplyBtn");
 if (updApplyEl) updApplyEl.addEventListener("click", updateApply);
 const doctorRunEl = document.getElementById("doctorRunBtn");
 if (doctorRunEl) doctorRunEl.addEventListener("click", doctorRun);
+/* Wave 4: X5 endpoint test button + X9 cron create (form + Enter keys) */
+const upTestBtnEl = document.getElementById("upTestBtn");
+if (upTestBtnEl) upTestBtnEl.addEventListener("click", upstreamTest);
+const cronCreateEl = document.getElementById("cronCreateBtn");
+if (cronCreateEl) cronCreateEl.addEventListener("click", cronCreate);
+["cronName", "cronSpec", "cronPrompt"].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener("keydown", e => {
+    if (e.key === "Enter") { e.preventDefault(); cronCreate(); }
+  });
+});
 const cronListDelEl = document.getElementById("cronList");
 if (cronListDelEl) cronListDelEl.addEventListener("click", e => {
   const btn = e.target.closest("#cronDelBtn, [data-job]");
@@ -5029,6 +5453,7 @@ refreshVoiceCap();   // engine status visible before the first orb tap (#4)
 refreshCaps();       // media face: stt/image presence for the chat cards
 renderExchange();    // exchange panel paints its honest fallback at once
 setInterval(tickClock, 1000); tickClock();
+setInterval(tickModeltier, 1000);   // X6 cooling countdown (hidden = no-op)
 setInterval(refreshUsage, 60000);
 setInterval(refreshEvolution, 60000);
 setInterval(refreshEvents, 10000);

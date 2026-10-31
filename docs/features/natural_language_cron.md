@@ -88,9 +88,11 @@ delivery but never duplicates one.
   `MYCORE_WD_CHAT` / log-only).
 - **Console**: Overview `#cronList` renders the registry (read-only rows);
   since 0.5.40 each row carries `#cronDelBtn` — confirm → `POST /api/cron
-  {action:"del", id}` → the list refreshes and the row disappears. There is
-  deliberately **no `add` action**: creation stays natural-language/CLI/
-  Telegram (the 400 refusal says so), mirroring the CLI `--del` semantics
+  {action:"del", id}` → the list refreshes and the row disappears. Since
+  0.5.50 the Console also has a create form → `POST /api/cron
+  {action:"create", name, schedule, prompt}` (shared registry with the
+  natural-language/CLI/Telegram paths, which remain unchanged), mirroring
+  the CLI `--del` semantics
   exactly (unknown id → 404, nothing written when nothing matched).
 - **CLI/ops**: `python3 -m mycore.scheduler [--list | --add SPEC --text … |
   --del ID] [--json]` (exit 0/1/2, evolution parity) — also how the E2E
@@ -128,7 +130,7 @@ line, detail to the log only). Dry-run evaluates + marks + logs, never sends.
   from the console — Overview `#cronList` renders `GET /api/cron`
   (id/spec/text/origin/next/due, fixed field whitelist so no absolute path
   can enter the payload; absent/corrupt file → `count: 0`). Creation stays
-  natural-language/CLI/Telegram by design — there is still no create button.
+  natural-language/CLI/Telegram paths remain — the console form is an addition, not a replacement.
   Evidence: `tmp/e2e_frontend_coverage.py` `L6` (seed → count/fields → CLI
   delete) and `tmp/e2e_frontend_ui.js` `U5` (list renders).
 - **Delete button (activation car, 0.5.40)**: per-row `#cronDelBtn` + the

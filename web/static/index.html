@@ -178,6 +178,9 @@
           <h2><span data-i18n="sec.services">Services</span>
               <span class="svc-summary" id="svcSummary">–</span></h2>
           <div class="panel-row" id="panels"></div>
+          <!-- Wave 3 (X3): raw status.mycore{service,watchdog} readout;
+               app.js hides it entirely when the fields are absent. -->
+          <div class="stat-grid" id="mycoreFacts" hidden></div>
         </div>
 
         <div class="card span-2">
@@ -250,6 +253,23 @@
             <span class="save-state" id="cronMsg" role="status"></span>
           </div>
           <div class="stat-note" data-i18n="cron.createHint" style="margin-top:0;">create a job by asking in chat or sending /cron in Telegram</div>
+          <!-- Wave 4 (X9): structured create — the NL path above stays -->
+          <div class="cron-create" id="cronCreate">
+            <input type="text" id="cronName" maxlength="64" autocomplete="off"
+                   aria-label="cron name"
+                   data-i18n-ph="cron.namePh" placeholder="name (list label, no slash)">
+            <input type="text" id="cronSpec" maxlength="120" autocomplete="off"
+                   spellcheck="false" aria-label="cron schedule"
+                   placeholder="every 30m | daily 08:00 | weekly mon 08:00 | once 2026-10-26 09:00">
+            <input type="text" id="cronPrompt" maxlength="4000" autocomplete="off"
+                   aria-label="cron message"
+                   data-i18n-ph="cron.promptPh" placeholder="message sent when the job fires">
+            <div class="ctl-actions">
+              <button class="btn primary" id="cronCreateBtn" type="button"
+                      data-i18n="cron.createBtn">CREATE</button>
+              <span class="save-state" id="cronCreateMsg" role="status"></span>
+            </div>
+          </div>
           <div id="cronList"></div>
           <div class="stat-note" data-i18n="cron.hint">delete a job with × on its row</div>
         </div>
@@ -328,6 +348,7 @@
           <div class="chat-empty" id="chatEmpty" data-i18n="chat.empty">no messages yet</div>
         </div>
         <div class="chat-form">
+          <select id="chatModel" class="chat-model" aria-label="chat model"></select>
           <input id="chatInput" class="chat-input" maxlength="4000" autocomplete="off"
                  data-i18n-ph="chat.ph" placeholder="ask the assistant…">
           <button class="btn primary" id="chatSend" data-i18n="chat.send">SEND</button>
@@ -335,6 +356,7 @@
           <span class="chat-msg" id="chatMsg" role="status"></span>
         </div>
         <div class="chat-meta" id="chatMeta"></div>
+        <div class="chat-meta" id="ctxMeta" hidden></div>
       </section>
 
       <!-- media face (car 4c): voice session (wake phrase -> command -> spoken
@@ -657,6 +679,14 @@
             <input type="text" id="mycUpstreams" maxlength="1024" autocomplete="off"
                    spellcheck="false" placeholder="url[|key_env[|model]], …">
           </div>
+          <!-- Wave 4 gamma: X5 connectivity test + X6 failover health -->
+          <div class="ctl-actions">
+            <button class="btn" id="upTestBtn" type="button"
+                    data-i18n="myc.testBtn">TEST ENDPOINTS</button>
+            <span class="save-state" id="upTestMsg" role="status"></span>
+          </div>
+          <div id="upTestOut" class="test-out" hidden></div>
+          <div id="modeltierBox" class="stat-note mt-box" hidden></div>
           <div class="ctl-row">
             <label data-i18n="ctl.mycShell">Terminal backend</label>
             <input type="text" id="mycShell" maxlength="256" autocomplete="off"
@@ -942,6 +972,11 @@
 
     <footer>
       <span class="brand-line">您的忠实AI伙伴 · Your loyal AI companion</span>
+      <!-- X19: the console's documentation entry (the upstream /docs gap) —
+           one honest deep link to the public docs site, same bilingual style
+           as the neighbouring brand line. -->
+      <a class="foot-docs" id="footDocs" href="https://aidog.im/"
+         target="_blank" rel="noopener noreferrer">文档 · Docs</a>
       <span id="footnote">loopback · free forever</span>
       <span id="ts">–</span>
     </footer>

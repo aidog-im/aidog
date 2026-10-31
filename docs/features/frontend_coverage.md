@@ -47,7 +47,7 @@ value appears in any payload, DOM, log or failure detail.
 | mcp | env `MYCORE_MCP` > settings `mycore.mcp` (JSON array ≤4000, `$SLOT` references) | **configurable** — Settings `#mycMcp` textarea | `L3` (write → `capabilities.mycore.mcp_servers.names`) | Server config never carries a credential value — slot names only |
 | memory_and_routing | env `AIDOG_MEMORY_HOME/SRC` `AIDOG_SKILL_DIRS` · `deploy/memory_sources.local` · CLI `./aidog export\|import\|list` | **read-only** — memory gauges + skill gallery unchanged; `#capGrid` now adds the skill count | `U5` (skill-count row) · gates: `tests/skill_route_p4.py`, `tests/memory_persist_p4.py` | Budgets/console export UI is still an open checkbox in that page — this car did not claim it |
 | model_failover | env `MYCORE_UPSTREAMS` > settings `mycore.upstreams` · `key_env` slot names | **configurable** — Settings `#mycUpstreams` (grammar-validated) | `L3` (write → `upstreams_configured`) · `U1` (save payload) · `tmp/e2e_activation.py` `L8` (key: env wins → slot fallback → placeholder) | Per-key cooldown state is still not rendered (documented, honest); a `key_env` slot value finally reaches the client (0.5.40 fix) |
-| natural_language_cron | state `<state>/cron_jobs.json` · CLI `python3 -m mycore.scheduler` · TG `/cron` · model tool `cron` | **read-only list + delete** — Overview `#cronList` from `GET /api/cron`; 0.5.40 adds a per-row `#cronDelBtn` (confirm → `POST /api/cron {action:"del"}`) | `L6` (seed → count/fields → CLI delete) · `tmp/e2e_activation.py` `L7` (console del → count 0 → 404 → no `add`) · `U5` (list renders) · `tmp/e2e_activation_ui.js` `U5` (row disappears) | Job **creation** stays natural-language/CLI/TG by design — still no create button |
+| natural_language_cron | state `<state>/cron_jobs.json` · CLI `python3 -m mycore.scheduler` · TG `/cron` · model tool `cron` | **list + create + delete** — Overview `#cronList` from `GET /api/cron`; 0.5.40 adds a per-row `#cronDelBtn` (confirm → `POST /api/cron {action:"del"}`); 0.5.50 adds the cron create form (`POST /api/cron {action:"create"}`) | `L6` (seed → count/fields → CLI delete) · `tmp/e2e_activation.py` `L7` (console del → count 0 → 404 → no `add`) · `U5` (list renders) · `tmp/e2e_activation_ui.js` `U5` (row disappears) | Job **creation** stays natural-language/CLI/TG by design — still no create button |
 | openai_api_server | slot `OPENAI_API_TOKEN` (own line, independent of `WEB_TOKEN`) | **configurable (credential)** — `gateway` group row in the credential editor; 503/401 semantics unchanged | `L1` (slot listed + roundtrip) · `U2` (editor) | Gateway behavior itself is not a settings surface |
 | profiles | env `AIDOG_PROFILE` `AIDOG_PROFILES_DIR` `AIDOG_MC_STATE` · CLI `aidog profile …` | **read-only** — profile name appended to the status line (unchanged) | not re-exercised by this car · `tests/profile_f.py`, `tmp/e2e_car_f.py` | Runtime path seam resolves at launch — a console switch would fork state |
 | subagents | settings `mycore.models` (same whitelist as `/model`) · `delegate` tool | **configurable** — Settings `#mycModels` comma list (0.5.40, schema-validated ≤32 ids); the per-turn model choice stays in the picker/CLI | `tmp/e2e_activation.py` `L2` · `tmp/e2e_activation_ui.js` `U6` | Previously listed as "designed elsewhere" — the list itself is console-managed now |
@@ -144,7 +144,7 @@ Everything below is additive; the security contract of §3 is unchanged
 | `POST /api/update/apply` | `Bearer WEB_TOKEN` | **202** `{ok,queued}` — `deploy/aidog_update.py apply` queued as a DETACHED child, output appended to `data/update_apply.log`; the console may die mid-apply (that is the design); the body is drained, never logged; the E2E only proves the 401 gate (apply is a release-time operation) |
 | `GET /api/version?fresh=1` | loopback | same payload as the cached read, 300s cache bypassed for the CHECK button |
 | `POST /api/doctor/run` | `Bearer WEB_TOKEN` | 200 `{checks, fail, warn, summary, rc, lines[:80]}` — doctor's own `N checks · X FAIL · Y WARN` line parsed verbatim; a non-zero exit is still 200 (FAIL/WARN are honest output, not an error); 504 on the 60s cap |
-| `POST /api/cron {action:"del", id}` | `Bearer WEB_TOKEN` | 200 `{ok,id,count}` · **404** unknown id · **400** (only `del` — there is deliberately **no `add`**: creation stays natural-language/CLI/Telegram) · 401 |
+| `POST /api/cron {action:"del", id}` | `Bearer WEB_TOKEN` | 200 `{ok,id,count}` · **404** unknown id · **400** (bad `action` or invalid create fields; creation is available as `create` since 0.5.50 — natural-language/CLI/Telegram paths unchanged) · 401 |
 
 **Schema + bug fixes**
 
@@ -255,7 +255,7 @@ the restart handler logs a tmux session name and a return code only.
   pre-existing control, U4 no token/slot value in the DOM or any input
   value, U5 zero `pageerror`, U6 production console health. Run:
   `PW_PATH=<playwright node path> node tmp/e2e_settings_matrix_ui.js`.
-- Standing gates (after the mission car): `mycore/tests/run.py` **1498** ·
+- Standing gates (after the mission car): `mycore/tests/run.py` **1529** ·
   `tests/web_console_p3.py` **234** · `tests/source_lang_check.py` **0/67**
   (locale packs **662/662**). The 0.5.39 baseline of this page was
   1168 · 197 · 480/480.
