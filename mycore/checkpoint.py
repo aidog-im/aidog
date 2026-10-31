@@ -29,13 +29,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import re
 import threading
 import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+from lib import profile_paths as pp  # noqa: E402  (car F: profile state seam)
 
 STATE_DIR_NAME = "checkpoints"     # under the service state dir
 INDEX_NAME = "index.jsonl"
@@ -53,12 +53,10 @@ class CheckpointError(Exception):
 
 
 def default_state_dir() -> Path:
-    """Same rule as the cron registry: env AIDOG_MC_STATE, else the repo's
-    gitignored runtime state dir (resolved at call time, never at import)."""
-    env = os.environ.get("AIDOG_MC_STATE", "").strip()
-    if env:
-        return Path(env)
-    return REPO / "data" / "mycore_service"
+    """Same rule as the cron registry: env AIDOG_MC_STATE > <profile>/state >
+    the repo's gitignored runtime state dir (resolved at call time, never at
+    import — the profile seam owns the whole precedence)."""
+    return pp.state_dir(REPO)
 
 
 def store_dir(state_dir: str | Path | None = None) -> Path:

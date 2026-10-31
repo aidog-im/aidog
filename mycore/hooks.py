@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Callable
 
 REPO = Path(__file__).resolve().parent.parent
+from lib import profile_paths as pp  # noqa: E402  (car F: per-profile settings)
 
 # Event whitelist — converged to the service's REAL wiring points (v1):
 # turn_start/turn_end/tool_call/compact/error live in ChatService, cron_fire
@@ -152,7 +153,7 @@ def load_hooks(repo: str | Path | None = None) -> tuple[dict, list[str]]:
     or parse failure yields ({}, []) — no hooks configured, never a crash."""
     root = Path(repo) if repo is not None else REPO
     try:
-        doc = json.loads((root / "web" / "settings.json").read_text(
+        doc = json.loads(pp.settings_path(root).read_text(
             encoding="utf-8"))
     except (OSError, ValueError):
         return {}, []

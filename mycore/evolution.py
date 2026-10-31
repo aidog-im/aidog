@@ -62,6 +62,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+from lib import profile_paths as pp  # noqa: E402  (car F: per-profile body/state)
 
 BEIJING = timezone(timedelta(hours=8), "+08:00")   # fixed offset, no DST
 WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -177,12 +178,14 @@ def lint_memory(text: str) -> list[str]:
 
 
 # ------------------------------------------------------------- paths -------
+# Car F (§13.1): every path resolves the ACTIVE profile at call time —
+# default (no AIDOG_PROFILE) = the byte-identical legacy overlay/data paths.
 def skills_dir(repo: Path = REPO) -> Path:
-    return repo / "overlay" / "skills"
+    return pp.skills_dir(repo)
 
 
 def evolution_dir(repo: Path = REPO) -> Path:
-    return repo / "overlay" / "evolution"
+    return pp.evolution_dir(repo)
 
 
 def log_path(repo: Path = REPO) -> Path:
@@ -194,13 +197,11 @@ def reflect_dir(repo: Path = REPO) -> Path:
 
 
 def learned_memory_path(repo: Path = REPO) -> Path:
-    return repo / "overlay" / "memory" / "EVOLUTION_learned.md"
+    return pp.learned_path(repo)
 
 
 def default_state_path(repo: Path = REPO) -> Path:
-    env = os.environ.get("AIDOG_MC_STATE")
-    base = Path(env) if env else repo / "data" / "mycore_service"
-    return base / STATE_FILE_NAME
+    return pp.state_dir(repo) / STATE_FILE_NAME
 
 
 def rel(path: Path, repo: Path = REPO) -> str:
@@ -261,7 +262,7 @@ def evolution_settings(doc: dict) -> dict:
 
 def load_settings_file(repo: Path = REPO) -> dict:
     try:
-        doc = json.loads((repo / "web" / "settings.json").read_text(
+        doc = json.loads(pp.settings_path(repo).read_text(
             encoding="utf-8"))
     except (OSError, ValueError):
         return {}
@@ -553,9 +554,10 @@ def collect_facts(repo: Path, start: datetime, bnow: datetime) -> dict:
     entries = [e for e in read_log(repo=repo) if e["ts"] >= start]
     counts = dict(sorted(Counter(e["kind"] for e in entries).items()))
     memory: dict[str, int] = {}
+    body = pp.body_root(repo)
     for name in ("MEMORY_curated.md", "USER_curated.md",
                  "EVOLUTION_learned.md"):
-        p = repo / "overlay" / "memory" / name
+        p = body / "memory" / name
         try:
             memory[name] = p.stat().st_size
         except OSError:

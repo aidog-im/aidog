@@ -34,10 +34,12 @@ import os
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-CONSTITUTION = REPO / "overlay" / "constitution" / "SOUL.md"
-MEMORY_SLOTS = (REPO / "overlay" / "memory" / "MEMORY_curated.md",
-                REPO / "overlay" / "memory" / "USER_curated.md")
-LEARNED_MEMORY = REPO / "overlay" / "memory" / "EVOLUTION_learned.md"
+
+# Car F (§13.1): every body/settings path below is resolved at CALL time from
+# the active profile — never cached at import, so AIDOG_PROFILE flips (and the
+# offline suite's env save/restore) always win.
+from lib import profile_paths as pp  # noqa: E402
+
 MAX_SLOT_CHARS = 8000        # per-file cap (budget discipline, honest truncation)
 
 # Project context files (car 1-D1): injected only from explicitly configured
@@ -45,7 +47,11 @@ MAX_SLOT_CHARS = 8000        # per-file cap (budget discipline, honest truncatio
 CONTEXT_FILE_NAMES = ("AGENTS.md", "CLAUDE.md", "AGENTS.local.md")
 CONTEXT_DIRS_ENV = "AIDOG_CONTEXT_DIRS"      # os.pathsep-separated dirs
 CONTEXT_SETTINGS_KEY = "context_dirs"        # settings mycore block (same form)
-SETTINGS_FILE = REPO / "web" / "settings.json"
+
+# "unspecified" marker for build_system_stack: distinguishes a caller that
+# never mentioned the learned slot from an explicit learned_path=None (= off,
+# unchanged contract). Paths themselves are resolved via pp at call time.
+_AUTO = object()
 
 
 def _read_slot(path: Path, cap: int = MAX_SLOT_CHARS) -> str | None:
@@ -70,7 +76,9 @@ def resolve_context_dirs(settings_path: Path | None = None) -> tuple[Path, ...]:
         raw = None
     if raw is None:
         try:
-            stored = json.loads((settings_path or SETTINGS_FILE).read_text(encoding="utf-8"))
+            stored = json.loads(
+                (settings_path or pp.settings_path(REPO)).read_text(
+                    encoding="utf-8"))
             mc = stored.get("mycore") if isinstance(stored, dict) else None
             cand = mc.get(CONTEXT_SETTINGS_KEY) if isinstance(mc, dict) else None
             raw = cand if isinstance(cand, str) and cand.strip() else None
@@ -92,15 +100,26 @@ def resolve_context_dirs(settings_path: Path | None = None) -> tuple[Path, ...]:
     return tuple(d for d in dirs if d.is_dir())
 
 
-def build_system_stack(constitution_path: Path = CONSTITUTION,
-                       memory_paths: tuple[Path, ...] = MEMORY_SLOTS,
-                       learned_path: Path | None = LEARNED_MEMORY,
+def build_system_stack(constitution_path: Path | None = None,
+                       memory_paths: tuple[Path, ...] | None = None,
+                       learned_path: Path | None | object = _AUTO,
                        context_dirs: tuple[Path, ...] = ()) -> list[dict]:
     """-> system messages ready for the loop. Absent files become notices
     (the optional learned slot and the configured context dirs are the silent
     exceptions — see module doc). context_dirs defaults to OFF so every
     existing caller keeps today's stack shape; turn paths that opt in pass
-    resolve_context_dirs()."""
+    resolve_context_dirs().
+
+    Body-layer defaults (car F) resolve the ACTIVE profile at call time:
+    None -> pp.constitution_path()/pp.memory_slots(); the learned slot keeps
+    its old default (read when present) via the _AUTO sentinel, and an
+    explicit learned_path=None still disables it. Explicit paths (every test
+    and every caller that passes them) behave exactly as before."""
+    constitution_path = constitution_path or pp.constitution_path(REPO)
+    if memory_paths is None:
+        memory_paths = pp.memory_slots(REPO)
+    if learned_path is _AUTO:
+        learned_path = pp.learned_path(REPO)
     stack: list[dict] = []
 
     cons = _read_slot(constitution_path)

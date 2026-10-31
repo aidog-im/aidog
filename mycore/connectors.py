@@ -28,6 +28,8 @@ import urllib.error
 import urllib.request
 from typing import Callable
 
+from lib import profile_paths as pp  # noqa: E402  (car F: per-profile secrets)
+
 ERR_SNIPPET = 160          # upstream error text cap (honest, bounded)
 
 # transport: (url, headers, payload_bytes, timeout) -> response text
@@ -47,7 +49,7 @@ def _slot(name: str) -> str:
     try:
         from pathlib import Path
         repo = Path(__file__).resolve().parent.parent
-        text = (repo / "secrets.env").read_text(encoding="utf-8")
+        text = pp.secrets_path(repo).read_text(encoding="utf-8")
     except OSError:
         return ""
     m = re.search(rf"(?m)^{re.escape(name)}=(\S[^\r\n]*)$", text)

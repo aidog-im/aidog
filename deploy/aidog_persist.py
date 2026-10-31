@@ -5,6 +5,9 @@
                                # credential slots, then optional boot + verify);
                                # --check = status report, --yes = non-interactive
                                # idempotent installer (provision + boot + verify)
+  ./aidog profile list         # car F §13.1: default + per-profile runtime dirs
+  ./aidog profile create <name>  # scaffold profiles/<name> (seeded, own slots)
+  ./aidog profile rm <name> [--force]  # delete a non-default profile dir
   ./aidog export [--src DIR] [--persona DIR] [--out DIR] [--tag NAME]
   ./aidog import <tarball> [--dest-profile DIR] [--source-home DIR] [--persona-home DIR]
   ./aidog list [--dir DIR]
@@ -41,6 +44,7 @@ import io
 import json
 import os
 import re
+import shutil
 import sys
 import tarfile
 import time
@@ -543,6 +547,186 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# profile subcommands (car F §13.1: one machine, many dogs — named runtime dirs)
+# ---------------------------------------------------------------------------
+
+_PROFILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+_DEFAULT_PROFILE_LABEL = "DEFAULT"   # the implicit no-AIDOG_PROFILE profile
+
+
+def _profile_paths():
+    """Import lib.profile_paths with the repo root on sys.path (aidog_persist
+    only guarantees its own deploy/ dir — see the sibling-module pattern)."""
+    if str(REPO) not in sys.path:
+        sys.path.insert(0, str(REPO))
+    from lib import profile_paths  # noqa: PLC0415 — repo root resolved at call time
+    return profile_paths
+
+
+def _profile_meta(root: Path) -> dict:
+    """profile.json contents ({} when absent/unreadable — never raises)."""
+    try:
+        doc = json.loads((root / "profile.json").read_text(encoding="utf-8"))
+        return doc if isinstance(doc, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _profile_web_port(root: Path) -> int | None:
+    port = _profile_meta(root).get("web_port")
+    return port if isinstance(port, int) else None
+
+
+def _profile_dirs() -> list[tuple[str, Path]]:
+    """(name, path) for every validly-named profile dir under profiles_root,
+    sorted by name. Invalidly-named dirs are listed but never adopted."""
+    pp = _profile_paths()
+    root = pp.profiles_root(REPO)
+    if not root.is_dir():
+        return []
+    out = []
+    for p in sorted(root.iterdir()):
+        if p.is_dir() and _PROFILE_NAME_RE.match(p.name):
+            out.append((p.name, p))
+    return out
+
+
+def _copy_atomic(src: Path, dst: Path) -> bool:
+    """Byte-for-byte copy src -> dst via a temp file + os.replace. False when
+    src is missing (callers decide whether that is fatal)."""
+    try:
+        blob = src.read_bytes()
+    except OSError:
+        return False
+    tmp = dst.with_name(dst.name + ".tmp")
+    tmp.write_bytes(blob)
+    os.replace(tmp, dst)
+    return True
+
+
+def cmd_profile_list(_args: argparse.Namespace) -> int:
+    # DEFAULT row always describes the implicit no-AIDOG_PROFILE profile, so it
+    # is derived from the repo paths directly (env must not skew the listing).
+    state_default = REPO / "data" / "mycore_service"
+    rows: list[str] = []
+    rows.append(f"{_DEFAULT_PROFILE_LABEL:<12} {state_default.relative_to(REPO)} "
+                f"secrets={'yes' if (REPO / 'secrets.env').is_file() else 'no'} "
+                f"settings={'yes' if (REPO / 'web' / 'settings.json').is_file() else 'no'} "
+                "web_port=8790")
+    for name, root in _profile_dirs():
+        port = _profile_web_port(root)
+        rows.append(f"{name:<12} profiles/{name}/state "
+                    f"secrets={'yes' if (root / 'secrets.env').is_file() else 'no'} "
+                    f"settings={'yes' if (root / 'settings.json').is_file() else 'no'} "
+                    f"web_port={port if port is not None else '?'}")
+    print(f"{'profile':<12} state-dir  secrets settings web_port")
+    for row in rows:
+        print(row)
+    print(f"{len(rows)} profile(s) · active: {os.environ.get('AIDOG_PROFILE') or _DEFAULT_PROFILE_LABEL}")
+    return 0
+
+
+def cmd_profile_create(args: argparse.Namespace) -> int:
+    name = args.name
+    if not _PROFILE_NAME_RE.match(name):
+        print(f"invalid profile name {name!r}: expected [a-z0-9][a-z0-9_-]{{0,31}}")
+        return 1
+    if name == _DEFAULT_PROFILE_LABEL.lower() or name == "default":
+        print(f"{name!r} is reserved for the default profile — pick another name")
+        return 1
+    pp = _profile_paths()
+    root = pp.profiles_root(REPO) / name
+    if root.exists():
+        print(f"profile already exists: {root} (refusing to overwrite)")
+        return 1
+
+    # Scaffold first, seed second — a crash mid-seed leaves an obvious partial
+    # dir (profile.json is written LAST, so list/status never see it half-made).
+    for sub in ("state", "body/constitution", "body/memory", "body/skills",
+                "body/evolution", "images"):
+        (root / sub).mkdir(parents=True, exist_ok=True)
+
+    notes: list[str] = []
+    # product config: byte-copy of the repo's own web/settings.json (defaults
+    # when absent — the console falls back to built-in defaults).
+    if _copy_atomic(REPO / "web" / "settings.json", root / "settings.json"):
+        notes.append("settings.json  <- web/settings.json (seed copy)")
+    else:
+        notes.append("settings.json  <- skipped (no web/settings.json yet; console defaults apply)")
+    # credential slots: EMPTY TEMPLATE ONLY — the repo's real secrets.env is
+    # never read here (credential discipline: a new dog starts unfed).
+    (root / "secrets.env").write_text(
+        f"# I'm AiDog profile '{name}' credential slots — fill these, never commit.\n"
+        "WEB_TOKEN=\n"
+        "MYCORE_TG_TOKEN=\n"
+        "AIDOG_TG_ALLOWED_USERS=\n",
+        encoding="utf-8")
+    notes.append("secrets.env     <- empty template (own bot token / WEB_TOKEN / allowlist)")
+    # body layer: shipped templates seeded as THIS profile's own copies (Q3):
+    # afterwards they drift independently of overlay/.
+    for src, dst, label in (
+        (REPO / "overlay" / "constitution" / "SOUL.md",
+         root / "body" / "constitution" / "SOUL.md", "SOUL.md"),
+        (REPO / "overlay" / "memory" / "MEMORY_curated.md",
+         root / "body" / "memory" / "MEMORY_curated.md", "MEMORY_curated.md"),
+        (REPO / "overlay" / "memory" / "USER_curated.md",
+         root / "body" / "memory" / "USER_curated.md", "USER_curated.md"),
+    ):
+        if _copy_atomic(src, dst):
+            notes.append(f"body           <- {label} (seed copy)")
+        else:
+            notes.append(f"body           <- {label} missing in overlay (skipped)")
+
+    used = {p for _n, p in _profile_dirs()}
+    port = 8791
+    while any(_profile_web_port(p) == port for p in used):
+        port += 1
+    meta = {"name": name, "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "web_port": port}
+    (root / "profile.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+
+    print(f"profile created: {root}")
+    for n in notes:
+        print(f"  {n}")
+    print(f"  profile.json  <- name/created/web_port={port}")
+    print("next steps (values are never echoed by this tool):")
+    print(f"  1. edit {root}/secrets.env  — own MYCORE_TG_TOKEN (a second bot) + WEB_TOKEN + allowlist")
+    print(f"  2. bash deploy/profile_ctl.sh start {name}")
+    print(f"  3. console: http://127.0.0.1:{port}/  (Bearer <that profile's WEB_TOKEN>)")
+    print("note: never reuse the default profile's bot token — two pollers on one token fight over offset.")
+    return 0
+
+
+def cmd_profile_rm(args: argparse.Namespace) -> int:
+    name = args.name
+    if not _PROFILE_NAME_RE.match(name):
+        print(f"invalid profile name {name!r}: expected [a-z0-9][a-z0-9_-]{{0,31}}")
+        return 1
+    if name in (_DEFAULT_PROFILE_LABEL.lower(), "default"):
+        print("the default profile has no directory and can never be removed")
+        return 1
+    root = _profile_paths().profiles_root(REPO) / name
+    if not root.is_dir():
+        print(f"profile not found: {root}")
+        return 1
+    # state guard: any file under state/ = live history (sessions/pidfile/log).
+    state = root / "state"
+    leftovers = [p for p in state.rglob("*") if p.is_file()] if state.is_dir() else []
+    if leftovers and not args.force:
+        print(f"profile {name!r} has {len(leftovers)} state file(s) — refusing to delete")
+        print("  (stop it first: bash deploy/profile_ctl.sh stop " + name
+              + "; then re-run with --force to discard its state)")
+        return 1
+    if not args.dry_run:
+        print(f"removing: {root}")
+        shutil.rmtree(root)
+    else:
+        print(f"would remove: {root}")
+    print(f"profile removed: {name}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 
 def cmd_setup(args: argparse.Namespace) -> int:
     """B3: delegate to deploy/aidog_setup.py (interactive wizard; --check/--yes
@@ -602,6 +786,23 @@ def build_parser() -> argparse.ArgumentParser:
     l = sub.add_parser("list", help="list bundles and verify sidecar + manifest hashes")
     l.add_argument("--dir", help=f"bundle dir (default: {DEFAULT_OUT})")
     l.set_defaults(func=cmd_list)
+
+    pr = sub.add_parser("profile", help="car F §13.1 multi-profile runtime dirs (list / create / rm)")
+    psub = pr.add_subparsers(dest="profile_cmd", required=True)
+
+    pl = psub.add_parser("list", help="list the default profile + every profiles/<name> dir")
+    pl.set_defaults(func=cmd_profile_list)
+
+    pc = psub.add_parser("create", help="scaffold profiles/<name> (seeded settings + empty secret slots + body templates)")
+    pc.add_argument("name", help="profile name: [a-z0-9][a-z0-9_-]{0,31}")
+    pc.set_defaults(func=cmd_profile_create)
+
+    prr = psub.add_parser("rm", help="delete a non-default profile dir (refuses when state files exist)")
+    prr.add_argument("name", help="profile name: [a-z0-9][a-z0-9_-]{0,31}")
+    prr.add_argument("--force", action="store_true",
+                     help="discard state files too (without it, any file under state/ blocks the delete)")
+    prr.add_argument("--dry-run", action="store_true", help="print the path that would be removed")
+    prr.set_defaults(func=cmd_profile_rm)
     return ap
 
 

@@ -111,4 +111,4 @@ connects to `127.0.0.1` / `localhost` / `::1`, `ws://` only.
   the missing-binary branch) lives in the repo-local E2E script
   `tmp/e2e_car4b.py` (tmp harness, outside the gate suites).
 
-Suite totals after car 4c: core **959/959**, smoke **142/142**.
+Suite totals after car F: core **981/981**, smoke **146/146**.

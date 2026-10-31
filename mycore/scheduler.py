@@ -74,6 +74,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+from lib import profile_paths as pp  # noqa: E402  (car F: profile state seam)
 
 BEIJING = timezone(timedelta(hours=8), "+08:00")   # fixed offset, no DST
 WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -313,9 +314,7 @@ def mark_fired(job: dict, now: float) -> None:
 
 # --------------------------------------------------------------- registry ---
 def default_jobs_path() -> Path:
-    env = os.environ.get("AIDOG_MC_STATE")
-    base = Path(env) if env else REPO / "data" / "mycore_service"
-    return base / STATE_FILE_NAME
+    return pp.state_dir(REPO) / STATE_FILE_NAME
 
 
 def _valid_job(raw: object) -> bool:

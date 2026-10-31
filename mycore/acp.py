@@ -49,6 +49,7 @@ from .model import ChatClient
 from .tools import ToolError, build_registry, resolve_inside
 
 REPO = Path(__file__).resolve().parent.parent
+from lib import profile_paths as pp  # noqa: E402  (car F: per-profile settings)
 
 PROTOCOL_VERSION = 1
 FS_TIMEOUT_DEFAULT = 10.0     # seconds to wait for a client fs/* response
@@ -112,7 +113,7 @@ def _budget() -> int | None:
     """Compaction budget: web/settings.json mycore.budget (service._budget
     parity); absent -> cli default, <=0 -> never compact."""
     try:
-        doc = json.loads((REPO / "web" / "settings.json").read_text(
+        doc = json.loads(pp.settings_path(REPO).read_text(
             encoding="utf-8"))
         mc = doc.get("mycore") if isinstance(doc, dict) else None
         raw = mc.get("budget") if isinstance(mc, dict) else None

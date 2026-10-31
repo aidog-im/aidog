@@ -56,6 +56,16 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 DEFAULT_SKILLS_DIR = REPO / "overlay" / "skills"
 
+# Car F (§13.1): the active profile's learned-skills layer. Both legitimate
+# import shapes are covered — `import profile_paths` when lib/ is this file's
+# home dir (script run `python3 lib/skill_route.py`, sys.path.insert of
+# <repo>/lib) and `from lib import profile_paths` when the lib package is on
+# the path (imported as lib.skill_route).
+try:
+    import profile_paths as _pp
+except ImportError:                    # imported as the lib package sibling
+    from lib import profile_paths as _pp
+
 ASCII_SUFFIX = ("ing", "ed", "es", "s")
 STOP_ASCII = {"the", "a", "an", "of", "for", "and", "or", "to", "in", "on", "is", "with"}
 
@@ -306,6 +316,15 @@ def skill_roots(dirs_flag: str | None) -> list[Path]:
             cand = Path(p).expanduser()
         except (OSError, ValueError):
             continue
+        if cand.is_dir() and cand not in roots:
+            roots.append(cand)
+    # car F (§13.1): the active profile's LEARNED skills sit before the shared
+    # repo default (shipped overlay/skills stays the read-only product layer
+    # and is always appended below). profile_name() raises ProfileError on an
+    # invalid AIDOG_PROFILE — fail-closed: a typo must never silently route
+    # against another profile's (or the default's) skill set.
+    if _pp.profile_name():
+        cand = _pp.skills_dir(REPO)
         if cand.is_dir() and cand not in roots:
             roots.append(cand)
     # repo-embedded default comes before the legacy profile step (P5-4 chain)

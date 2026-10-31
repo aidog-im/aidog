@@ -27,6 +27,7 @@ from .tools import build_registry
 
 DEFAULT_BUDGET_CHARS = 24000        # ~6k tokens of conversation payload
 REPO = Path(__file__).resolve().parent.parent
+from lib import profile_paths as pp  # noqa: E402  (car F: per-profile settings)
 
 
 def resolve_model_config() -> ModelConfig:
@@ -39,7 +40,7 @@ def resolve_model_config() -> ModelConfig:
     cfg = ModelConfig()
     raw_upstreams: str | None = None
     try:
-        stored = json.loads((REPO / "web" / "settings.json").read_text())
+        stored = json.loads(pp.settings_path(REPO).read_text())
         mc = stored.get("mycore") if isinstance(stored, dict) else None
         if isinstance(mc, dict):
             if isinstance(mc.get("base_url"), str) and mc["base_url"]:

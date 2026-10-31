@@ -133,6 +133,7 @@ if str(REPO) in sys.path:
     sys.path.remove(str(REPO))
 sys.path.insert(0, str(REPO))
 from lib import i18n  # noqa: E402  (overlay/locales/* = single source of truth)
+from lib import profile_paths as pp  # noqa: E402  (car F §13.1: profile seams)
 
 ALLOW_ENV = "AIDOG_TG_ALLOWED_USERS"   # comma-separated TG user ids (fail-closed)
 STATE_ENV = "AIDOG_MC_STATE"           # state dir override
@@ -180,9 +181,9 @@ _PATH_RE = re.compile(
 # ----------------------------------------------------------------- helpers ---
 
 def state_dir() -> Path:
-    """State root: env AIDOG_MC_STATE, else <repo>/data/mycore_service."""
-    raw = os.environ.get(STATE_ENV, "").strip()
-    return Path(raw) if raw else REPO / "data" / "mycore_service"
+    """State root: env AIDOG_MC_STATE > <profile>/state > <repo>/data/mycore_service
+    (the profile seam already embeds the env precedence — car F)."""
+    return pp.state_dir(REPO)
 
 
 def parse_allowlist(raw: str | None) -> frozenset[int]:
@@ -703,8 +704,8 @@ class ChatService:
         (callers fail closed on absence, never crash — same contract the
         mycore block reader has always had)."""
         try:
-            doc = json.loads(
-                (self.repo / "web" / "settings.json").read_text(encoding="utf-8"))
+            doc = json.loads(pp.settings_path(self.repo).read_text(
+                encoding="utf-8"))
         except (OSError, ValueError):
             return {}
         return doc if isinstance(doc, dict) else {}
@@ -873,7 +874,7 @@ class ChatService:
     def _evolution_cfg(self) -> dict:
         """Effective evolution settings (fail-closed: absent/invalid = off)."""
         try:
-            doc = json.loads((self.repo / "web" / "settings.json").read_text(
+            doc = json.loads(pp.settings_path(self.repo).read_text(
                 encoding="utf-8"))
         except (OSError, ValueError):
             doc = {}

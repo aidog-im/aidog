@@ -29,6 +29,7 @@ from threading import Lock
 from typing import Callable
 
 REPO = Path(__file__).resolve().parent.parent
+from lib import profile_paths as pp  # noqa: E402  (car F: per-profile settings)
 
 DEFAULT_ALLOWED_ROOTS = (str(REPO), tempfile.gettempdir())
 MAX_RESULT_CHARS = 24000          # tool output cap (context budget discipline)
@@ -229,7 +230,7 @@ def _shell_spec() -> str:
     switch, no in-process cache). Missing file/key/bad JSON -> "" = local.
     Mirrors how mycore.cli/mcp read web/settings.json."""
     try:
-        doc = json.loads((REPO / "web" / "settings.json").read_text(encoding="utf-8"))
+        doc = json.loads(pp.settings_path(REPO).read_text(encoding="utf-8"))
         mc = doc.get("mycore") if isinstance(doc, dict) else None
         if isinstance(mc, dict) and isinstance(mc.get("shell"), str):
             return mc["shell"]

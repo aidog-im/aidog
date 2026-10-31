@@ -55,6 +55,7 @@ from pathlib import Path
 from typing import Callable
 
 REPO = Path(__file__).resolve().parent.parent
+from lib import profile_paths as pp  # noqa: E402  (car F: per-profile settings)
 
 MAX_SERVERS = 4                # parity with modeltier's bounded chain
 MAX_CONFIG_CHARS = 4000
@@ -244,7 +245,7 @@ def raw_config(repo: str | Path | None = None) -> str:
     if env:
         return env
     try:
-        stored = json.loads((Path(repo or REPO) / "web" / "settings.json")
+        stored = json.loads(pp.settings_path(Path(repo or REPO))
                             .read_text(encoding="utf-8"))
         mc = stored.get("mycore") if isinstance(stored, dict) else None
         if isinstance(mc, dict) and isinstance(mc.get("mcp"), str):

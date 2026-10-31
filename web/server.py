@@ -94,6 +94,7 @@ if str(REPO) in sys.path:
     sys.path.remove(str(REPO))
 sys.path.insert(0, str(REPO))
 from lib import i18n  # noqa: E402
+from lib import profile_paths  # noqa: E402  (car F §13.1: per-profile path seams)
 from mycore import cli, evolution, hooks, mcp, modeltier, terminal  # noqa: E402  (config + MCP/ hooks/ terminal grammar)
 from mycore.assembly import build_system_stack, resolve_context_dirs  # noqa: E402
 from mycore.loop import run_turn  # noqa: E402
@@ -106,8 +107,12 @@ try:
     VERSION = (REPO / "VERSION").read_text(encoding="utf-8").strip()  # single source of truth
 except OSError:
     VERSION = "0.0.0"
-SECRETS = REPO / "secrets.env"
-SETTINGS_FILE = WEB_DIR / "settings.json"
+# Car F (§13.1): per-profile path seams — AIDOG_PROFILE unset = these resolve
+# to the exact pre-car-F paths (byte-identical legacy behavior). Every read
+# point below (load_settings, POST /api/settings, _slot_value, voice/image
+# credentials, media listing) follows through these names.
+SECRETS = profile_paths.secrets_path(REPO)
+SETTINGS_FILE = profile_paths.settings_path(REPO)
 STATE_FILE = WEB_DIR / ".state.json"  # runtime state (gitignored): boot history
 MAX_BODY = 16384
 # Car 4c media face: binary payloads carry their OWN budgets — a voice note or
@@ -117,7 +122,7 @@ STT_MAX_DURATION = 60           # decoded seconds accepted (transcriber cap)
 IMAGE_MAX_PROMPT = 2000         # chars in one image trial prompt
 IMAGE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")   # served-file whitelist
 MEDIA_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".webp": "image/webp"}
-MEDIA_DIR = REPO / "data" / "images"        # imagegen's output dir (read-only here)
+MEDIA_DIR = profile_paths.media_dir(REPO)  # imagegen's output dir (read-only here)
 CHAT_MAX_CHARS = 4000                 # one console chat message (input cap)
 CHAT_HISTORY_CAP = 2000               # per-message chars returned by /history
 CHAT_SESSION_NAME = "web"             # console session file stem (numeric
@@ -159,7 +164,7 @@ SHIM_PRESENT = (REPO / "deploy/upstream_shim.env").exists()
 # mycore runtime probes (read-only, repo-relative): the chat service and its
 # watchdog live beside the transition stack today and are the sole source
 # after the swap. No restarts, no credentials, no machine paths in output.
-MYCORE_STATE_DIR = REPO / "data" / "mycore_service"
+MYCORE_STATE_DIR = profile_paths.state_dir(REPO)   # per-profile state root (env AIDOG_MC_STATE wins)
 MYCORE_PIDFILE = MYCORE_STATE_DIR / "mycore_service.pid"
 MYCORE_SERVICE_LOG = MYCORE_STATE_DIR / "service.log"
 MYCORE_WD_LOG = REPO / "data" / "mycore_watchdog.log"
@@ -972,9 +977,9 @@ def collect_status() -> dict:
         usr = PROFILE / "memories/USER.md"
     else:
         # Post-swap curated memory lives in the body-layer overlay (the profile
-        # copy dies with the wiring); same budgets, honest 0 when absent.
-        mem = REPO / "overlay" / "memory" / "MEMORY_curated.md"
-        usr = REPO / "overlay" / "memory" / "USER_curated.md"
+        # copy dies with the wiring); car F: per-profile body/memory when a
+        # profile is active, same budgets, honest 0 when absent.
+        mem, usr = profile_paths.memory_slots(REPO)
     cfg_bits = read_config_bits()
     mbase = (cfg_bits.get("model_base_url") or "http://localhost:3456/v1").rstrip("/")
     mprobe = f"{mbase}/models" if mbase.endswith("/v1") else f"{mbase}/v1/models"
@@ -1017,6 +1022,9 @@ def collect_status() -> dict:
     return {
         "time_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "version": VERSION,
+        # Car F: active profile name ("" = default profile = pre-car-F paths);
+        # a bare noun, rendered verbatim by the console — no locale key.
+        "profile": profile_paths.profile_name(),
         "panels": panels,
         "advisory": {"level": level, "reasons": reasons},
         "system": sysfacts,

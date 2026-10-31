@@ -74,6 +74,8 @@ from email.utils import parseaddr
 from pathlib import Path
 from typing import Callable
 
+from lib import profile_paths as pp  # noqa: E402  (car F §13.1: profile seams)
+
 CHANNELS = ("discord", "slack", "email", "webhook",
             "dingtalk", "feishu", "wechat")
 
@@ -173,7 +175,7 @@ def _slot(repo: Path, name: str) -> str:
     if val:
         return val
     try:
-        text = (Path(repo) / "secrets.env").read_text(encoding="utf-8")
+        text = pp.secrets_path(Path(repo)).read_text(encoding="utf-8")
     except OSError:
         return ""
     match = re.search(rf"(?m)^{re.escape(name)}=(\S[^\r\n]*)$", text)
@@ -194,15 +196,13 @@ def _channels_block(settings) -> dict:
 
 def state_root(repo, settings=None) -> Path:
     """Cursor/state root: settings["state_dir"] > env AIDOG_MC_STATE >
-    <repo>/data/mycore_service (mirrors mycore.service.state_dir())."""
+    <profile>/state > <repo>/data/mycore_service (car F: the tail two come
+    from the shared profile seam, mirrored by mycore.service.state_dir())."""
     if isinstance(settings, dict):
         raw = settings.get("state_dir")
         if isinstance(raw, str) and raw.strip():
             return Path(raw.strip())
-    env = os.environ.get(STATE_ENV, "").strip()
-    if env:
-        return Path(env)
-    return Path(repo) / "data" / "mycore_service"
+    return pp.state_dir(Path(repo))
 
 
 def _json(text: str, method: str):

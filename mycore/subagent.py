@@ -33,6 +33,7 @@ from typing import Callable
 
 from .loop import run_turn
 from .tools import ToolError, ToolRegistry
+from lib import profile_paths as pp  # noqa: E402  (car F: per-profile settings)
 
 MAX_PARALLEL = 3                    # alignment target: 3 parallel slots
 SUB_MAX_ITERS = 12                  # bounded sub-turn (parent loop: 25)
@@ -55,7 +56,7 @@ def _allowed_models() -> list[str] | None:
     credential-free name list, settings-only on purpose)."""
     try:
         from . import cli  # local import: keeps the module graph acyclic
-        stored = json.loads((cli.REPO / "web" / "settings.json")
+        stored = json.loads(pp.settings_path(cli.REPO)
                             .read_text(encoding="utf-8"))
         mc = stored.get("mycore") if isinstance(stored, dict) else None
         raw = mc.get("models") if isinstance(mc, dict) else None

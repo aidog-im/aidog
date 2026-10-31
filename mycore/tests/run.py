@@ -420,13 +420,15 @@ def test_assembly() -> None:
 
     # --- P5-4: body layer is repo-primary + profile/shim-decoupled ---
     import hashlib
-    from mycore.assembly import CONSTITUTION
+    from lib import profile_paths as pp
     repo_soul = REPO / "overlay" / "constitution" / "SOUL.md"
     dstack = build_system_stack()
+    # car F: the default (no AIDOG_PROFILE) resolves at CALL time to the same
+    # byte path the old import-time CONSTITUTION constant held.
     check("assembly: default constitution = repo overlay SOUL (primary)",
           repo_soul.is_file()
           and dstack[0]["content"] == repo_soul.read_text(encoding="utf-8")
-          and CONSTITUTION == repo_soul)
+          and pp.constitution_path(REPO) == repo_soul)
     # no transition-profile reads anywhere in the self-made core (P5-5 keeps
     # mycore kernel-clean: the shim must never become a mycore dependency).
     # Shim facts are read from the file at runtime — this source never embeds
@@ -7345,6 +7347,192 @@ def test_service_media() -> None:
                 os.environ[k] = v
 
 
+def test_profiles() -> None:
+    """Car F §13.1 — profile path seams (lib.profile_paths):
+      1. default (no AIDOG_PROFILE) = byte-identical legacy paths;
+      2. AIDOG_PROFILE + AIDOG_PROFILES_DIR relocate settings/secrets/state/body;
+         AIDOG_MC_STATE still wins over everything (existing contract);
+      3. an invalid profile name fails closed (ProfileError, no silent default);
+      4. build_system_stack() reads the PROFILE body, never the repo overlay;
+      5. skill_roots carries the profile skills layer AND the shared overlay;
+      6. /learn writes land in the profile body — the repo overlay stays clean.
+    Hermetic: tmp profiles root + env save/restore (the suite pins
+    AIDOG_MC_STATE, so every mutation here is undone in `finally`)."""
+    from lib import profile_paths as pp
+    from mycore.assembly import build_system_stack
+    from mycore import service as svc
+    from mycore import channels as ch
+    from mycore import checkpoint as ckpt
+    from mycore import scheduler as sch
+    from mycore import evolution as ev
+    import mycore.hooks as hk
+
+    keys = ("AIDOG_PROFILE", "AIDOG_PROFILES_DIR", "AIDOG_MC_STATE")
+    saved = {k: os.environ.get(k) for k in keys}
+    # Snapshot the shipped body layer: profile learning must not add a single
+    # file under <repo>/overlay (compare after, entry for entry).
+    overlay_before = {p for p in (REPO / "overlay").rglob("*")}
+    try:
+        for k in keys:
+            os.environ.pop(k, None)
+        # ---------------------------------------------- 1. default = legacy --
+        check("profile: default settings = web/settings.json",
+              pp.settings_path(REPO) == REPO / "web" / "settings.json")
+        check("profile: default secrets = secrets.env",
+              pp.secrets_path(REPO) == REPO / "secrets.env")
+        check("profile: default state = data/mycore_service",
+              pp.state_dir(REPO) == REPO / "data" / "mycore_service")
+        check("profile: default body = overlay",
+              pp.body_root(REPO) == REPO / "overlay"
+              and pp.constitution_path(REPO)
+              == REPO / "overlay" / "constitution" / "SOUL.md"
+              and pp.memory_slots(REPO)
+              == (REPO / "overlay" / "memory" / "MEMORY_curated.md",
+                  REPO / "overlay" / "memory" / "USER_curated.md")
+              and pp.learned_path(REPO)
+              == REPO / "overlay" / "memory" / "EVOLUTION_learned.md"
+              and pp.skills_dir(REPO) == REPO / "overlay" / "skills"
+              and pp.evolution_dir(REPO) == REPO / "overlay" / "evolution")
+        check("profile: default media = data/images",
+              pp.media_dir(REPO) == REPO / "data" / "images")
+        legacy_state = REPO / "data" / "mycore_service"
+        check("profile: default state consumers unchanged",
+              svc.state_dir() == legacy_state
+              and ckpt.default_state_dir() == legacy_state
+              and ch.state_root(REPO, {}) == legacy_state
+              and sch.default_jobs_path() == legacy_state / "cron_jobs.json"
+              and ev.default_state_path(REPO)
+              == legacy_state / "evolution_state.json")
+        check("profile: default settings read point unchanged",
+              ev.load_settings_file(REPO) != {})   # repo web/settings.json is real
+
+        # ------------------------------------- 2. profile relocates every seam
+        with tempfile.TemporaryDirectory(prefix="aidog_profiles_") as td:
+            tdp = Path(td)
+            os.environ["AIDOG_PROFILES_DIR"] = str(tdp)
+            os.environ["AIDOG_PROFILE"] = "beta"
+            root = tdp / "beta"
+            root.mkdir(parents=True)
+            check("profile: settings/secrets/state/body relocate",
+                  pp.settings_path(REPO) == root / "settings.json"
+                  and pp.secrets_path(REPO) == root / "secrets.env"
+                  and pp.state_dir(REPO) == root / "state"
+                  and pp.body_root(REPO) == root / "body"
+                  and pp.media_dir(REPO) == root / "images")
+            check("profile: body layer paths relocate",
+                  pp.constitution_path(REPO)
+                  == root / "body" / "constitution" / "SOUL.md"
+                  and pp.memory_slots(REPO)[0]
+                  == root / "body" / "memory" / "MEMORY_curated.md"
+                  and pp.learned_path(REPO)
+                  == root / "body" / "memory" / "EVOLUTION_learned.md"
+                  and pp.skills_dir(REPO) == root / "body" / "skills"
+                  and pp.evolution_dir(REPO) == root / "body" / "evolution")
+            check("profile: state consumers follow the profile",
+                  svc.state_dir() == root / "state"
+                  and ckpt.default_state_dir() == root / "state"
+                  and ch.state_root(REPO, {}) == root / "state"
+                  and sch.default_jobs_path() == root / "state" / "cron_jobs.json"
+                  and ev.default_state_path(REPO)
+                  == root / "state" / "evolution_state.json")
+            os.environ["AIDOG_MC_STATE"] = str(tdp / "explicit_state")
+            check("profile: AIDOG_MC_STATE beats the profile (env contract)",
+                  pp.state_dir(REPO) == tdp / "explicit_state"
+                  and svc.state_dir() == tdp / "explicit_state"
+                  and ckpt.default_state_dir() == tdp / "explicit_state")
+            os.environ.pop("AIDOG_MC_STATE", None)
+
+            # real read points: profile settings file (absent -> empty)
+            check("profile: settings read point relocates (absent = empty)",
+                  ev.load_settings_file(REPO) == {}
+                  and hk.load_hooks(REPO) == ({}, []))
+            (root / "settings.json").write_text(
+                json.dumps({"mycore": {"budget": 7},
+                            "hooks": {"turn_end": [{"cmd": ["/bin/true"]}]}}),
+                encoding="utf-8")
+            check("profile: profile settings.json is what gets read",
+                  ev.load_settings_file(REPO).get("mycore", {}).get("budget") == 7)
+            check("profile: hooks read point relocates",
+                  hk.load_hooks(REPO)[0].get("turn_end")
+                  == [{"cmd": ["/bin/true"], "timeout": hk.DEFAULT_TIMEOUT}])
+
+            # ------------------- 3. body layer: the stack reads the PROFILE --
+            soul = root / "body" / "constitution" / "SOUL.md"
+            soul.parent.mkdir(parents=True, exist_ok=True)
+            soul.write_text("# beta profile SOUL", encoding="utf-8")
+            memd = root / "body" / "memory"
+            memd.mkdir(parents=True, exist_ok=True)
+            (memd / "MEMORY_curated.md").write_text(
+                "- beta memory fact", encoding="utf-8")
+            overlay_soul = (REPO / "overlay" / "constitution" / "SOUL.md").read_text(
+                encoding="utf-8")
+            stack = build_system_stack()          # all defaults, no explicit paths
+            check("profile: build_system_stack uses the profile brain",
+                  stack[0]["content"] == "# beta profile SOUL"
+                  and any("beta memory fact" in m["content"] for m in stack)
+                  and not any(overlay_soul[:80] in m["content"] for m in stack)
+                  and "skill_route" in stack[-1]["content"])
+
+            # -------------------------------------- 4. fail-closed on a typo -
+            os.environ["AIDOG_PROFILE"] = "../x"
+            name_ok = stack_ok = False
+            try:
+                pp.settings_path(REPO)
+            except pp.ProfileError:
+                name_ok = True
+            try:
+                svc.state_dir()                    # consumer must not fall back
+            except pp.ProfileError:
+                stack_ok = True
+            check("profile: invalid AIDOG_PROFILE raises ProfileError", name_ok)
+            check("profile: invalid name fails closed through consumers", stack_ok)
+            os.environ["AIDOG_PROFILE"] = "beta"
+
+            # ------------------------ 5. skill_roots: profile layer + overlay -
+            skills = root / "body" / "skills"
+            demo = skills / "timezone-cheatsheet"
+            demo.mkdir(parents=True, exist_ok=True)
+            (demo / "SKILL.md").write_text(
+                "---\nname: timezone-cheatsheet\n"
+                "description: UTC offsets for major cities\n---\n\nbody\n",
+                encoding="utf-8")
+            sys.path.insert(0, str(REPO / "lib"))
+            try:
+                import skill_route as sr
+            finally:
+                sys.path.pop(0)
+            roots = sr.skill_roots(None)
+            check("profile: skill_roots carries profile skills + overlay",
+                  skills in roots and sr.DEFAULT_SKILLS_DIR in roots
+                  and roots.index(skills) < roots.index(sr.DEFAULT_SKILLS_DIR),
+                  str(roots)[:300])
+
+            # ------------- 6. learning writes the PROFILE body, repo untouched
+            res = ev.learn_skill("beta-demo", "beta demo skill profile test",
+                                 "print('hi')", repo=REPO)
+            check("profile: learn_skill lands in the profile body",
+                  res.ok and (skills / "beta-demo" / "SKILL.md").is_file(),
+                  str(res.errors))
+            res2 = ev.learn_memory("- beta learned fact", repo=REPO)
+            learned = root / "body" / "memory" / "EVOLUTION_learned.md"
+            check("profile: learn_memory lands in the profile body",
+                  res2.ok and learned.is_file()
+                  and "beta learned fact" in learned.read_text(encoding="utf-8"),
+                  str(res2.errors))
+            check("profile: evolution log lands in the profile body",
+                  (root / "body" / "evolution" / "EVOLUTION.md").is_file())
+            overlay_after = {p for p in (REPO / "overlay").rglob("*")}
+            check("profile: repo overlay untouched by profile learning",
+                  overlay_after == overlay_before,
+                  str(overlay_after ^ overlay_before)[:300])
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 def main() -> int:
     test_model()
     test_registry_and_tools()
@@ -7386,6 +7574,7 @@ def main() -> int:
     test_media_tools()
     test_tg_media()
     test_service_media()
+    test_profiles()
     print(f"\n{len(PASS)} pass · {len(FAIL)} fail")
     if FAIL:
         print("failed: " + ", ".join(FAIL))

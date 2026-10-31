@@ -723,7 +723,10 @@ function renderStatus() {
     (up === panels.length ? t("svc.all", "All systems nominal")
                           : t("svc.degraded", "System degraded")) +
     " · " + t("svc.sub", "{n}/5 online").replace("{n}", up) +
-    " · " + (statusData.version || "");
+    " · " + (statusData.version || "") +
+    // Car F: active profile name (bare noun, no locale key); absent/empty
+    // field = default profile = pre-car-F output, byte for byte.
+    ((statusData.profile || "") ? " · " + statusData.profile : "");
 
   // advisory chip + ticker
   const chip = document.getElementById("advChip");

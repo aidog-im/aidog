@@ -1228,6 +1228,37 @@ def main() -> int:
     check("POST /api/stt rate window filled -> 429", s_last == 429,
           f"last={s_last}")
 
+    # --- car F (§13.1): profile field + default-path byte identity ---
+    # Kept AFTER the stt legs on purpose (stt success must not follow the 429);
+    # none of these touch /api/stt.
+    s, status = get("/api/status")
+    check("GET /api/status carries profile field",
+          s == 200 and isinstance(status, dict) and "profile" in status,
+          f"keys={sorted(status) if isinstance(status, dict) else status}")
+    check("GET /api/status profile empty on default console",
+          isinstance(status, dict) and status.get("profile") == "",
+          f"profile={status.get('profile')!r}" if isinstance(status, dict) else "")
+
+    # Default profile = pre-car-F paths, byte for byte (AIDOG_PROFILE unset in
+    # this process — the imported console copy resolved its module constants).
+    _repo = Path(__file__).resolve().parent.parent
+    check("default profile path seams unchanged",
+          _srv.SETTINGS_FILE == _repo / "web" / "settings.json" and
+          _srv.SECRETS == _repo / "secrets.env" and
+          _srv.MYCORE_STATE_DIR == _repo / "data" / "mycore_service" and
+          _srv.MEDIA_DIR == _repo / "data" / "images" and
+          _srv.STATE_FILE == _repo / "web" / ".state.json",
+          f"settings={_srv.SETTINGS_FILE} secrets={_srv.SECRETS} "
+          f"state={_srv.MYCORE_STATE_DIR} media={_srv.MEDIA_DIR}")
+
+    # Settings endpoint: current shape, no profile key, stable across reads.
+    s, set_a = get("/api/settings")
+    s2, set_b = get("/api/settings")
+    check("GET /api/settings stable + no profile key",
+          s == 200 and s2 == 200 and set_a == set_b and
+          "profile" not in set_a and isinstance(set_a, dict),
+          f"s={s}/{s2} profile-key={'profile' in set_a if isinstance(set_a, dict) else '?'}")
+
     print(f"\n{len(PASS)} pass · {len(FAIL)} fail")
     if FAIL:
         print("failed: " + ", ".join(FAIL))
