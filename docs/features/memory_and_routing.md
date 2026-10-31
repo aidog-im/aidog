@@ -28,14 +28,14 @@ memory home through the same chain — first hit wins:
 | 1 | env `AIDOG_MEMORY_HOME` | `env AIDOG_MEMORY_HOME` |
 | 2 | `MEMORY_HOME` in `deploy/memory_sources.local` (gitignored machine config) | `local MEMORY_HOME` |
 | 3 | `$HOME/.aidog/memories` — **post-swap default**; this step hits only when the portable home already exists (materialized by an earlier `sync`/`import`) | `default ~/.aidog/memories` |
-| 4 | `<AIDOG_PROFILE_DIR>/memories` from `deploy/upstream_shim.env` — **LEGACY transition fallback, honored only while the shim file exists** (P5-5 deletes it in the same car) | `legacy shim profile` |
+| 4 | `<AIDOG_PROFILE_DIR>/memories` — **RETIRED at P5-5**: legacy transition fallback, read only while `deploy/upstream_shim.env` existed (deleted in that same car); post-swap this step never matches | `legacy shim profile` |
 | — | no shim → step 3 becomes the final fallback; `sync` creates the home (`mkdir -p`) so a fresh machine never fails | `default ~/.aidog/memories` |
 
 - `status` prints the **resolved** home as its first line:
   `home: <path> (source=<label>)` (paths are fine in output; secrets never).
-- Today — shim present, no override — the resolved home stays the **legacy
-  profile path** (transition unchanged). After P5-5 the identical chain lands
-  on `$HOME/.aidog/memories`; no code edit is needed at deletion time.
+- Post-P5-5 (shim gone, no override) the identical chain lands on **`$HOME/.aidog/memories`**;
+  no code edit was needed at deletion time. (While the shim existed — transition —
+  the resolved home stayed the legacy profile path.)
 - Single source of truth: `deploy/aidog_memory.py resolve_memory_home()`;
   `aidog_persist.py` imports it (export source chain step 4 + import `memory/`
   destination). Bundle layout and `manifest format_version 1` are unchanged.
@@ -62,8 +62,8 @@ memory home through the same chain — first hit wins:
 - **Vendored at P4 (2026-10-18)**: genericized copy now lives in `lib/` —
   English output, self-derived repo paths, skill roots from `--dirs` /
   `AIDOG_SKILL_DIRS` / `SKILL_DIRS` in `deploy/memory_sources.local` /
-  `overlay/skills` / profile config `external_dirs:` (legacy, only while
-  `deploy/upstream_shim.env` exists).
+  `overlay/skills` / profile config `external_dirs:` (legacy, shim-gated —
+  the shim was deleted at P5-5, so this step never matches post-swap).
   No cross-project exec; ranking verified equivalent to the transition
   original (same TOP3 order on shared queries).
 
@@ -79,8 +79,9 @@ memory home through the same chain — first hit wins:
       no machine-specific absolute path required on a fresh machine; P4 2026-10-18,
       see "Cross-machine portability" below)
 - [x] memory **home** repo-agnostic (P5-4 2026-10-19: env `AIDOG_MEMORY_HOME` >
-      local `MEMORY_HOME` > `$HOME/.aidog/memories` > legacy shim profile only
-      while `deploy/upstream_shim.env` exists — see "Memory home" above)
+      local `MEMORY_HOME` > `$HOME/.aidog/memories` > legacy shim profile
+      (**RETIRED at P5-5** — `deploy/upstream_shim.env` deleted, so that step
+      never matches; see "Memory home" above)
 - [x] router vendored + skill paths config-driven (`--dirs` / `AIDOG_SKILL_DIRS` /
       local `SKILL_DIRS` / profile `skills.external_dirs` (shim-gated) /
       `overlay/skills`; GA next step: read `config.yaml skills.extraDirs`
@@ -106,7 +107,7 @@ the first step that yields a value wins:
 | 2 | env `AIDOG_MEMORY_SRC` / `AIDOG_MEMORY_PERSONA` | export + sync |
 | 3 | `MEMORY_SRC` / `MEMORY_PERSONA` in `deploy/memory_sources.local` (gitignored machine config) | export + sync |
 | 4 | portable default `$HOME/.aidog/memory` (materialized by a previous `aidog import`) | export only |
-| 5 | memory-home chain (step 4 of it): `<AIDOG_PROFILE_DIR>/memories` from `deploy/upstream_shim.env` → `source_kind=profile-fallback` — **legacy, only while the shim exists** (see "Memory home" above) | export only |
+| 5 | memory-home chain (step 4 of it): `<AIDOG_PROFILE_DIR>/memories` → `source_kind=profile-fallback` — **RETIRED at P5-5, only while `deploy/upstream_shim.env` existed; never matches post-swap** (see "Memory home" above) | export only |
 
 Rules: a configured-but-missing path (steps 1–3) is a **hard error** — never
 silently export the wrong snapshot, never invent paths; step 4 only applies when

@@ -72,9 +72,17 @@ CRITICAL_PATTERNS: list[tuple[str, re.Pattern]] = [
 
 def kernel_binary() -> str:
     """Transitional kernel binary name, parsed from the shim env (no literal
-    here — the shim is the sanctioned single file for upstream specifics)."""
+    here — the shim is the sanctioned single file for upstream specifics).
+
+    Post-swap (P5-5+): the shim is deleted, so this upstream side is a
+    historical archive only — absent shim returns "unknown-kernel", the same
+    value the OSError path already produced (downstream semantics unchanged:
+    run_upstream then reports the binary as not found, rc=127).
+    """
+    shim = REPO / "deploy" / "upstream_shim.env"
+    if not shim.exists():
+        return "unknown-kernel"  # post-swap: upstream side is a historical archive
     try:
-        shim = REPO / "deploy" / "upstream_shim.env"
         mm = re.search(r'(?m)^export AIDOG_KERNEL_CMD="([^"]+)"', shim.read_text())
         return mm.group(1).split()[0] if mm else "unknown-kernel"
     except OSError:

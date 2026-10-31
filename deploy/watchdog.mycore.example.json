@@ -1,11 +1,11 @@
 {
-  "_note": "mycore watchdog config (P4-1c). Copy to watchdog.mycore.local (gitignored) for machine values: process patterns may contain facts that belong in deploy/upstream_shim.env only. dry_run=true = shadow mode: probe + log + TG alerts, NEVER restarts. Set --execute or dry_run=false explicitly for live restarts. Notifications: env MYCORE_WD_CHAT (chat id) + TELEGRAM_BOT_TOKEN (send-only).",
+  "_note": "mycore watchdog config (P4-1c). Copy to watchdog.mycore.local (gitignored) for machine values: process patterns may contain machine-local facts that belong in deploy/*.local (gitignored) only. dry_run=true = shadow mode: probe + log + TG alerts, NEVER restarts. Set --execute or dry_run=false explicitly for live restarts. Notifications: env MYCORE_WD_CHAT (chat id) + TELEGRAM_BOT_TOKEN (send-only).",
   "dry_run": true,
   "interval_sec": 60,
   "throttle_sec": 300,
   "heartbeat_bj": "09:00",
   "targets": [
-    {"name": "gateway", "kind": "process", "value": "<AIDOG_KERNEL_CMD from upstream_shim.env>"},
+    {"name": "gateway", "kind": "process", "value": "<transition gateway command — target RETIRED at P5-5; drop this entry post-swap>"},
     {"name": "console", "kind": "http", "value": "http://127.0.0.1:8790/api/health"},
     {"name": "model-a", "kind": "http", "value": "http://127.0.0.1:3456/v1/models"}
   ]

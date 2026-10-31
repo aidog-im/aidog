@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# RETIRED at P5-5 mycore swap (2026-10-19): kept for history; boot post-phase
+# no longer starts this (pairing -> configure allowlist in secrets.env
+# AIDOG_TG_ALLOWED_USERS).
 # Approve the newest pending DM-pairing request for the aidog gateway.
 # Workflow (Owner's file-drop pattern): he DMs the bot, drops the bot's reply
 # into a file (optional evidence), we approve the latest pending request.
@@ -7,6 +10,12 @@
 set -euo pipefail
 
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# Graceful retirement: post-swap there is no gateway to pair against — without
+# the upstream shim there is nothing to source. Transition behavior unchanged.
+if [ ! -f "$REPO/deploy/upstream_shim.env" ]; then
+  echo "approve_pairing: RETIRED at P5-5 mycore swap (2026-10-19) — pairing is now plain allowlist config (secrets.env AIDOG_TG_ALLOWED_USERS); nothing to do."
+  exit 0
+fi
 # shellcheck source=upstream_shim.env
 source "$REPO/deploy/upstream_shim.env" || { echo "missing upstream shim" >&2; exit 1; }
 

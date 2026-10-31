@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Idempotent starter for the AiDog runtime tmux sessions:
-#   aidog_gw  - kernel gateway (profile aidog) [transition brain, retires at cutover]
-#   aidog_wd  - legacy watchdog (gateway liveness + crash recovery + heartbeat)
+# Idempotent starter for the AiDog runtime tmux sessions (post-swap P5-5 view):
 #   aidog_web - situational web console (127.0.0.1:8790)
 #   aidog_svc - mycore chat service (P5-2; gated fail-closed until the
 #               dedicated bot token + allowlist are provisioned)
 #   aidog_mwd - mycore watchdog loop (--execute per owner authorization
 #               2026-01-19; log-only notify until MYCORE_WD_CHAT is set)
+# Transition phase only (shim present): aidog_gw (kernel gateway) and
+# aidog_wd (legacy gateway watchdog). Post-swap they are RETIRED: never
+# started, and `status` flags any lingering session as a leftover (rc=1).
 #
 # Designed to be the single entry point invoked at boot (Windows Task
 # Scheduler -> wsl.exe, or /etc/wsl.conf [boot] command - see docs for the
@@ -22,10 +23,21 @@
 set -u
 
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)  # self-deriving: no machine path
-# shellcheck source=upstream_shim.env
-source "$REPO/deploy/upstream_shim.env" || { echo "boot_services: missing upstream shim" >&2; exit 1; }
-GW_PATTERN=$AIDOG_KERNEL_CMD
-GWLOG=$AIDOG_PROFILE_DIR/logs/gateway_run.log
+# P5-5 phase resolver: the upstream shim marks the transition stack.
+#   transition (shim present) = current behavior: source it, run gw/wd.
+#   post (shim deleted)       = gw/wd retired; no upstream facts are sourced,
+#                               GW_PATTERN/GWLOG stay empty (see guards below).
+if [ -f "$REPO/deploy/upstream_shim.env" ]; then
+  PHASE=transition
+  # shellcheck source=upstream_shim.env
+  source "$REPO/deploy/upstream_shim.env" || { echo "boot_services: missing upstream shim" >&2; exit 1; }
+  GW_PATTERN=$AIDOG_KERNEL_CMD
+  GWLOG=$AIDOG_PROFILE_DIR/logs/gateway_run.log
+else
+  PHASE=post
+  GW_PATTERN=""
+  GWLOG=""
+fi
 WEB_LOG=$REPO/deploy/web_console.log
 WEB_PORT=${AIDOG_WEB_PORT:-8790}
 
@@ -72,6 +84,7 @@ PY
 }
 
 start_gw() {
+  if [ "$PHASE" = post ]; then log "aidog_gw: retired (post-swap)"; return 0; fi
   if session_exists aidog_gw || [ -n "$(our_pgrep "$GW_PATTERN")" ]; then
     log "aidog_gw: already running"
   else
@@ -93,6 +106,7 @@ start_gw() {
 }
 
 start_wd() {
+  if [ "$PHASE" = post ]; then log "aidog_wd: retired (post-swap)"; return 0; fi
   if session_exists aidog_wd || [ -n "$(our_pgrep "$WD_PATTERN")" ]; then
     log "aidog_wd: already running"
   else
@@ -135,9 +149,16 @@ start_mwd() {
 }
 
 status() {
-  local rc=0
+  local rc=0 s
   for s in aidog_gw aidog_wd aidog_web aidog_mwd; do
-    if session_exists "$s"; then echo "✅ tmux $s: up"; else echo "❌ tmux $s: DOWN"; rc=1; fi
+    if [ "$PHASE" = post ] && { [ "$s" = aidog_gw ] || [ "$s" = aidog_wd ]; }; then
+      # P5-5: gw/wd sessions must be GONE post-swap — lingering = leftover.
+      if session_exists "$s"; then
+        echo "⚠️ tmux $s: leftover (retired at P5-5 — kill manually)"; rc=1
+      else
+        echo "✅ tmux $s: retired (absent)"
+      fi
+    elif session_exists "$s"; then echo "✅ tmux $s: up"; else echo "❌ tmux $s: DOWN"; rc=1; fi
   done
   # The chat service is expected-absent until provisioning exists: pending is
   # not a failure; provisioned-but-down is.
@@ -148,7 +169,10 @@ status() {
   else
     echo "⏳ tmux aidog_svc: pending (fail-closed: awaiting dedicated bot)"
   fi
-  if [ -n "$(our_pgrep "$GW_PATTERN")" ]; then echo "✅ gateway process: up"; else echo "❌ gateway process: DOWN"; rc=1; fi
+  # Gateway liveness only exists in the transition phase (no GW_PATTERN post).
+  if [ "$PHASE" = transition ]; then
+    if [ -n "$GW_PATTERN" ] && [ -n "$(our_pgrep "$GW_PATTERN")" ]; then echo "✅ gateway process: up"; else echo "❌ gateway process: DOWN"; rc=1; fi
+  fi
   if web_up; then echo "✅ web console :$WEB_PORT: up"; else echo "❌ web console :$WEB_PORT: DOWN"; rc=1; fi
   return $rc
 }
@@ -174,7 +198,11 @@ case "${1:-start}" in
     done
     # watchdog/gateway may linger outside tmux; only kill our own patterns
     pkill -f 'bash .*imaidog/deploy/watchdog.sh' 2>/dev/null && log "watchdog process: stopped"
-    pkill -f "$GW_PATTERN" 2>/dev/null && log "gateway process: stopped"
+    # DANGER: GW_PATTERN is empty in the post-swap phase and `pkill -f ''`
+    # would match (and kill) EVERYTHING incl. this shell — guard on non-empty.
+    if [ -n "$GW_PATTERN" ]; then
+      pkill -f "$GW_PATTERN" 2>/dev/null && log "gateway process: stopped"
+    fi
     pkill -f 'python3 -m mycore.service' 2>/dev/null && log "mycore service: stopped"
     pkill -f 'python3 -m mycore.watchdog' 2>/dev/null && log "mycore watchdog: stopped"
     ;;

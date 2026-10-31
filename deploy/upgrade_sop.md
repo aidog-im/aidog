@@ -1,8 +1,14 @@
 # Upgrade SOP — 上游内核 kernel (Phase 1)
 
+> **HISTORICAL / ARCHIVED at P5-5 mycore swap (2026-10-19)**: the transitional
+> kernel track is retired — the gateway (aidog_gw) and its watchdog (aidog_wd)
+> no longer run, `deploy/upstream_shim.env` (which held `$AIDOG_UPSTREAM_TREE`)
+> is deleted at the swap, and supervision moved to the mycore watchdog.
+> Kept for history; do not follow for current operations.
+
 Goal: upgrade the transitional kernel without touching our overlays, data, or identity.
 Source: upstream `getting-started/updating.md` + `user-guide/configuration.md`
-(installed copy: `$AIDOG_UPSTREAM_TREE/website/docs/...`, path in `deploy/upstream_shim.env`).
+(installed copy: `$AIDOG_UPSTREAM_TREE/website/docs/...`, path in `deploy/upstream_shim.env` — HISTORICAL: that file is deleted at P5-5).
 
 ## Cadence
 
@@ -40,7 +46,7 @@ upstream update            # 8-stage: snapshot → fetch → syntax gate (auto-r
 ## Rollback
 
 - Upstream auto-rolls back on syntax gate failure.
-- Manual: reinstall previous tag in `$AIDOG_UPSTREAM_TREE` (path in `deploy/upstream_shim.env`; stable channel
+- Manual: reinstall previous tag in `$AIDOG_UPSTREAM_TREE` (path lived in `deploy/upstream_shim.env` — HISTORICAL, deleted at P5-5; stable channel
   pins exact commit) + restore `<HOME_DIR>` backup zip via `upstream import`.
 - MIT license guarantees permanent use of already-held versions (no vendor lock-in).
 

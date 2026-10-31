@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# RETIRED at P5-5 mycore swap (2026-10-19): kept for history; boot post-phase
+# no longer starts this (gateway supervision -> mycore watchdog, aidog_mwd).
 # Watchdog for the aidog gateway (P1, transition stack).
 # - 60s liveness loop; crash -> auto-restart via tmux + owner TG alert
 # - persistent-down retry (5 min throttle): a boot-window failure must never
@@ -13,6 +15,14 @@
 set -u
 
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)  # self-deriving: no machine path
+# Graceful retirement: post-swap there is no gateway to supervise — without
+# the upstream shim there is nothing to source (previously exit 1). Exit 0
+# with an explanation so an accidental manual run cannot alarm operators.
+# Transition behavior (shim present) is unchanged.
+if [ ! -f "$REPO/deploy/upstream_shim.env" ]; then
+  echo "watchdog: RETIRED at P5-5 mycore swap (2026-10-19) — gateway supervision moved to the mycore watchdog (aidog_mwd); nothing to supervise, exiting cleanly."
+  exit 0
+fi
 # shellcheck source=upstream_shim.env
 source "$REPO/deploy/upstream_shim.env" || { echo "watchdog: missing upstream shim" >&2; exit 1; }
 
