@@ -13,7 +13,10 @@ Design (repo i18n policy, AGENTS.md):
     caller-supplied fallback, and records every fallback in `missing()` so
     drift is diagnosable instead of silent;
   - `validate()` reports key-set parity across packs (used by
-    tests/source_lang_check.py and by `python3 lib/i18n.py --validate`).
+    tests/source_lang_check.py and by `python3 lib/i18n.py --validate`);
+  - the in-process cache is mtime-aware (hot reload within ~1s): editing a
+    pack never needs a service restart, and a pack edited while the service
+    runs is served with its new keys instead of the caller's fallbacks.
 
 Usage:
     python3 lib/i18n.py --validate     # parity report; exit 1 on drift
@@ -26,6 +29,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -38,13 +42,39 @@ LANG_CODE_RE = re.compile(r"^[a-z][a-z0-9_-]{0,15}$")
 _packs: dict[str, dict[str, str]] | None = None
 _errors: list[str] = []       # load-time problems (bad file / bad shape)
 _missing: list[str] = []      # "lang:key" fallback events (drift diagnostics)
+_sig: tuple | None = None     # (name, mtime_ns, size) of every pack file
+_last_scan = 0.0              # monotonic time of the last freshness probe
+SCAN_INTERVAL = 1.0           # seconds between directory probes
+
+
+def _fingerprint() -> tuple:
+    """Cheap freshness probe: one stat per pack file (name, mtime, size).
+    An unreadable directory answers () so a transient FS error simply keeps
+    the last good cache instead of dropping it."""
+    try:
+        return tuple((p.name, p.stat().st_mtime_ns, p.stat().st_size)
+                     for p in sorted(LOCALES_DIR.glob("*.json")))
+    except OSError:
+        return ()
 
 
 def load(force: bool = False) -> dict[str, dict[str, str]]:
-    """Discover `overlay/locales/*.json` (cached). Returns {lang: {key: str}}."""
-    global _packs, _errors
-    if _packs is not None and not force:
+    """Discover `overlay/locales/*.json" (cached, hot-reloadable).
+
+    The cache is invalidated when a pack file's mtime/size changes — at most
+    once per SCAN_INTERVAL second — so an edited pack is served without a
+    process restart (the old behaviour shipped a stale pack after a key was
+    added: every new key silently fell back to the HTML default text).
+    """
+    global _packs, _errors, _sig, _last_scan
+    now = time.monotonic()
+    if _packs is not None and not force and (now - _last_scan) < SCAN_INTERVAL:
         return _packs
+    _last_scan = now
+    sig = _fingerprint()
+    if _packs is not None and not force and sig == _sig:
+        return _packs
+    _sig = sig
     packs: dict[str, dict[str, str]] = {}
     errors: list[str] = []
     if not LOCALES_DIR.is_dir():

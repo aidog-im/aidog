@@ -98,14 +98,86 @@ def scan_cjk() -> tuple[list[str], int]:
     return violations, scanned
 
 
+# --- P11 (round C): the two CJK surfaces the source scan cannot see --------
+# Locale packs are exempt from scan_cjk() by design (they ARE the zh text),
+# which is exactly how a Chinese value survived in the English pack until
+# round A. Both legs below are walls against that class of regression.
+
+def scan_en_pack_cjk() -> list[str]:
+    """overlay/locales/en.json values must contain no CJK (P11)."""
+    import json
+    rel_path = "overlay/locales/en.json"
+    try:
+        doc = json.loads((REPO / "overlay" / "locales" / "en.json")
+                         .read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return [f"{rel_path}: unreadable ({type(e).__name__}: {e})"]
+    if not isinstance(doc, dict):
+        return [f"{rel_path}: top level must be an object"]
+    return [f"{rel_path}: {k}: {str(v)[:90]}"
+            for k, v in doc.items()
+            if isinstance(v, str) and CJK_RE.search(v)]
+
+
+def scan_defaults_cjk() -> list[str]:
+    """The shipped DEFAULT_SETTINGS literals must contain no CJK (P11).
+
+    AST-based on purpose: no import of the server (zero side effects) and the
+    check keeps its promise even if a future refactor exempts these files from
+    the source scan. Values that are *references* (``DEFAULT_REPORTING`` and
+    friends) are covered line by line by scan_cjk() already — this leg owns
+    every string LITERAL inside the defaults expression.
+    """
+    import ast
+    out: list[str] = []
+    for rel_path in ("web/server.py",):
+        p = REPO / rel_path
+        try:
+            tree = ast.parse(p.read_text(encoding="utf-8"))
+        except (OSError, SyntaxError) as e:
+            out.append(f"{rel_path}: defaults scan failed ({type(e).__name__}: {e})")
+            continue
+        found = False
+        for node in ast.walk(tree):
+            targets = []
+            value = None
+            if isinstance(node, ast.Assign):        # DEFAULT_SETTINGS = {...}
+                targets = [t for t in node.targets if isinstance(t, ast.Name)]
+                value = node.value
+            elif isinstance(node, ast.AnnAssign):   # DEFAULT_SETTINGS: dict = {...}
+                if isinstance(node.target, ast.Name):
+                    targets = [node.target]
+                value = node.value
+            if not any(t.id == "DEFAULT_SETTINGS" for t in targets):
+                continue
+            found = True
+            if value is None:
+                out.append(f"{rel_path}: DEFAULT_SETTINGS has no value")
+                continue
+            for sub in ast.walk(value):
+                if (isinstance(sub, ast.Constant) and isinstance(sub.value, str)
+                        and CJK_RE.search(sub.value)):
+                    out.append(f"{rel_path}: DEFAULT_SETTINGS literal: "
+                               f"{sub.value[:90]}")
+        if not found:
+            out.append(f"{rel_path}: DEFAULT_SETTINGS not found (P11 expectation)")
+    return out
+
+
 def main() -> int:
     from lib import i18n
 
     violations, scanned = scan_cjk()
     rep = i18n.validate()
+    en_pack_cjk = scan_en_pack_cjk()      # P11 leg 1: the English pack
+    defaults_cjk = scan_defaults_cjk()    # P11 leg 2: shipped defaults (AST)
 
     for v in violations:
         print(f"CJK   {v}")
+    for v in en_pack_cjk:
+        print(f"CJKEN {v}")
+    for v in defaults_cjk:
+        print(f"CJKDF {v}")
     if not rep["ok"]:
         for e in rep["errors"]:
             print(f"PACK  {e}")
@@ -116,10 +188,12 @@ def main() -> int:
         for code, keys in rep["extra_keys"].items():
             print(f"PACK  {code}: extra {len(keys)} key(s): {', '.join(keys[:8])}")
 
-    ok = not violations and rep["ok"]
+    ok = (not violations and not en_pack_cjk and not defaults_cjk
+          and rep["ok"])
     counts = ", ".join(f"{c}={n}" for c, n in rep["counts"].items()) or "no packs"
     print(f"{'OK' if ok else 'FAIL'} — source CJK violations: {len(violations)} "
-          f"(files scanned: {scanned}); locale packs: {counts}")
+          f"(files scanned: {scanned}); locale packs: {counts}; "
+          f"P11 en-pack CJK: {len(en_pack_cjk)}, defaults CJK: {len(defaults_cjk)}")
     return 0 if ok else 1
 
 

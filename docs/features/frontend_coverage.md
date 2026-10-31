@@ -266,10 +266,34 @@ the restart handler logs a tmux session name and a return code only.
   pre-existing control, U4 no token/slot value in the DOM or any input
   value, U5 zero `pageerror`, U6 production console health. Run:
   `PW_PATH=<playwright node path> node tmp/e2e_settings_matrix_ui.js`.
+- **`tmp/e2e_d1_discover.py`** (round D car 1, D1 model discovery) — isolated
+  profile, never production: **37 checks · L1–L13 + teardown** — L1 gate and
+  validation matrix (10) · L2–L4 the three `api_key` rules against a live mock,
+  each proving the bearer reached ONLY the endpoint (7) · L5/L6 honest
+  `HTTP 401` / `HTTP 404` / exception class / `not-compatible` (4) · L7/L8 the
+  1MB body ceiling and the timeout promise (2) · L9 empty directory, the
+  200-of-250 cap, and a malformed id plus a REFLECTED key dropped with honest
+  counts (4) · L10/L11 the `{base}/v1/models` fallback and a URL-embedded
+  credential that never comes back in the echo (2) · L12 zero-echo sweep over
+  every shape + the reason grammar + the child's own log (4) · L13 read-only
+  proof — the mock saw only `GET …/models`, never a POST (2) · teardown:
+  production `secrets.env`/`web/settings.json` byte-identical + console healthy
+  (2). Run: `python3 tmp/e2e_d1_discover.py` (rc 0 = 0 fail).
+- **`tmp/d1_ui_probe.js`** — Playwright against the PRODUCTION console,
+  non-destructive (the whitelist is edited in the page and never saved, so a
+  reload restores it): **28 checks · L0/L1/S** — no-token honesty with zero
+  endpoint hits, the key field never raising the save bar, the key absent from
+  DOM and web storage, discovery itself dirtying nothing, pick → ADD → dedup →
+  chips → the sticky bar naming the Model card, select-all, a result checkbox
+  never raising the bar, chip removal through the same input event, the 32
+  ceiling spoken, zh/en repaint of status + ADD + hint + label, reload
+  restoring value/panel/dirty flags, served packs 1213/1213 with an English
+  pack free of Chinese, zero `pageerror`, production health. Run:
+  `PW_PATH=<playwright node path> node tmp/d1_ui_probe.js`.
 - Standing gates (after the CKX-P2 agent-backup car): `mycore/tests/run.py` **2045** ·
   `tests/web_console_p3.py` **432** · `tests/ckx_roundtrip.mjs` **28** ·
   `tests/source_lang_check.py` **0/78**
-  (locale packs **1189/1189**). The 0.5.39 baseline of this page was
+  (locale packs **1213/1213**). The 0.5.39 baseline of this page was
   1168 · 197 · 480/480.
 
 ## 6. Round B re-verification (UX round 2, 2026-10-30)
@@ -296,7 +320,7 @@ this session:
 
 **Gap outcome:** every gap this pass found is a *discoverability or design*
 gap, not a missing editor, with one real exception (no one-click model
-discovery — the whitelist is a manual text field). §6.1 documents what was
+discovery — the whitelist is a manual text field; shipped as D1 in round D). §6.1 documents what was
 implemented but never listed; §6.2 names what is still missing and which
 round owns it.
 
@@ -317,12 +341,13 @@ round owns it.
 | skills_ecosystem | env `AIDOG_SKILL_DIRS` · skill packs in the repo | **read-only** — Skills armory (`GET /api/skills`) + availability projection (`GET /api/skills/remote`) rendered in the Orchestration card | `tmp/e2e_skills_catalog.py` · `tmp/e2e_skills_remote.py` | installing a skill is a repo/pack action by design; the console shows what is mounted and what is missing |
 | community_posting (0.5.54) | `AIDOG_COMMUNITY_PAT` slot · `mycore.community` settings | **configurable** — Discussions view: `#commNew` → `POST /api/discussions/create`, `#commPost` → `POST /api/discussions/comment`, category list from `GET /api/discussions/categories` | smoke `0.5.54 in-app community car: routes, gates and slot verification` | a missing/unverified token disables posting honestly instead of failing silently |
 | extensions (car 2, line 2 IA) | keyless quote sources · `#extIntent` → `POST /api/extensions/intent` · SNIFF links | **read-mostly** — Extensions tabs (Finance / Home / Vehicle): keyless quote probe + intent router; Home and Vehicle are links into the SNIFF board by ruling | smoke `Extensions car (Phase B): GET /api/quotes` + the `POST /api/extensions/intent` legs | no key is required for quotes; the two nav tabs are the thin path to SNIFF |
+| model_discovery (D1, round D) | `POST /api/models/discover` behind `WEB_TOKEN` · `mycore.base_url` (which endpoint to read + when the saved key applies) · `mycore.models` (the whitelist it fills) · optional inline `api_key` (probe only, never stored) | **configurable** — Settings Model card `#discPanel`: `#discKey` + `#discBtn` → `#discOut` checkboxes + select-all → `#discAddBtn` appends into the `#mycModels` field, whose chips (`#mycModelChips`) mirror it both ways | `tmp/e2e_d1_discover.py` **37/37** · `tmp/d1_ui_probe.js` **28/28** | reads `GET {base}/models` only — zero tokens, never a completion; key never echoed/logged/reflected; ≤10s · ≤1MB · ≤200 models; the 32-entry whitelist ceiling is spoken, and the write still rides `#saveBtn` |
 
 ### 6.2 Gaps found — none is a missing editor
 
 | Gap | State today | Routed to |
 |---|---|---|
-| **No one-click model discovery** — `#mycModels` is a manual comma-separated list; `GET {base}/v1/models` is never used | the only true functional gap in this pass | **D1** (design §5.4, independent, zero token) |
+| **No one-click model discovery** — `#mycModels` was a manual comma-separated list; `GET {base}/v1/models` was never used | **resolved by D1** — the DISCOVER panel sits under the whitelist (round D car 1); the text field itself stays on purpose so activation `U6` keeps working, and ADD rides the existing save | shipped (`tmp/e2e_d1_discover.py` 37/37 · `tmp/d1_ui_probe.js` 28/28) |
 | **No usage-ledger toggle in the console**, and the site still promises "only if you opt in" | the collection pipeline itself does not exist yet | **D2** — ruling 1: the same car ships the toggle *and* rewrites `security.s4B` / `models.p1B`, or the site would publish a lie |
 | **No `USER_curated` "what it knows about you" panel** | the file exists and the model edits it; no user-facing read surface | **D4** |
 | **Tail / mood is a text chip** (`#tailState`), no state visual | text only | **D3** |

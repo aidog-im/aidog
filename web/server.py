@@ -103,6 +103,15 @@ Routes:
                                    latency_ms, error_class}] — exception class /
                                    HTTP status only: never a URL query, a body
                                    or a key
+  POST /api/models/discover    -> Bearer; {base_url, api_key?} ONE read-only
+                                   GET of that endpoint's model directory
+                                   (the OpenAI-compatible /models read — never
+                                   a completion, zero tokens) -> {ok:true,
+                                   base_url, count, total, truncated, auth,
+                                   models:[{id}]} | {ok:false, reason} where
+                                   reason is an HTTP status, an exception class
+                                   or a fixed guard word — never the URL, never
+                                   the key, never a response body
   GET  /api/mission             -> mission board (0.5.44): {reporting, active,
                                    recent}; fail-soft empty structure, no auth,
                                    no credential/origin/manifest fields.
@@ -374,6 +383,14 @@ REASONING_EFFORTS = ("", "low", "medium", "high")  # X15 enum ("" = off)
 # Wave 3 backend (X5/X9/X14): caps for the new read/create faces.
 UPSTREAM_TEST_TIMEOUT = 5.0           # seconds allowed to ONE endpoint probe
 UPSTREAM_TEST_URL_MAX = 2048          # chars in an ad-hoc probe url
+# Round D car 1 (D1 model one-click discovery): budgets for ONE read-only
+# GET {base}/models. The 10s/1MB/200 ceilings are promises, not estimates —
+# the timeout reader below clamps any seam back under the same ceiling.
+DISCOVER_TIMEOUT_MAX = 10.0           # seconds for one discovery fetch
+DISCOVER_TIMEOUT_MIN = 0.2            # floor (a seam may speed tests up)
+DISCOVER_BODY_MAX = 1_048_576         # response body cap: 1 MiB + 1 byte read
+DISCOVER_MODELS_MAX = 200             # honest cap on the returned model list
+DISCOVER_KEY_MAX = 512                # chars in an inline api_key
 CRON_PROMPT_MAX = 4096                # chars in a console-created job body
                                       # (the registry's own MAX_TEXT=4000
                                       # still applies inside create_job)
@@ -5256,6 +5273,176 @@ def upstream_probe_targets(url: str | None = None
             for base, key_env, _model in cfg.chain()[1:]], None
 
 
+# ---------------------------------------------- D1 model discovery (round D) --
+def _discover_timeout() -> float:
+    """Seconds allowed to ONE discovery fetch. Default = the documented 10s
+    ceiling; AIDOG_DISCOVER_TIMEOUT is the offline-test seam and is CLAMPED
+    to that same ceiling, so a seam can only ever make the test faster — it
+    can never ask the product to wait longer than it promises."""
+    raw = (os.environ.get("AIDOG_DISCOVER_TIMEOUT") or "").strip()
+    try:
+        value = float(raw) if raw else DISCOVER_TIMEOUT_MAX
+    except ValueError:
+        value = DISCOVER_TIMEOUT_MAX
+    return min(DISCOVER_TIMEOUT_MAX, max(DISCOVER_TIMEOUT_MIN, value))
+
+
+def _model_id_ok(value: str) -> bool:
+    """The SAME grammar POST /api/settings applies to mycore.models entries:
+    a discovery answer offers only ids the save path would accept, so the
+    operator can never pick a chip that the whitelist refuses later."""
+    return bool(value) and value == value.strip() and len(value) <= MODEL_ID_MAX \
+        and not any(ord(c) < 32 or ord(c) == 127 for c in value)
+
+
+def _discover_echo(base: str) -> str:
+    """The submitted endpoint echoed back WITHOUT userinfo, query or
+    fragment: settings may carry a credential in any of those, and nothing
+    we answer, log or raise may repeat it. The REQUEST is sent as given —
+    only the echo is stripped."""
+    try:
+        parts = urllib.parse.urlsplit(base)
+        netloc = parts.netloc.rsplit("@", 1)[-1]   # drop user:pass@host
+        return urllib.parse.urlunsplit(
+            (parts.scheme, netloc, parts.path, "", ""))
+    except ValueError:
+        return ""
+
+
+def _discover_candidates(base: str) -> list[str]:
+    """GET targets in order. {base}/models first — this product stores
+    mycore.base_url WITH the /v1 suffix (the same convention
+    _probe_model_key already uses) — then {base}/v1/models when the path does
+    not already end in /v1, so a bare vendor host typed into the field still
+    resolves the standard directory. Both candidates are read-only directory
+    reads; only 404/405 moves on to the next one."""
+    try:
+        parts = urllib.parse.urlsplit(base)
+    except ValueError:
+        return [base.rstrip("/") + "/models"]
+    tail = parts.path.rstrip("/")
+
+    def build(suffix: str) -> str:
+        return urllib.parse.urlunsplit(
+            (parts.scheme, parts.netloc, tail + suffix, parts.query, ""))
+
+    out = [build("/models")]
+    if not tail.endswith("/v1"):
+        out.append(build("/v1/models"))
+    return out
+
+
+def _discover_auth(base: str, api_key: str) -> tuple[str, str]:
+    """api_key rule (D1), the three cases, in order:
+      1. an inline key travels ONLY as this host's Authorization header;
+      2. an empty key against the CONFIGURED endpoint (settings
+         mycore.base_url) resolves the saved MODEL_API_KEY slot — handy, and
+         the value never leaves this machine;
+      3. an empty key against any other endpoint sends NO Authorization, so
+         an honest 401 tells the operator a key is needed.
+    The returned value lives in the caller's frame only — it is never echoed,
+    never logged and never serialized."""
+    if api_key:
+        return api_key, "key"
+    stored = ""
+    try:
+        mc = load_settings().get("mycore")
+        stored = (str(mc.get("base_url") or "").strip()
+                  if isinstance(mc, dict) else "")
+    except Exception:  # noqa: BLE001 — an unreadable store answers "no slot"
+        stored = ""
+    if stored and base.rstrip("/") == stored.rstrip("/"):
+        try:
+            value = (os.environ.get("MODEL_API_KEY")
+                     or read_env_slot("MODEL_API_KEY") or "")
+        except Exception:  # noqa: BLE001 — an unreadable store reads absent
+            value = ""
+        if value:
+            return value, "slot"
+    return "", "none"
+
+
+def discover_models(base: str, api_key: str = "") -> dict:
+    """D1: one read-only GET of {base}/models — a directory read, so zero
+    tokens are spent and no completion is ever touched.
+
+    Success -> {ok, base_url (sanitized echo), count, total, truncated, auth,
+    models:[{id}]}; failure -> {ok:false, reason} where reason is ONLY an HTTP
+    status, an exception class or one of the fixed guard words
+    (body-too-large / not-compatible): never the URL, never a query, never a
+    body line, never the key. `total` is what the endpoint listed, `count` is
+    what we can honestly offer (grammar-clean, key-free, capped at 200), so
+    `count < total` — by either cap or filter — is visible instead of silent.
+    A reflecting endpoint cannot echo the key back either: an id containing
+    it is dropped like a malformed one."""
+    key, auth = _discover_auth(base, api_key)
+    try:
+        parts = urllib.parse.urlsplit(base)
+        scheme, host = parts.scheme, parts.hostname
+    except ValueError:
+        scheme, host = "", None
+    if scheme not in ("http", "https") or not host:
+        # defense in depth: this function is only ever reached through the
+        # handler's 400, and a non-http scheme would otherwise be fetched by
+        # urllib's other openers (ftp, file) — refuse here as well.
+        return {"ok": False, "reason": "bad-url", "auth": auth}
+    headers = {"User-Agent": "aidog-console"}
+    if key:
+        headers["Authorization"] = "Bearer " + key
+    timeout = _discover_timeout()
+    candidates = _discover_candidates(base)
+    raw = b""
+    status = 0
+    reason = "HTTP 404"
+    for i, url in enumerate(candidates):
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                status = int(getattr(resp, "status", 200) or 200)
+                raw = resp.read(DISCOVER_BODY_MAX + 1)
+        except urllib.error.HTTPError as e:
+            status = int(getattr(e, "code", 0) or 0)
+            reason = f"HTTP {status}"
+            if status in (404, 405) and i + 1 < len(candidates):
+                continue                       # try the standard /v1 path
+            return {"ok": False, "reason": reason, "auth": auth}
+        except urllib.error.URLError as e:
+            inner = getattr(e, "reason", None)
+            return {"ok": False, "auth": auth, "reason":
+                    type(inner).__name__ if inner is not None else "URLError"}
+        except Exception as e:  # noqa: BLE001 — class name only, never text
+            return {"ok": False, "reason": type(e).__name__, "auth": auth}
+        break                                   # a real response: stop asking
+    else:
+        return {"ok": False, "reason": reason, "auth": auth}
+    if not (200 <= status < 300):
+        return {"ok": False, "reason": f"HTTP {status}", "auth": auth}
+    if len(raw) > DISCOVER_BODY_MAX:
+        return {"ok": False, "reason": "body-too-large", "auth": auth}
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+    except Exception as e:  # noqa: BLE001 — JSONDecodeError etc.
+        return {"ok": False, "reason": type(e).__name__, "auth": auth}
+    entries = doc.get("data") if isinstance(doc, dict) else None
+    if not isinstance(entries, list):
+        return {"ok": False, "reason": "not-compatible", "auth": auth}
+    total = len(entries)
+    models: list[str] = []
+    for item in entries:
+        ident = item.get("id") if isinstance(item, dict) else item
+        if not isinstance(ident, str) or not _model_id_ok(ident):
+            continue                            # a save-refused id: not offered
+        if key and key in ident:
+            continue                            # zero echo: a reflecting endpoint
+        models.append(ident)
+        if len(models) >= DISCOVER_MODELS_MAX:
+            break
+    return {"ok": True, "base_url": _discover_echo(base),
+            "count": len(models), "total": total,
+            "truncated": len(models) < total, "auth": auth,
+            "models": [{"id": m} for m in models]}
+
+
 def _slot_present(name: str) -> bool:
     """Presence of ONE model-key slot: process env first (operator override
     wins), then the secrets.env slot the console writes. Value never leaves
@@ -5736,6 +5923,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_profiles_post()
         if path == "/api/mycore/upstreams/test":
             return self._handle_upstreams_test()
+        if path == "/api/models/discover":
+            return self._handle_models_discover()
         if path == "/api/mission":
             return self._handle_mission_post()
         if path == "/api/sniff":
@@ -6534,6 +6723,69 @@ class Handler(BaseHTTPRequestHandler):
                           sum(1 for r in results if r.get("ok")),
                           "yes" if slot else "no"))
         return self._json(results)
+
+    def _handle_models_discover(self) -> None:
+        """POST /api/models/discover {base_url, api_key?} — Bearer gate, then
+        ONE read-only GET of the endpoint's model directory (D1): the
+        OpenAI-compatible /models list, so a discovery spends **zero tokens**
+        and never reaches a completion.
+
+        Same trust posture as /api/mycore/upstreams/test: the console Bearer
+        IS the owner, and the existing hook editor can already write argv, so
+        an owner-gated outbound fetch sits inside the established boundary.
+        The guards below are still enforced (comment kept with the promise):
+        http(s) only · <=10s · body <=1MB · at most 200 models · counts only
+        in the log line.
+
+        api_key never echoes, never logs, never enters an exception: it
+        leaves this frame as one Authorization header for that host and
+        nowhere else (see discover_models/_discover_auth for the three
+        rules). Validation failures answer 400 with an expectation, never
+        with a value; probe failures answer 200 {ok:false, reason} with an
+        HTTP status or an exception class only — the same honest shape the
+        upstream probe uses."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        base = doc.get("base_url")
+        if not isinstance(base, str) or not base.strip():
+            return self._json({"error": "validation failed",
+                               "details": ["base_url must be a non-empty "
+                                           "string"]}, 400)
+        if len(base) > UPSTREAM_TEST_URL_MAX:
+            return self._json({"error": "validation failed",
+                               "details": [f"base_url too long (max "
+                                           f"{UPSTREAM_TEST_URL_MAX} "
+                                           f"chars)"]}, 400)
+        base = base.strip()
+        try:
+            parts = urllib.parse.urlsplit(base)
+            host, scheme = parts.hostname, parts.scheme
+        except ValueError:
+            host, scheme = None, ""
+        if scheme not in ("http", "https") or not host:
+            return self._json({"error": "validation failed",
+                               "details": ["base_url must be an http(s) "
+                                           "endpoint with a host"]}, 400)
+        key = doc.get("api_key", "")
+        if key is None:
+            key = ""
+        if not isinstance(key, str):
+            return self._json({"error": "validation failed",
+                               "details": ["api_key must be a string"]}, 400)
+        if len(key) > DISCOVER_KEY_MAX:
+            return self._json({"error": "validation failed",
+                               "details": [f"api_key too long (max "
+                                           f"{DISCOVER_KEY_MAX} chars)"]}, 400)
+        result = discover_models(base, key.strip())
+        # counts + a boolean only — endpoint, key and body stay out of the log
+        sys.stderr.write("models discover ok=%s n=%s total=%s auth=%s\n" %
+                         ("yes" if result.get("ok") else "no",
+                          result.get("count", 0), result.get("total", 0),
+                          result.get("auth", "none")))
+        return self._json(result)
 
     def _handle_mission_post(self) -> None:
         """POST /api/mission {action: start|stop|pause|resume, goal?, id?,

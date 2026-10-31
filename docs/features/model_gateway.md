@@ -103,6 +103,7 @@ untouched — two sources, each honest about its own availability.
 | `POST /api/mycore/upstreams/test` | Bearer | now accepts `{url, slot}` — per-key probe of a model slot (`slot` alone → 400; non-model slot → 400; unset slot → 400). Capability is no more than save-then-test; the value resolves for ONE header in this frame (X5 rule unchanged) |
 | `POST /api/secrets` | Bearer | additionally accepts `MODEL_UP_K[1-8]` (group `model`, value rule `^\S{8,}$`). **`GET /api/secrets` catalog unchanged (38 rows)** — the pool slots are managed from the Model panel, whose presence comes from `key_presence` |
 | `POST /api/settings` | Bearer | `mycore.endpoints/rotation/max_rpm/max_tpm` + `usage.model_pricing` validated (`_validate_model_pricing`); bool rejected for the caps (`True` is not a cap) |
+| `POST /api/models/discover` | Bearer | **D1 (round D)** `{base_url, api_key?}` → ONE read-only `GET {base}/models` → `{ok:true, base_url, count, total, truncated, auth, models:[{id}]}` \| `{ok:false, reason}`. `reason` is only an HTTP status, an exception class or a fixed guard word (`body-too-large` / `not-compatible` / `bad-url`); `base_url` is echoed WITHOUT userinfo/query/fragment |
 
 ### Settings → Model card
 
@@ -123,6 +124,11 @@ untouched — two sources, each honest about its own availability.
 * **Overview** gains a `SELF-METERED (7 DAYS)` block: requests / ok / fail /
   in / out / cost chips + honest notes (unpriced models, no-usage count,
   truncation). Inactive meter = the whole block hidden, never fake zeros.
+* **DISCOVER MODELS (D1)** sits under the whitelist field: an optional key
+  (probe-only, never stored) + `DISCOVER` → checkboxes + select-all → `ADD`,
+  which appends into the existing `#mycModels` field and rides the normal
+  dirty → `#saveBtn` save (no write route of its own). The field's chips
+  mirror it both ways.
 
 ## 5. Gates (0.5.55)
 
@@ -132,6 +138,40 @@ ChatClient gating) · `tests/web_console_p3.py` **432/432** (validation
 matrix, mutex, secrets group, both new routes) · `tmp/e2e_gateway_ui.js`
 **25/25** (manager round trips, knob persistence, pool write + DOM grep,
 remove, self block, zh repaint, zero pageerror).
+
+## 6. Model one-click discovery (D1, round D car 1)
+
+`GET {base_url}/v1/models` is the OpenAI-compatible standard and **reads a
+model directory — it never spends a token and never reaches a completion**
+(design `ux_round2_design.md` §5.4).
+
+* **Endpoint**: `POST /api/models/discover {base_url, api_key?}` behind the
+  console Bearer. Guards: http(s) + host only · one fetch, ≤10s
+  (`AIDOG_DISCOVER_TIMEOUT` is a clamped test seam) · response ≤1MB ·
+  ≤200 models offered · log line carries counts only.
+* **api_key, three rules** (in the code comments and the panel hint):
+  inline key → that host's `Authorization` header only; empty key +
+  `base_url == settings mycore.base_url` → the saved `MODEL_API_KEY` slot;
+  empty key + any other endpoint → NO `Authorization` (an honest 401 then
+  says a key is needed). The value is never echoed, never logged, never in
+  an exception — and a reflecting endpoint cannot spell it back either (an id
+  containing it is dropped like a malformed one).
+* **Honest answers**: `401 → reason "HTTP 401"`, non-JSON → the exception
+  class, non-list payload → `not-compatible`, >1MB → `body-too-large`;
+  `count`/`total`/`truncated` make both the 200 cap and any filtered id
+  visible instead of silent. A bare host falls back to `{base}/v1/models`.
+* **Client**: `#discPanel` (key + DISCOVER + results + ADD) under the
+  whitelist field. `#mycModels` stays the text field activation `U6` fills;
+  ADD edits it and dispatches one `input` event, so the dirty flag, the
+  sticky save bar and `saveSettings()` remain the single writer. The 32-entry
+  ceiling is spoken (`only {n} added …`), never silent.
+
+Gates: `python3 tmp/e2e_d1_discover.py` **37/37** (validation matrix, the
+three key rules against a live mock, honest reasons, 1MB/timeout budgets,
+cap + filters, `/v1` fallback, URL credential, zero-echo sweep + log sweep,
+read-only proof, production byte identity) · `tmp/d1_ui_probe.js` **28/28**
+(no-token honesty, key absent from DOM/storage, discovery dirties nothing,
+ADD/dedup/chips/bar, checkbox skip, 32 cap, zh/en repaint, reload restores).
 
 ## Deliberately not in this car
 

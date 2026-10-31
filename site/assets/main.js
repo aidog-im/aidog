@@ -87,7 +87,7 @@
     document.documentElement.lang = (l === "zh") ? "zh-Hans" : "en";
     var label = document.getElementById("langLabel");
     if (label) label.textContent = (l === "en") ? "ZH" : "EN";  // pack value overwrites via data-i18n
-    loadDict(l).then(applyDict);
+    loadDict(l).then(function (d) { applyDict(d); renderShelf(); });
   }
 
   var langBtn = document.getElementById("langBtn");
@@ -143,6 +143,65 @@
       });
     }, { threshold: 0.12 });
     reveals.forEach(function (el) { io.observe(el); });
+  }
+
+  /* ------------------------------------------ skills shelf (round C, S1) ---
+     The home shelf mounts cards from skills/catalog.json — the SAME file
+     /skills reads, so the two pages can no longer contradict each other.
+     The grid stays [hidden] until at least one card exists: no-JS readers
+     see the caption and the two doors, and a JS fetch that fails shows the
+     honest skills.empty* state instead of an empty frame. Card text comes
+     from the active pack (skills.card.<slug> / skills.cat.<category>) so a
+     language switch repaints it like every other string; the catalog's own
+     description is the fallback when a pack key does not exist. */
+  var shelfGrid = document.getElementById("shelfGrid");
+  var shelfEmpty = document.getElementById("shelfEmpty");
+  var shelfEntries = null;
+
+  function shelfCard(entry) {
+    var d = dicts[lang] || {};
+    var wrap = document.createElement("div");
+    wrap.className = "shelf-card";
+    var cat = document.createElement("span");
+    cat.className = "shelf-cat";
+    cat.textContent = (entry.category && d["skills.cat." + entry.category]) ||
+      entry.category || "";
+    var name = document.createElement("h4");
+    name.className = "shelf-name";
+    name.textContent = entry.name || entry.slug || "";
+    var body = document.createElement("p");
+    var descKey = "skills.card." + (entry.slug || "");
+    body.textContent = d[descKey] || entry.description || "";
+    wrap.appendChild(cat);
+    wrap.appendChild(name);
+    wrap.appendChild(body);
+    return wrap;
+  }
+
+  function renderShelf() {
+    if (!shelfGrid || !shelfEntries || !shelfEntries.length) return;
+    shelfGrid.innerHTML = "";
+    shelfEntries.slice(0, 6).forEach(function (entry) {
+      shelfGrid.appendChild(shelfCard(entry));
+    });
+    shelfGrid.hidden = false;
+    if (shelfEmpty) shelfEmpty.hidden = true;
+  }
+
+  function shelfFallback() {
+    if (shelfGrid) shelfGrid.hidden = true;
+    if (shelfEmpty) shelfEmpty.hidden = false;
+  }
+
+  if (shelfGrid) {
+    fetch("skills/catalog.json")
+      .then(function (r) { if (!r.ok) throw new Error("http " + r.status); return r.json(); })
+      .then(function (d) {
+        shelfEntries = (d && Array.isArray(d.skills)) ? d.skills : [];
+        if (!shelfEntries.length) { shelfFallback(); return; }
+        renderShelf();
+      })
+      .catch(shelfFallback);
   }
 
   /* --------------------------------------------------- fact ticker --- */

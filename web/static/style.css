@@ -1724,6 +1724,27 @@ a.btn.ext-link { display: inline-flex; align-items: center; text-decoration: non
 .ckx-badge:hover, .ckx-badge:focus-visible { border-color: var(--blue); }
 .ckx-badge img { display: block; height: 30px; width: auto; }
 
+/* Round C (owner report): the native file face is drawn by the UA in the
+   BROWSER's interface language (it lives in the UA shadow DOM), so it is
+   hidden and replaced by a pack-driven face. The input keeps full size,
+   opacity 0 and a higher z-index: clicking or keyboard-focusing the face
+   reaches the real control (ring via :focus-within). */
+.file-face { position: relative; display: inline-flex; align-items: center;
+  gap: 10px; flex: 1; min-width: 0; min-height: 34px; padding: 4px 12px;
+  border: 1px solid var(--line); border-radius: 6px; background: #fff;
+  overflow: hidden; cursor: pointer; }
+.file-face:focus-within { border-color: var(--blue); box-shadow: var(--glow); }
+.file-face input[type=file] { position: absolute; inset: 0; z-index: 2;
+  width: 100%; height: 100%; margin: 0; padding: 0; border: 0;
+  opacity: 0; cursor: pointer; }
+.file-btn { position: relative; z-index: 1; flex: 0 0 auto;
+  font-family: var(--mono); font-size: 11px; letter-spacing: .1em;
+  text-transform: uppercase; color: #fff; background: var(--blue-deep);
+  border-radius: 4px; padding: 5px 10px; }
+.file-name { position: relative; z-index: 1; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; color: var(--muted);
+  font-family: var(--mono); font-size: 12px; }
+
 /* ------------------------------------ Car 4 (D6): intent routing row ------- */
 /* Sits directly under the Extensions tabs: input + ROUTE + honest status.
    It collapses to one wrapped line on narrow viewports (no overflow). */
@@ -1795,3 +1816,87 @@ a.btn.ext-link { display: inline-flex; align-items: center; text-decoration: non
 .br-audit .br-line .ok { color: var(--ok); }
 .br-audit .br-line .bad { color: var(--red); }
 .br-audit .br-empty { font-size: 12.5px; color: var(--muted); }
+
+/* ================ Round C console half (P4 / P3 / P6) =================== */
+/* P4 — the one plain-language status sentence under the Overview subtitle.
+   Colours reuse the already-audited tokens (--ok / --amber / --red / --text). */
+.ov-state { margin-top: 10px; max-width: 800px; font-size: 16.5px; line-height: 1.6;
+  font-weight: 600; color: var(--text); }
+.ov-state[data-state="ok"] { color: var(--ok); }
+.ov-state[data-state="paused"],
+.ov-state[data-state="attention"] { color: var(--amber); }
+.ov-state[data-state="down"] { color: var(--red); }
+.ov-state[data-state="checking"] { color: var(--muted); font-weight: 500; }
+
+/* P4 — one technical home behind the disclosure (collapsed by default) */
+.ov-tech { margin: 0 0 6px; padding: 14px 16px; border: 1px solid var(--line-solid);
+  background: var(--panel); }
+.ov-tech[hidden] { display: none; }
+.ov-tech .stat-grid { display: grid; gap: 10px 20px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+#ovTechBtn[aria-expanded="true"] { border-color: var(--blue);
+  color: var(--blue-ink); }
+
+/* P3 — two-tier Settings (segmented control beside the group chips) */
+.set-tier { display: inline-flex; border: 1px solid var(--line-solid);
+  border-radius: 6px; overflow: hidden; flex: 0 0 auto; }
+.set-tier-btn { border: 0; background: #fff; color: var(--muted);
+  font-family: var(--mono); font-size: 11px; letter-spacing: .12em;
+  text-transform: uppercase; padding: 7px 12px; cursor: pointer; }
+.set-tier-btn + .set-tier-btn { border-left: 1px solid var(--line-solid); }
+.set-tier-btn.is-active { background: var(--blue-deep); color: #fff; }
+.set-tier-hint { margin-top: 8px; }
+.set-tools.is-guided .set-chips { display: none; }
+
+/* P6 — the sticky save bar (names the dirty card, mirrors #saveState) */
+.save-bar { position: sticky; bottom: 0; z-index: 30;
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  margin-top: 14px; padding: 10px 14px; background: var(--panel);
+  border: 1px solid var(--line-solid); border-top: 2px solid var(--blue);
+  box-shadow: 0 -10px 24px rgba(0, 22, 51, .10); }
+.save-bar[hidden] { display: none; }
+.save-bar-card { font-family: var(--mono); font-size: 12.5px; color: var(--navy);
+  overflow-wrap: anywhere; }
+.save-bar-state { flex: 1 1 auto; font-size: 13px; color: var(--amber); }
+.save-bar-state[data-kind="ok"],
+.save-bar-state[data-kind="same"] { color: var(--ok); }
+.save-bar-state[data-kind="err"] { color: var(--red); }
+.save-bar .btn { margin-left: auto; }
+
+@media (max-width: 640px) {
+  .save-bar { gap: 8px; }
+  .save-bar .btn { margin-left: 0; width: 100%; }
+  .set-tier { order: 3; }
+}
+/* The bar sticks over the content it summarises: let clicks pass through to
+   whatever is underneath (a test or an operator aiming at #saveBtn below it)
+   while the bar's own button keeps receiving them. */
+.save-bar { pointer-events: none; }
+.save-bar button, .save-bar a { pointer-events: auto; }
+
+/* =============================================================== *
+ *  D1 model discovery (round D car 1) — whitelist chips under the  *
+ *  text field + the DISCOVER panel. Pure addition: the field above *
+ *  stays the source of truth, the chips mirror it, and every colour *
+ *  comes from a token the contrast audit already passes.           *
+ * =============================================================== */
+.model-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.model-chips .chip { display: inline-flex; align-items: center; gap: 7px;
+  max-width: 100%; text-transform: none; letter-spacing: 0; font-size: 12px;
+  overflow-wrap: anywhere; }
+.model-chip-x { border: 0; background: none; padding: 0 2px; cursor: pointer;
+  font-size: 14px; line-height: 1; color: var(--muted); }
+.model-chip-x:hover { color: var(--navy); }
+.disc-panel { margin-top: 12px; padding-top: 12px;
+  border-top: 1px dashed var(--line); }
+.disc-all { display: inline-flex; align-items: center; gap: 8px;
+  font-family: var(--mono); font-size: 12px; color: var(--muted);
+  letter-spacing: .04em; }
+.disc-row { display: flex; align-items: center; gap: 9px;
+  font-family: var(--mono); font-size: 12.5px; }
+.disc-row > span { min-width: 0; overflow-wrap: anywhere; }
+.disc-all input, .disc-row input { width: 16px; height: 16px; flex: 0 0 auto;
+  accent-color: var(--blue); }
+@media (max-width: 640px) {
+  .disc-row { align-items: flex-start; }
+}

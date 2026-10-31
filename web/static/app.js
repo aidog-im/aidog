@@ -58,6 +58,23 @@ async function loadLang(lang) {
   chatBadge(chatBusy);            // badge label follows the active language
   renderCtx(lastCtx);             // X14: context line label follows too
   refreshEventTexts();
+  // Round C (owner report 2026-10-31): every pane whose chrome is baked with
+  // t() at PAINT time has no data-i18n node for the sweep above to rewrite,
+  // so a zh -> en switch used to leave it behind: tail chip + guardrail
+  // numbers, decision row, profiles, checkpoint note, skills tags,
+  // evolution badge/status/log and the bridge status line. Same repaints the
+  // boot sequence performs; the async ones are loopback GETs.
+  renderControl();             // tail chip + guardrail stats (car 7)
+  paintDecisionStatus();       // decision status row (car 4)
+  renderProfiles();            // profile rows (X11)
+  refreshCheckpoints();        // checkpoint note (X10)
+  refreshSkills();             // armory tags + descriptions (repaints ORCH too)
+  refreshEvolution();          // evolution badge / status / log
+  loadBridgeStatus();          // bridge status line (car 6)
+  renderOvState();             // round C (P4): status sentence follows the pack
+  renderOvTech();              // round C (P4): technical rows follow the pack
+  paintOvTechBtn();            // round C (P4): disclosure label follows the pack
+  paintSaveBar();              // round C (P6): bar state follows the pack
   setView(currentView, false);    // re-resolve the view title in the new language
 }
 
@@ -1591,6 +1608,229 @@ async function upstreamTest() {
   }
 }
 
+/* ------------------------------------------- D1: model discovery (round D) --
+   Settings -> Model card. ONE read-only GET {base}/models through
+   POST /api/models/discover (Bearer gate on the server): a directory read,
+   so discovery spends ZERO tokens and never reaches a completion.
+   Hard rules, mirroring the X5/X6 block above:
+     - #discKey is read into one request body and nowhere else — never
+       stored, never rendered, never copied into another node, and it is not
+       a settings field (SAVE_BAR_SKIP), so it can never promise a save;
+     - only the SERVER's reason word is rendered (an HTTP status or an
+       exception class), never a URL, a body line or a key;
+     - ADD only edits the existing #mycModels field and dispatches one
+       `input` event: the dirty flag, the sticky bar and the existing
+       saveSettings() stay the single writer — discovery adds NO write route.
+   The chips under the field mirror it both ways: they render from its value
+   and write back through the same input event, so the text field keeps being
+   the source of truth the activation car's U6 leg fills. */
+const DISCOVER_MAX = 32;              // mycore.models grammar: at most 32 ids
+let discState = { models: [], total: 0, ready: false };
+let discMsgState = null;              // {kind, a, b, reason, raw} — relang repaint
+
+function modelIdList() {
+  const el = document.getElementById("mycModels");
+  if (!el) return [];
+  return String(el.value || "").split(",").map(s => s.trim()).filter(Boolean);
+}
+
+/* chips = a mirror of #mycModels. Every write goes back through ONE input
+   event on the field, so dirty tracking, the sticky save bar and
+   mycoreExtraPayload() see it exactly like a typed edit. */
+function renderModelChips() {
+  const box = document.getElementById("mycModelChips");
+  if (!box) return;
+  const ids = modelIdList();
+  box.innerHTML = "";
+  box.hidden = ids.length === 0;
+  ids.forEach(id => {
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    const label = document.createElement("span");
+    label.textContent = id;
+    const x = document.createElement("button");
+    x.type = "button";
+    x.className = "model-chip-x";
+    x.textContent = "\u00d7";
+    x.setAttribute("aria-label",
+      t("myc.chipDel", "remove {v}").replace("{v}", id));
+    x.addEventListener("click", () => {
+      const el = document.getElementById("mycModels");
+      if (!el) return;
+      el.value = modelIdList().filter(m => m !== id).join(", ");
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    chip.appendChild(label);
+    chip.appendChild(x);
+    box.appendChild(chip);
+  });
+}
+
+function discSelected() {
+  return Array.prototype.map.call(
+    document.querySelectorAll("#discOut input.disc-chk:checked"),
+    el => String(el.value || ""));
+}
+
+function discMsg(state) { discMsgState = state || null; discPaintMsg(); }
+
+/* ONE painter for the status line, re-run on a language switch (same idea as
+   repaintSaveState): a server detail stays verbatim, our own sentences come
+   from the current pack every time. */
+function discPaintMsg() {
+  const el = document.getElementById("discMsg");
+  if (!el) return;
+  const s = discMsgState;
+  if (!s) { el.className = "save-state"; el.textContent = ""; return; }
+  const own = s.kind === "run" || s.kind === "none" || s.kind === "found" ||
+              s.kind === "full" || s.kind === "fail";
+  el.className = "save-state" + (own ? "" : " err");
+  if (s.kind === "run") {
+    el.textContent = t("myc.discoverRun", "reading the model directory…");
+  } else if (s.kind === "none") {
+    el.textContent = t("myc.discoverNone",
+      "the endpoint answered, but listed no models");
+  } else if (s.kind === "found") {
+    el.textContent = t("myc.discoverFound",
+      "{a} of {b} models listed — tick the ones to add")
+      .replace("{a}", String(s.a)).replace("{b}", String(s.b));
+  } else if (s.kind === "full") {
+    el.textContent = t("myc.discoverFull",
+      "only {n} added — the whitelist holds at most 32 entries")
+      .replace("{n}", String(s.a));
+  } else if (s.kind === "fail") {
+    el.textContent = t("myc.discoverFail", "discovery failed — {reason}")
+      .replace("{reason}", String(s.reason || "?"));
+  } else if (s.kind === "net") {
+    el.textContent = t("myc.testNet", "request failed — ") + String(s.raw || "");
+  } else {
+    el.textContent = String(s.raw || "");   // a server detail: verbatim only
+  }
+}
+
+function discPaintAdd() {
+  const btn = document.getElementById("discAddBtn");
+  if (!btn) return;
+  const n = discState.ready ? discSelected().length : 0;
+  btn.textContent = t("myc.discoverAdd", "ADD {n} SELECTED")
+    .replace("{n}", String(n));
+}
+
+function renderDiscResults() {
+  const out = document.getElementById("discOut");
+  const add = document.getElementById("discAddBtn");
+  if (!out) return;
+  out.innerHTML = "";
+  out.hidden = !discState.ready || discState.models.length === 0;
+  if (add) add.hidden = out.hidden;
+  if (out.hidden) { discPaintAdd(); return; }
+  const all = document.createElement("label");
+  all.className = "disc-all";
+  const allBox = document.createElement("input");
+  allBox.type = "checkbox";
+  allBox.id = "discAll";
+  allBox.addEventListener("change", () => {
+    out.querySelectorAll("input.disc-chk").forEach(x => {
+      x.checked = allBox.checked;
+    });
+    discPaintAdd();
+  });
+  const allText = document.createElement("span");
+  allText.setAttribute("data-i18n", "myc.discoverAll");
+  allText.textContent = t("myc.discoverAll", "select all");
+  all.appendChild(allBox);
+  all.appendChild(allText);
+  out.appendChild(all);
+  discState.models.forEach(id => {
+    const row = document.createElement("label");
+    row.className = "disc-row";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.className = "disc-chk";
+    box.value = id;
+    box.addEventListener("change", discPaintAdd);
+    const text = document.createElement("span");
+    text.textContent = id;
+    row.appendChild(box);
+    row.appendChild(text);
+    out.appendChild(row);
+  });
+  discPaintAdd();
+}
+
+/* ADD writes only into #mycModels — and only up to the 32 entries the server
+   grammar accepts. Anything that does not fit says so; nothing is dropped
+   silently. */
+function discAdd() {
+  const el = document.getElementById("mycModels");
+  if (!el) return;
+  const picked = discSelected();
+  if (!picked.length) return;
+  const have = modelIdList();
+  const fresh = picked.filter(m => have.indexOf(m) < 0);
+  const free = Math.max(0, DISCOVER_MAX - have.length);
+  const add = fresh.slice(0, free);
+  if (add.length) {
+    el.value = have.concat(add).join(", ");
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  if (fresh.length > add.length) discMsg({ kind: "full", a: add.length });
+}
+
+async function runDiscover() {
+  const btn = document.getElementById("discBtn");
+  const urlEl = document.getElementById("mycUrl");
+  const keyEl = document.getElementById("discKey");
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    discMsg({ kind: "raw",
+      raw: t("cred.needToken", "access token required — set it in Access") });
+    return;
+  }
+  if (btn) btn.disabled = true;
+  discState = { models: [], total: 0, ready: false };
+  renderDiscResults();
+  discMsg({ kind: "run" });
+  try {
+    const res = await fetch("/api/models/discover", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify({
+        base_url: ((urlEl && urlEl.value) || "").trim(),
+        api_key: ((keyEl && keyEl.value) || "").trim()
+      })
+    });
+    let body = null;
+    try { body = await res.json(); } catch (e) { body = null; }
+    if (!res.ok) {
+      const details = (body && Array.isArray(body.details)) ? body.details : [];
+      discMsg({ kind: "raw", raw: res.status + " · " +
+        (details.length ? details[0]
+          : ((body && body.error) || t("myc.testFail", "test failed"))) });
+      return;
+    }
+    if (!body || body.ok !== true) {
+      discMsg({ kind: "fail", reason: String((body && body.reason) || "?") });
+      return;
+    }
+    const models = (Array.isArray(body.models) ? body.models : [])
+      .map(m => (m && typeof m === "object") ? String(m.id || "") : "")
+      .filter(Boolean);
+    const total = Number.isFinite(Number(body.total))
+      ? Number(body.total) : models.length;
+    discState = { models: models, total: total, ready: true };
+    renderDiscResults();
+    discMsg(models.length
+      ? { kind: "found", a: models.length, b: total }
+      : { kind: "none" });
+  } catch (e) {
+    discMsg({ kind: "net", raw: String((e && e.message) || e).slice(0, 80) });
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 /* ---- v0.5.55 gateway car: structured endpoint manager ------------------
    Source of truth is GET /api/mycore/endpoints (the server resolves env >
    structured > one-line). The panel edits a LOCAL row list; nothing is
@@ -2186,13 +2426,119 @@ function renderEventsWindow(force) {
 }
 
 /* re-render every stream line after a locale swap (first paint may run before
-   the dictionary loads — keys would otherwise stick as literal text) */
+   the dictionary loads — keys would otherwise stick as literal text).
+   Round C: the level and source chips are baked with t() at build time too,
+   so they must follow the message text — without this a zh -> en switch
+   leaves those two chips sitting in the old language. */
 function refreshEventTexts() {
   for (const [, node] of evNodes) {
     if (!node.__ev || node.classList.contains("typing")) continue;
+    const e = node.__ev;
+    const lv = node.querySelector(".lv");
+    if (lv) lv.textContent = t("adv." + (e.level || "info"),
+                              (e.level || "info").toUpperCase());
+    const src = node.querySelector(".src");
+    if (src) src.textContent = t("panel." + e.src, e.src);
     const msg = node.querySelector(".msg");
-    if (msg) msg.textContent = eventText(node.__ev);
+    if (msg) msg.textContent = eventText(e);
   }
+}
+
+/* ---------------------------- round C (P4): one status sentence --------- */
+/* Painted ONLY from /api/status + /api/control + /api/setup: the sentence may
+   never read "all good" while any of those says otherwise (approved copy
+   draft, red line 1). {what} is filled from the EXISTING plain act.item.*
+   keys — no new name keys — and unknown data lands on ov.state.checking. */
+function ovName(key) {
+  const M = {
+    service: "act.item.service", model_endpoint: "act.item.model_endpoint",
+    web_token: "act.item.web_token", model_key: "act.item.model_key",
+    tg_token: "act.item.tg_token", tg_allowlist: "act.item.tg_allowlist",
+    watchdog: "myc.wd",
+  };
+  return M[key] ? t(M[key], key) : null;
+}
+function ovList(keys) {
+  return keys.map(ovName).filter(Boolean).join(" · ");
+}
+function renderOvState() {
+  const el = document.getElementById("ovState");
+  if (!el) return;
+  // English defaults mirror the pack verbatim: a failed pack fetch must read
+  // as English prose, never as a raw key (the fallback-quality class of bug
+  // this round already fixed twice).
+  const EN = {
+    "ov.state.checking": "Checking the console…",
+    "ov.state.down": "Not running: {what} — the details are right below.",
+    "ov.state.paused": "You paused it — new turns are held until you resume. Everything else is running.",
+    "ov.state.attention": "One thing wants a look: {what}. Everything else is running.",
+    "ov.state.ok": "All good — console, service and watchdog are up, and nothing needs you.",
+  };
+  const say = (key, what) => {
+    el.dataset.state = key.slice("ov.state.".length);
+    const raw = t(key, EN[key] || key);
+    el.textContent = what ? raw.replace("{what}", what) : raw;
+  };
+  const st = statusData, ctl = controlData, su = setupData;
+  if (!st) { say("ov.state.checking"); return; }
+  const mc = st.mycore || {};
+  const svc = mc.service && mc.service.state;
+  const wd = mc.watchdog || {};
+  const suIssues = (su && Array.isArray(su.items))
+    ? su.items.filter(it => it && it.required && !it.ok) : [];
+  const down = [];
+  if (svc && svc !== "running") down.push("service");
+  if (wd.state && wd.state !== "up") down.push("watchdog");
+  suIssues.filter(it => it.fmt === false).forEach(it => down.push(it.id));
+  if (down.length) { say("ov.state.down", ovList([...new Set(down)])); return; }
+  if (ctl && ctl.paused) { say("ov.state.paused"); return; }
+  const attention = [];
+  suIssues.forEach(it => attention.push(it.id));
+  if (su && su.model && su.model.reachable === false) attention.push("model_endpoint");
+  if (wd.escalation && Number(wd.escalation.level || 0) > 0) attention.push("watchdog");
+  if (attention.length) { say("ov.state.attention", ovList([...new Set(attention)])); return; }
+  say("ov.state.ok");
+}
+/* The technical rows the sentence summarises: everything cross-cutting that
+   used to shout from three widgets, painted ONCE behind the disclosure. All
+   four labels already exist in the packs; every value is server data. */
+function renderOvTech() {
+  const box = document.getElementById("ovTechGrid");
+  if (!box) return;
+  const rows = [];
+  const st = statusData, su = setupData;
+  const esc = s => escapeHtml(String(s == null ? "" : s));
+  const cell = (k, v) => rows.push(`<div><div class="k">${esc(k)}</div><div class="v">${esc(v)}</div></div>`);
+  if (st) {
+    const mc = st.mycore || {}, svc = mc.service || {}, wd = mc.watchdog || {};
+    cell(t("sec.services", "Services"),
+      svc.state === "running" ? t("act.st.running", "running ✓")
+        : svc.state ? t("act.st.stopped", "stopped")
+        : t("state.unknown", "UNKNOWN"));
+    const wv = wd.state === "up" ? t("state.up", "ONLINE")
+      : wd.state ? t("state.down", "FAULT") : t("state.unknown", "UNKNOWN");
+    cell(t("myc.wd", "MYCORE WATCHDOG"),
+      wv + (wd.age_sec != null ? " · " + Math.round(wd.age_sec) + "s" : ""));
+    if (st.profile) cell(t("prof.active", "active profile"), String(st.profile));
+  }
+  if (su && su.model && su.model.endpoint) {
+    cell(t("act.item.model_endpoint", "Model endpoint"),
+      String(su.model.endpoint) + " · " +
+      (su.model.reachable ? t("act.st.reachable", "reachable ✓")
+                          : t("act.st.unreachable", "unreachable ✗")));
+  }
+  box.innerHTML = rows.join("");
+}
+function paintOvTechBtn() {
+  const b = document.getElementById("ovTechBtn");
+  const tech = document.getElementById("ovTech");
+  if (!b || !tech) return;
+  const open = !tech.hidden;
+  b.setAttribute("aria-expanded", String(open));
+  // keep the node translatable on the NEXT language sweep too
+  b.dataset.i18n = open ? "ov.techHide" : "ov.techShow";
+  b.textContent = t(b.dataset.i18n,
+    open ? "hide technical details" : "TECHNICAL DETAILS");
 }
 
 /* -------------------------------------------------------------- armory --- */
@@ -4504,6 +4850,7 @@ async function refreshControl() {
   try {
     controlData = await fetch("/api/control").then(r => r.json());
     renderControl();
+    renderOvState();           // round C (P4): pause/resume flips the sentence
   } catch (e) { /* keep last */ }
 }
 
@@ -4624,6 +4971,13 @@ function initSettingsPanels() {
   setField("mycShell", myc.shell);
   // activation car: mycore.models / mycore.budget are console-managed now
   setField("mycModels", Array.isArray(myc.models) ? myc.models.join(", ") : "");
+  // D1: chips mirror the field, and the discovery panel starts clean again
+  // (programmatic fills fire no input event, so the chips are painted here)
+  renderModelChips();
+  discState = { models: [], total: 0, ready: false };
+  renderDiscResults();
+  discMsg(null);
+  discPaintAdd();
   setField("mycBudget", myc.budget);
   // Wave 6 delta2: the two opt-in switches round-trip like the other fields
   setField("mycPrune", myc.session_prune_days);
@@ -4674,6 +5028,108 @@ function initSettingsPanels() {
   loadBridgeStatus();          // car 6: routing state + the audit tail
 }
 
+/* ------------------------------ round C (P6): sticky save bar ------------ */
+/* ONE delegated listener marks the CARD that actually changed. Credential
+   rows, the Access token, the send-test box and the four cards with their
+   OWN write path (backup / bridge / connections / mission) are never dirty
+   for saveSettings, so the bar can never promise a write it cannot do. The
+   bar mirrors #saveState verbatim — never a second invented status — and its
+   SAVE runs the very same saveSettings(). */
+const SAVE_BAR_SKIP = "#credList, #tokenInput, #profCreate, #chanTestText, "
+  + "#chanTestTarget, #chanTestRoute, #backupCard, #bridgeCard, "
+  + "#connectionsCard, #missionCard, #orchCard, #discPanel";
+let saveBarCardEl = null;
+
+function saveBarPaint(text, kind) {
+  const bar = document.getElementById("saveBar");
+  const state = document.getElementById("saveBarState");
+  const name = document.getElementById("saveBarCard");
+  if (!bar || !state) return;
+  state.dataset.kind = kind || "dirty";
+  if (text !== undefined) state.textContent = text;
+  if (name && saveBarCardEl) {
+    const h = saveBarCardEl.querySelector("h2");
+    name.textContent = h ? h.textContent.trim() : "";
+  }
+}
+
+function saveBarShow(card, kind, text) {
+  const bar = document.getElementById("saveBar");
+  if (!bar) return;
+  if (card) saveBarCardEl = card;
+  saveBarPaint(text, kind);
+  bar.hidden = false;
+}
+
+function saveBarHide(delayMs) {
+  const bar = document.getElementById("saveBar");
+  if (!bar) return;
+  const drop = () => {
+    if (!document.querySelector(".set-grid > .card[data-dirty='1']")) bar.hidden = true;
+  };
+  if (delayMs) setTimeout(drop, delayMs); else drop();
+}
+
+function saveBarDirty(e) {
+  const el = e.target;
+  if (!el || !el.closest) return;
+  if (el.closest(SAVE_BAR_SKIP)) return;        // not a saveSettings field
+  const card = el.closest(".set-grid > .card");
+  if (!card) return;
+  card.dataset.dirty = "1";
+  saveBarShow(card, "dirty", t("save.dirty", "unsaved changes"));
+}
+
+function paintSaveBar() {                        // language switch (loadLang)
+  const bar = document.getElementById("saveBar");
+  if (!bar || bar.hidden) return;
+  const state = document.getElementById("saveBarState");
+  if (!state) return;
+  const kind = state.dataset.kind;
+  if (kind === "dirty") state.textContent = t("save.dirty", "unsaved changes");
+  else if (kind === "ok") state.textContent = t("save.ok", "saved ✓");
+  else if (kind === "same") state.textContent = t("save.same", "no change ✓");
+  // kind === "err": the server's own detail stays verbatim, like repaintSaveState
+}
+
+function wireRoundC() {
+  // P4 disclosure toggle
+  const techBtn = document.getElementById("ovTechBtn");
+  const tech = document.getElementById("ovTech");
+  if (techBtn && tech && !techBtn.dataset.wired) {
+    techBtn.dataset.wired = "1";
+    techBtn.addEventListener("click", () => {
+      tech.hidden = !tech.hidden;
+      paintOvTechBtn();
+    });
+  }
+  // P6: dirty tracking + the bar's own SAVE + success mirror
+  const view = document.getElementById("view-settings");
+  if (view && !view.dataset.wiredRoundC) {
+    view.dataset.wiredRoundC = "1";
+    ["input", "change"].forEach(ev => view.addEventListener(ev, saveBarDirty));
+    const barBtn = document.getElementById("saveBarBtn");
+    if (barBtn) barBtn.addEventListener("click", () => saveSettings());
+    const src = document.getElementById("saveState");
+    if (src && "MutationObserver" in window) {
+      new MutationObserver(() => {
+        const bar = document.getElementById("saveBar");
+        if (!bar || bar.hidden) return;
+        if (src.classList.contains("err")) {
+          saveBarShow(saveBarCardEl, "err", src.textContent);
+          return;                              // errors stay until the next try
+        }
+        const kind = src.dataset.saveKind;
+        if (!kind) return;                     // still empty: nothing yet
+        document.querySelectorAll(".set-grid > .card[data-dirty='1']")
+          .forEach(c => delete c.dataset.dirty);
+        saveBarShow(saveBarCardEl, kind, src.textContent);
+        saveBarHide(2200);                     // then the bar steps aside
+      }).observe(src, { attributes: true, attributeFilter: ["class", "data-save-kind"] });
+    }
+  }
+}
+
 /* repainted after a language switch: the save row may carry a restart hint
    written in the previous pack (only ever the two success templates — an
    error detail stays verbatim as it was shown) */
@@ -4713,6 +5169,10 @@ function settingsRelang() {
   renderOrch();                // Lane I: orchestration rows follow the pack
   evoCrossCheck();
   renderAgentBackup();         // car 8: agent-backup rows follow the pack too
+  renderFileFace();            // round C: file face text follows the pack
+  renderModelChips();          // D1: chip remove labels follow the pack
+  discPaintMsg();              // D1: discovery status line repaints
+  discPaintAdd();              // D1: ADD label repaints with the selection
 }
 
 /* ------------------------------ car B2: evolution / exchange / overview --
@@ -5554,6 +6014,8 @@ async function refreshSetup() {
   }
   setupSeen = true;
   renderSetup();
+  renderOvState();             // round C (P4): ready / endpoint state follows
+  renderOvTech();
 }
 
 function actFocusEl(el) {
@@ -6623,6 +7085,8 @@ async function refreshStatus() {
     // stream lines rendered before status arrived still carry placeholders
     // (e.g. the boot event's {v}) — repaint them now that version is known
     refreshEventTexts();
+    renderOvState();           // round C (P4): the sentence follows the data
+    renderOvTech();            // round C (P4): so do the technical rows
   } catch (e) {
     document.getElementById("ts").textContent = t("tool.statusErr", "status error");
   }
@@ -8244,6 +8708,13 @@ if (doctorRunEl) doctorRunEl.addEventListener("click", doctorRun);
 /* Wave 4: X5 endpoint test button + X9 cron create (form + Enter keys) */
 const upTestBtnEl = document.getElementById("upTestBtn");
 if (upTestBtnEl) upTestBtnEl.addEventListener("click", upstreamTest);
+/* D1 (round D car 1): discovery panel + the whitelist chips' field mirror */
+const discBtnEl = document.getElementById("discBtn");
+if (discBtnEl) discBtnEl.addEventListener("click", runDiscover);
+const discAddBtnEl = document.getElementById("discAddBtn");
+if (discAddBtnEl) discAddBtnEl.addEventListener("click", discAdd);
+const mycModelsEl = document.getElementById("mycModels");
+if (mycModelsEl) mycModelsEl.addEventListener("input", renderModelChips);
 const cronCreateEl = document.getElementById("cronCreateBtn");
 if (cronCreateEl) cronCreateEl.addEventListener("click", cronCreate);
 ["cronName", "cronSpec", "cronPrompt"].forEach(id => {
@@ -8449,6 +8920,34 @@ function syncCredSetState(w, isSet) {
 /* --- 1. Settings group chips + search ------------------------------- */
 let setGroup = "all";
 
+/* --- round C (P3): two-tier Settings ---------------------------------- */
+/* Advanced (DEFAULT, owner ruling) is today's view byte-for-byte; Guided
+   shows the six cards most people touch and hides the group chips (they
+   would filter a six-card set into nonsense). The choice is remembered per
+   browser; Access and Backup stay visible in both tiers. */
+const SET_TIER_KEY = "aidog_settings_tier";
+const GUIDED_CARDS = ["consoleCard", "usageCard", "modelCard",
+                      "backupCard", "tgCard", "accessCard"];
+let setTier = (() => {
+  try {
+    const v = localStorage.getItem(SET_TIER_KEY);
+    return (v === "guided" || v === "advanced") ? v : "advanced";
+  } catch (e) { return "advanced"; }   // private mode: Advanced, no persistence
+})();
+
+function applyTier() {
+  const tools = document.getElementById("setTools");
+  document.querySelectorAll(".set-tier-btn").forEach(b =>
+    b.classList.toggle("is-active", b.dataset.tier === setTier));
+  if (tools) tools.classList.toggle("is-guided", setTier === "guided");
+  if (setTier === "guided" && setGroup !== "all") {
+    setGroup = "all";                    // chips are hidden in Guided
+    document.querySelectorAll(".set-chip").forEach(b =>
+      b.classList.toggle("is-active", b.dataset.setfilter === "all"));
+  }
+  setApplyFilter();
+}
+
 function setApplyFilter() {
   const grid = document.querySelector("#view-settings .set-grid");
   const searchEl = document.getElementById("setSearch");
@@ -8461,11 +8960,14 @@ function setApplyFilter() {
     const groups = (card.dataset.setgroup || "general").split(/\s+/).filter(Boolean);
     const groupOk = groups.includes("always") || setGroup === "all"
       || groups.includes(setGroup);
+    // round C (P3): the tier decides whether the card exists at all — Guided
+    // shows GUIDED_CARDS only, Advanced (default) shows every card.
+    const tierOk = setTier === "advanced" || GUIDED_CARDS.includes(card.id);
     // reset any child-level marks from the previous pass first
     card.querySelectorAll(".is-filtered").forEach(el =>
       el.classList.remove("is-filtered"));
-    let show = groupOk;
-    if (groupOk && q) {
+    let show = tierOk && groupOk;
+    if (show && q) {
       const h2 = card.querySelector("h2");
       const title = ((h2 && h2.textContent) || "").toLowerCase();
       if (title.includes(q)) {
@@ -8506,6 +9008,17 @@ function wireSettingsFilter() {
       setApplyFilter();
     });
   });
+  document.querySelectorAll(".set-tier-btn").forEach(btn => {
+    if (btn.dataset.wired) return;
+    btn.dataset.wired = "1";
+    btn.addEventListener("click", () => {
+      setTier = btn.dataset.tier === "guided" ? "guided" : "advanced";
+      try { localStorage.setItem(SET_TIER_KEY, setTier); }
+      catch (e) { /* private mode: this visit only */ }
+      applyTier();
+    });
+  });
+  applyTier();                // first paint honours the remembered tier
 }
 
 /* UX round 2 (B2): Overview "Backup & Restore / OPEN" pointer. Navigation
@@ -8852,6 +9365,19 @@ async function bkRestore() {
   }
 }
 
+/* Round C (owner report): our own face for the file input — the browser's
+   native one is localized by the browser itself (UA shadow DOM), so an
+   English session on a zh-locale browser used to show its Chinese words.
+   Idle text comes from the pack; a chosen FILE NAME is data and is shown
+   verbatim, in either language. */
+function renderFileFace() {
+  const input = document.getElementById("bkFile");
+  const name = document.getElementById("bkFileName");
+  if (!input || !name) return;
+  const f = input.files && input.files[0];
+  name.textContent = f ? f.name : t("bk.noFile", "no file chosen");
+}
+
 function wireBackup() {
   const create = document.getElementById("bkCreate");
   const restore = document.getElementById("bkRestore");
@@ -8866,6 +9392,12 @@ function wireBackup() {
     const el = document.getElementById(id);
     if (el) el.addEventListener("change", bkInvalidate);
   });
+  // round C: repaint our file face whenever the selection changes
+  const fileEl = document.getElementById("bkFile");
+  if (fileEl) {
+    fileEl.addEventListener("change", renderFileFace);
+    renderFileFace();           // idle state in the active language
+  }
   const rpass = document.getElementById("bkRPass");
   if (rpass) rpass.addEventListener("input", bkInvalidate);
   create.addEventListener("click", () => { bkCreate(); });
@@ -9116,6 +9648,7 @@ function wireIntentRoute() {
 
 wireIntentRoute();
 wireBackup();
+wireRoundC();                // round C: P4 disclosure + P6 sticky save bar
 
 const startLang = QS_LANG || localStorage.getItem(LANG_KEY) || "en";
 runBoot();

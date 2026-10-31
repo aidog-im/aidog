@@ -50,7 +50,7 @@
       <span class="clock" id="clock">--:--:--</span>
       <button class="btn" id="updateCheckBtn" type="button"
               data-i18n="upd.check">CHECK</button>
-      <button class="btn" id="langBtn">中文</button>
+      <button class="btn" id="langBtn">ZH</button>
     </div>
   </header>
 
@@ -172,6 +172,10 @@
         <div class="view-titles">
           <h2 data-i18n="view.overview.title">Overview</h2>
           <p class="view-sub" data-i18n="view.overview.sub">Services, usage and channel at a glance</p>
+          <!-- Round C (P4): the ONE plain-language status sentence, painted
+               from /api/status + /api/control + /api/setup — never a hardcoded
+               "all good". technical rows live behind the toggle on the right. -->
+          <p class="ov-state" id="ovState" role="status" data-i18n="ov.state.checking">Checking the console…</p>
         </div>
         <!-- Car 7 (D11 restraint): the leash controls + tail state, merged
              into the EXISTING Overview head (no second switchboard). STOP
@@ -186,7 +190,18 @@
                   data-i18n="ctl.pause" data-i18n-t="ctl.pauseHint"
                   title="hold new turns and automatic legs">PAUSE</button>
           <span class="save-state" id="ctlMsg" role="status"></span>
+          <button class="btn" id="ovTechBtn" type="button" aria-expanded="false"
+                  data-i18n="ov.techShow">TECHNICAL DETAILS</button>
         </div>
+      </div>
+      <!-- Round C (P4): ONE technical home. The sentence above is the human
+           summary; the raw rows that used to shout from three widgets sit
+           behind this toggle — the cross-cutting facts painted here, plus the
+           raw mycore readout (same id, same paint path, moved from the
+           Services card). Collapsed by default, one button, one place. -->
+      <div class="ov-tech" id="ovTech" hidden>
+        <div class="stat-grid" id="ovTechGrid"></div>
+        <div class="stat-grid" id="mycoreFacts" hidden></div>
       </div>
       <div class="ov-grid">
         <!-- activation & operations car (0.5.40): the first-run "am I ready?"
@@ -276,9 +291,8 @@
           <h2><span data-i18n="sec.services">Services</span>
               <span class="svc-summary" id="svcSummary">–</span></h2>
           <div class="panel-row" id="panels"></div>
-          <!-- Wave 3 (X3): raw status.mycore{service,watchdog} readout;
-               app.js hides it entirely when the fields are absent. -->
-          <div class="stat-grid" id="mycoreFacts" hidden></div>
+          <!-- Wave 3 (X3): the raw mycore readout moved into the Overview
+               head's TECHNICAL DETAILS toggle (round C, P4) — same id. -->
           <!-- Wave 5 (X10): checkpoint catalog beside the mycore readout —
                METADATA ONLY (id, time, size, repo-relative path, hash): a
                snapshot may cover a credential file, so no snapshot byte can
@@ -333,7 +347,7 @@
              included); the card itself, its passphrase fields and its E2E stay
              untouched in one place. Labels reuse sec.backup / bk.hint /
              sess.openBtn, so this pointer adds no key of its own (the badge
-             above contributes the single new key bk.ckx → packs 1189). -->
+             above contributes bk.ckx; the file face adds bk.choose/bk.noFile). -->
         <div class="card span-1">
           <h2 data-i18n="sec.backup">Backup &amp; Restore</h2>
           <div class="stat-note" data-i18n="bk.hint">one .ckx file holds this console's credentials, settings and memory — encrypted inside this browser, read over the local loopback only</div>
@@ -1056,12 +1070,24 @@
           <button class="set-chip" type="button" data-setfilter="creds"
                   data-i18n="set.grp.creds">Credentials & channels</button>
         </div>
+        <!-- Round C (P3): two-tier settings. Advanced = today's view
+             (DEFAULT, byte-for-byte — owner ruling) and Guided shows the six
+             cards most people touch, hiding the group chips (they would
+             filter a six-card set into nonsense). Choice persists per
+             browser; Access and Backup stay visible in both tiers. -->
+        <div class="set-tier" role="group" aria-label="settings tier">
+          <button class="set-tier-btn" type="button" data-tier="guided"
+                  data-i18n="set.tierGuided">GUIDED</button>
+          <button class="set-tier-btn is-active" type="button" data-tier="advanced"
+                  data-i18n="set.tierAdvanced">ADVANCED</button>
+        </div>
         <input type="search" id="setSearch" class="set-search" autocomplete="off"
                spellcheck="false" data-i18n-ph="set.searchPh"
                placeholder="search settings" aria-label="search settings">
       </div>
+      <p class="set-tier-hint stat-note" id="setTierHint" data-i18n="set.tierHint">Guided shows the six cards most people touch; Advanced opens every card — nothing is ever removed, and Access and Backup stay visible in both.</p>
       <div class="set-grid">
-        <div class="card" data-setgroup="general">
+        <div class="card" data-setgroup="general" id="consoleCard">
           <h2 data-i18n="sec.console">Console</h2>
           <div class="ctl-row">
             <label data-i18n="ctl.sound">UI sound</label>
@@ -1177,8 +1203,19 @@
           <div class="bk-sep" aria-hidden="true"></div>
           <div class="ctl-row">
             <label data-i18n="bk.file">Backup file</label>
-            <input type="file" id="bkFile" accept=".ckx,application/octet-stream"
-                   data-i18n-t="bk.fileT" title="a .ckx file created on this console">
+            <!-- Round C (owner report): the browser draws the native file face
+                 in ITS OWN interface language (a zh-locale browser prints its
+                 localized words) inside the UA shadow DOM, where no language
+                 switch can reach it. The real input stays full-size and
+                 transparent ON TOP — same id (tests and change handlers
+                 untouched), same accept, still focusable — while the visible
+                 face below is ours and comes from the pack. -->
+            <span class="file-face" id="bkFileFace">
+              <input type="file" id="bkFile" accept=".ckx,application/octet-stream"
+                     data-i18n-t="bk.fileT" title="a .ckx file created on this console">
+              <span class="file-btn" aria-hidden="true" data-i18n="bk.choose">CHOOSE FILE</span>
+              <span class="file-name" id="bkFileName" data-i18n="bk.noFile">no file chosen</span>
+            </span>
           </div>
           <div class="ctl-row">
             <label data-i18n="bk.rpass">Unlock passphrase</label>
@@ -1226,7 +1263,7 @@
           </div>
         </div>
 
-        <div class="card" data-setgroup="general">
+        <div class="card" data-setgroup="general" id="usageCard">
           <h2 data-i18n="sec.usage">Usage &amp; Cost</h2>
           <div class="ctl-row">
             <label data-i18n="ctl.currency">Currency</label>
@@ -1264,7 +1301,7 @@
                     placeholder='{"my-model": {"in": 5, "out": 30}, "default": {"in": 1, "out": 2}}'></textarea>
         </div>
 
-        <div class="card" data-setgroup="model">
+        <div class="card" data-setgroup="model" id="modelCard">
           <h2 data-i18n="set.group.model">Model</h2>
           <div class="ctl-row">
             <label data-i18n="ctl.mycModel">Kernel model</label>
@@ -1281,6 +1318,28 @@
             <input type="text" id="mycModels" maxlength="2048" autocomplete="off"
                    spellcheck="false" data-i18n-ph="ctl.mycModelsPh"
                    placeholder="per-task model whitelist, e.g. model-a, model-b">
+          </div>
+          <!-- D1 (round D car 1): one-click model discovery. The text field
+               above STAYS the source of truth (activation U6 fills it), the
+               chips only mirror it, and ADD writes back into it — so the
+               normal dirty -> SAVE path remains the one writer. #discPanel is
+               in SAVE_BAR_SKIP: its key field and result checkboxes are not
+               settings fields and must never promise a save they cannot do. -->
+          <div id="mycModelChips" class="model-chips" hidden></div>
+          <div id="discPanel" class="disc-panel">
+            <div class="ctl-row">
+              <label data-i18n="myc.discoverKey">API key (optional — used for this probe only, never stored)</label>
+              <input type="password" id="discKey" maxlength="512"
+                     autocomplete="new-password" spellcheck="false">
+            </div>
+            <div class="ctl-actions">
+              <button class="btn" id="discBtn" type="button"
+                      data-i18n="myc.discover">DISCOVER MODELS</button>
+              <button class="btn" id="discAddBtn" type="button" hidden>ADD 0 SELECTED</button>
+              <span class="save-state" id="discMsg" role="status"></span>
+            </div>
+            <div id="discOut" class="test-out" hidden></div>
+            <div class="stat-note" data-i18n="myc.discoverHint">Reads the endpoint's model directory (GET /models) — a directory read, so it never spends a token. Empty key: the saved key is used when the endpoint above is the one stored in settings; any other endpoint is called with no key at all, and a 401 then simply says a key is needed. Picked models are appended to the whitelist above — nothing is written until you press SAVE.</div>
           </div>
           <div class="ctl-row">
             <label data-i18n="ctl.mycBudget">Compaction budget (chars)</label>
@@ -1843,6 +1902,16 @@
             <span class="save-state" id="saveState"></span>
           </div>
         </div>
+      </div>
+      <!-- Round C (P6): the sticky save bar — visible only while a Settings
+           card is dirty. It names the card, mirrors the SAME status text the
+           Access row shows (mutated, never duplicated) and its SAVE runs the
+           same saveSettings(). #saveBtn / #saveState keep their ids and
+           positions, so every standing leg keeps working untouched. -->
+      <div class="save-bar" id="saveBar" hidden>
+        <span class="save-bar-card" id="saveBarCard"></span>
+        <span class="save-bar-state" id="saveBarState" data-i18n="save.dirty">unsaved changes</span>
+        <button class="btn primary" id="saveBarBtn" type="button" data-i18n="ctl.save">SAVE</button>
       </div>
     </section>
 

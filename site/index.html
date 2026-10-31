@@ -21,7 +21,8 @@
 <meta name="twitter:title" content="I'm AiDog — a personal embodied AI">
 <meta name="twitter:description" content="A personal embodied AI: a constitution for a personality, curated memory for a life, and a self-developed core that answers to you alone. Permanently free, local-first.">
 <meta name="twitter:image" content="https://aidog.im/assets/icons/icon-512.png">
-<link rel="stylesheet" href="assets/style.css?v=20261029">
+<script>document.documentElement.classList.add("js");</script>
+<link rel="stylesheet" href="assets/style.css?v=20261031-2">
 </head>
 <body>
 
@@ -58,7 +59,8 @@
     <p class="hero-kicker reveal" data-i18n="hero.kicker">PERSONAL · EMBODIED · LOCAL-FIRST</p>
     <h1 class="hero-title reveal"><span data-i18n="hero.title1">I'm AiDog</span><span class="hero-title-sub" data-i18n="hero.title2">grown for one, built for anyone</span></h1>
     <p class="hero-slogan reveal" data-i18n="hero.slogan">Your loyal AI companion</p>
-    <p class="hero-sub reveal" data-i18n="hero.sub">A personal embodied AI — a constitution for a personality, curated memory for a life, and a self-developed core that answers to you alone. Not a platform. Not an assistant farm. One companion, grown for one person, engineered so anyone can run it.</p>
+    <p class="hero-lead reveal" data-i18n="hero.lead">A personal AI that runs on your own machine: talk to it in Telegram or the console, it remembers what matters, and it keeps the jobs you scheduled.</p>
+    <p class="hero-sub reveal" data-i18n="hero.sub">Not a platform. Not an assistant farm. One companion grown for one person — a constitution for a personality, curated memory for a life, a self-developed core that answers to you alone.</p>
     <div class="hero-badges reveal">
       <span class="badge badge-free"><span class="pulse-dot" aria-hidden="true"></span><span data-i18n="hero.badgeFree">PERMANENTLY FREE — forever, no exceptions</span></span>
       <span class="badge badge-core" data-i18n="hero.badgeCore">Self-developed core · 36 modules · 2045/2045 tests</span>
@@ -100,7 +102,7 @@
       <span class="fact"><b>27</b> <span data-i18n="facts.tools">registered tools</span></span>
       <span class="fact"><b>36</b> <span data-i18n="facts.docs">capability docs</span></span>
       <span class="fact"><b>≈21.6k</b> <span data-i18n="facts.loc">lines of core code</span></span>
-      <span class="fact"><b>1189</b> <span data-i18n="facts.i18n">locale keys · en + zh each</span></span>
+      <span class="fact"><b>1213</b> <span data-i18n="facts.i18n">locale keys · en + zh each</span></span>
     </div>
   </div>
 </section>
@@ -158,7 +160,7 @@
   <div class="section-head reveal">
     <span class="section-index">01</span>
     <h2 data-i18n="start.title">Get Started</h2>
-    <p class="section-sub" data-i18n="start.sub">Three steps from a clone to a running local console: fetch the repository, run the one-command installer, then fill the slots in the guided wizard.</p>
+    <p class="section-sub" data-i18n="start.sub">From zero to a running console in three steps. What you need first: Linux, or Windows through WSL2, with Python 3.10+, tmux and git — plus two things only you can bring: a model endpoint and a Telegram bot token.</p>
   </div>
 
   <div class="steps reveal">
@@ -185,7 +187,7 @@
     <div class="step">
       <span class="step-num">3</span>
       <h4 data-i18n="start.step3Title">Fill the slots</h4>
-      <p data-i18n="start.step3Body">The guided wizard prompts for every credential — hidden input on a terminal, values never echoed; output names slots and lengths only. The console's Overview ACTIVATION card mirrors the same check, each row with a FIX deep-link.</p>
+      <p data-i18n="start.step3Body">The wizard asks for what only you have: a console token (any long random string you invent), your bot token, who may talk to it, and where your model lives. A model key is optional — a local endpoint needs none. Values are hidden as you type and never echoed; the console's ACTIVATION card mirrors the same check, with a FIX deep-link on every failing row.</p>
       <div class="cmd">
         <code>aidog setup</code>
         <button class="copy-btn" type="button" data-i18n="start.copy" aria-label="copy command">Copy</button>
@@ -193,7 +195,10 @@
     </div>
   </div>
 
-  <p class="start-note reveal" data-i18n="start.roadmap">Public download &amp; hosted docs land with the public release.</p>
+  <p class="start-done reveal" data-i18n="start.done">Then open http://127.0.0.1:8790 — the console is already running.</p>
+  <p class="start-guide reveal"><a href="https://github.com/aidog-im/aidog/blob/main/docs/installation.md" target="_blank" rel="noopener" data-i18n="start.docsCta">Full install guide — prerequisites, every slot, troubleshooting</a></p>
+
+  <p class="start-note reveal" data-i18n="start.roadmap">Everything here is public today — clone the repository and run the installer. No waitlist, no sign-up key: releases are on GitHub.</p>
 </section>
 
 <!-- ============================================ SKILLS -->
@@ -204,14 +209,27 @@
     <p class="section-sub" data-i18n="skills.sub">A small, curated capability layer. Skills are screened deterministically before they ever reach the model, and only trusted, reviewed entries are recommended — no open marketplace, no supply-chain surprises.</p>
   </div>
 
-  <div class="empty-card reveal">
-    <div class="empty-frame" aria-hidden="true">
-      <span class="empty-slot"></span><span class="empty-slot"></span><span class="empty-slot"></span>
+  <!-- Round C (S1): the shelf mounts the REAL catalog from
+       skills/catalog.json — the same file /skills reads (one source of
+       truth). The grid stays hidden until JS has mounted cards, so a no-JS
+       reader sees the caption and the two doors instead of an empty shelf
+       that contradicts /skills. A failed fetch shows the honest empty state
+       below (skills.empty*), which is what those keys are for now. -->
+  <div class="skill-shelf reveal" id="skillShelf">
+    <div class="shelf-grid" id="shelfGrid" hidden></div>
+    <div class="empty-card shelf-empty" id="shelfEmpty" hidden>
+      <div class="empty-frame" aria-hidden="true">
+        <span class="empty-slot"></span><span class="empty-slot"></span><span class="empty-slot"></span>
+      </div>
+      <h3 class="empty-title" data-i18n="skills.emptyTitle">Curation in progress</h3>
+      <p class="empty-body" data-i18n="skills.emptyBody">No recommended skills are listed yet on this page — but the official directory now ships the first twelve: curated, lint-screened, review-gated entries you can browse and install. Recommendations land here one by one as they pass review.</p>
+      <a class="btn btn-primary" href="/skills" data-i18n="skills.dirCta">Browse the official skills directory</a>
     </div>
-    <h3 class="empty-title" data-i18n="skills.emptyTitle">Curation in progress</h3>
-    <p class="empty-body" data-i18n="skills.emptyBody">No recommended skills are listed yet. We would rather show an honest empty shelf than fill it with names we cannot vouch for. Recommendations land here one by one as they pass review.</p>
-    <a class="btn btn-ghost" href="https://github.com/aidog-im/aidog/issues" target="_blank" rel="noopener" data-i18n="skills.emptyCta">Propose a skill on GitHub Issues</a>
-    <a class="btn btn-primary" href="/skills" data-i18n="skills.dirCta">Browse the official skills directory</a>
+    <p class="shelf-note" data-i18n="skills.curationNote">Curated on purpose — every entry passed a machine gate (structure, format, leak scan) and a human review. No marketplace, no surprise code.</p>
+    <div class="shelf-cta">
+      <a class="btn btn-primary" href="/skills" data-i18n="skills.moreCta">See all twelve in the skills directory</a>
+      <a class="btn btn-ghost" href="https://github.com/aidog-im/aidog/issues" target="_blank" rel="noopener" data-i18n="skills.emptyCta">Propose a skill on GitHub Issues</a>
+    </div>
   </div>
 
   <div class="steps reveal">
@@ -240,7 +258,7 @@
   <div class="section-head reveal in">
     <span class="section-index">03</span>
     <h2 data-i18n="caps.title">Capabilities</h2>
-    <p class="section-sub" data-i18n="caps.sub">What the product actually does, card by card — every line comes from the release gates and the capability docs, nothing invented. The full docs open with the public release.</p>
+    <p class="section-sub" data-i18n="caps.sub">What the product actually does, card by card — every line comes from the release gates and the capability docs, thirty-six of them in the repository today, nothing invented.</p>
   </div>
 
   <div class="feature-grid reveal in">
@@ -248,7 +266,7 @@
     <div class="feature"><h4 data-i18n="caps.c2T">Voice sessions & media BYOK</h4><p data-i18n="caps.c2B">Local speech-to-text sessions with fuzzy wake phrases, TTS announcements through your own engine key, BYOK image generation and Telegram photo send.</p></div>
     <div class="feature"><h4 data-i18n="caps.c3T">Skill workshop</h4><p data-i18n="caps.c3B">Skills ship as SKILL.md with industry-standard frontmatter; the deterministic router picks the TOP3 candidates before any body loads — 30/30.</p></div>
     <div class="feature"><h4 data-i18n="caps.c4T">Two-layer memory</h4><p data-i18n="caps.c4B">Curated long-term memory in bounded Markdown budgets with archive tiers, plus a user-profile layer — memory suite 58/58, no vector store you cannot read.</p></div>
-    <div class="feature"><h4 data-i18n="caps.c5T">Natural-language cron & self-evolution</h4><p data-i18n="caps.c5B">Schedule in plain language — /cron ship the report tomorrow 9am parses into a job that stays fail-closed until you enable it — while /learn and /reflect grow the loop behind lint-gated writes.</p></div>
+    <div class="feature"><h4 data-i18n="caps.c5T">Natural-language cron & self-evolution</h4><p data-i18n="caps.c5B">Schedule in plain language — /cron ship the report tomorrow 9am parses into a job that stays fail-closed until you enable it — while /learn and /reflect grow the loop behind lint-gated writes. Automatic evolution ships off; you switch it on.</p></div>
     <div class="feature"><h4 data-i18n="caps.c6T">9-route channel gateway</h4><p data-i18n="caps.c6B">Telegram is live; nine adapters — Discord / Slack / Email / Webhook / DingTalk / Feishu / WeChat / WhatsApp / Signal — each reports an honest status and stays silent while unconfigured.</p></div>
     <div class="feature"><h4 data-i18n="caps.c7T">Desktop HUD shell</h4><p data-i18n="caps.c7B">An Electron frameless shell with transparency slider, always-on-top and tray — Linux packaging verified, Win/macOS honestly not built yet; desktop suite 15/15.</p></div>
     <div class="feature"><h4 data-i18n="caps.c8T">Multi-profile isolation</h4><p data-i18n="caps.c8B">AIDOG_PROFILE selects fully isolated profiles — settings, secrets, state and body kept apart — proven by a 63/63 isolation gate and an 18-leg real-machine E2E.</p></div>
@@ -256,31 +274,42 @@
     <div class="feature"><h4 data-i18n="caps.c10T">Subagents & MCP</h4><p data-i18n="caps.c10B">Up to three isolated parallel delegates with fresh context, plus an MCP client for stdio and HTTP servers with tool allow/deny filtering.</p></div>
     <div class="feature"><h4 data-i18n="caps.c11T">Hooks & context files</h4><p data-i18n="caps.c11B">Seven lifecycle events can run your own command on a timeout — the child gets only PATH and HOME, never a credential — and context dirs pull shared files into a turn.</p></div>
     <div class="feature"><h4 data-i18n="caps.c12T">OpenAI-compatible gateway</h4><p data-i18n="caps.c12B">The loopback console exposes GET /v1/models and POST /v1/chat/completions — streaming and non-streaming — behind a Bearer token for OpenAI-style tooling.</p></div>
+    <div class="feature"><h4 data-i18n="caps.c13T">Doesn't stop at the first failure</h4><p data-i18n="caps.c13B">Multi-upstream failover with per-endpoint tests and rate caps, web fetch that can route through a relay you run yourself, and a model tier that moves on when an endpoint goes quiet — a dead endpoint costs a retry, not the night.</p></div>
+    <div class="feature"><h4 data-i18n="caps.c14T">Runs while you sleep</h4><p data-i18n="caps.c14B">Plain-language cron, missions with milestones and red lines, and a watchdog that keeps a 24/7 escalation journal — reaching you on Telegram once you give it a chat id. The schedule reads as a rhythm: every job shows its next-due time.</p></div>
+    <div class="feature"><h4 data-i18n="caps.c15T">Always under your hand</h4><p data-i18n="caps.c15B">A tail you can read — IDLE, WORKING, PAUSED, BUDGET HOLD — plus STOP and PAUSE on the Overview, daily budget guardrails, and rules and forbidden zones the constitution has to honour.</p></div>
+    <div class="feature"><h4 data-i18n="caps.c16T">It keeps a memory of you</h4><p data-i18n="caps.c16B">Beyond the tasks it keeps a profile of you — what you prefer, what you said matters — written and updated by the model itself and shown as a gauge in the console. A browsable view of it is next.</p></div>
   </div>
 
+  <!-- Round C (owner instruction, 2026-10-31): the Web3 single-feature block
+       is replaced by the Extensions panel the product actually ships
+       (Exchange -> Extensions, three tabs). Web3 keeps its two safety
+       claims — human approval gate, and no fund-movement path in the core —
+       folded into the note below instead of owning the section. The three
+       pnodes are the three tabs; the gate structure (3 pnodes + approval
+       wording) is deliberately unchanged so no site gate had to loosen. -->
   <div class="empty-card reveal in">
-    <h3 class="empty-title" data-i18n="caps.web3Title">Web3 — orders only through a human gate</h3>
-    <p class="empty-body" data-i18n="caps.web3Sub">Nine venues in one catalog: keyless chain reads (Jupiter, Velora, Hyperliquid, dYdX, GMX, public RPC) beside slot-gated CEX accounts (OKX, Kraken, Binance), all behind six exchange_* tools. Public market data needs no credential; with no slot configured, the order tool never registers at all.</p>
+    <h3 class="empty-title" data-i18n="caps.extTitle">Extensions — one panel, three tabs</h3>
+    <p class="empty-body" data-i18n="caps.extSub">The console's Extensions panel opens three doors: keyless market quotes, your smart home, and your vehicle — the last two are thin paths into Sniff, observed read-only and never driven.</p>
     <div class="pipeline">
       <div class="pnode">
         <span class="pnode-ic" aria-hidden="true">◇</span>
-        <h4 data-i18n="caps.w3p1T">1 · Prepare</h4>
-        <p data-i18n="caps.w3p1B">exchange_prepare_order is a dry run: it stores a plan — venue, side, symbol, quantity, price — and touches nothing.</p>
+        <h4 data-i18n="caps.ext1T">Finance — quotes without a key</h4>
+        <p data-i18n="caps.ext1B">A-share and US quotes fetch with no credential at all, and the trading cockpit links out as an external tool. Orders keep the gate they have always had: prepare, approve, execute — nothing moves without your approval.</p>
       </div>
       <div class="parrow" aria-hidden="true">▸</div>
       <div class="pnode">
         <span class="pnode-ic" aria-hidden="true">◈</span>
-        <h4 data-i18n="caps.w3p2T">2 · Approve</h4>
-        <p data-i18n="caps.w3p2B">You review the plan in the console and approve or reject it behind the local Bearer token. Thresholds ship at 0, so every plan waits for a human.</p>
+        <h4 data-i18n="caps.ext2T">Smart home — observed, not driven</h4>
+        <p data-i18n="caps.ext2B">Home Assistant states and your own bridges are read through declared, read-only senses — GET only, never a service call. This tab is a door into the Sniff board.</p>
       </div>
       <div class="parrow" aria-hidden="true">▸</div>
       <div class="pnode">
         <span class="pnode-ic" aria-hidden="true">◉</span>
-        <h4 data-i18n="caps.w3p3T">3 · Execute</h4>
-        <p data-i18n="caps.w3p3B">exchange_execute_order takes a plan id and nothing else — every field is read back from the stored plan, then re-checked fail-closed against the day's ledger. Market orders never auto-approve at any threshold.</p>
+        <h4 data-i18n="caps.ext3T">Smart vehicle — the same nose</h4>
+        <p data-i18n="caps.ext3B">Vehicle signals ride the same read-only senses and land in the same findings log: again a path into Sniff, not a remote control.</p>
       </div>
     </div>
-    <p class="arch-note" data-i18n="caps.web3Note">Withdrawals, on-chain transfers and transaction signing do not exist in the core at all — no function, no endpoint, no settings key can move funds off a venue. The core suite asserts that absence against the source.</p>
+    <p class="arch-note" data-i18n="caps.extNote">Market data needs no credential, and with no slot configured the order tool never registers at all. Orders stay behind the human gate — prepare, approve, execute — while withdrawals, on-chain transfers and transaction signing do not exist in the core at all; the core suite asserts that absence against the source.</p>
   </div>
 </section>
 
@@ -290,6 +319,7 @@
     <span class="section-index">04</span>
     <h2 data-i18n="sniff.title">Sniff — the nose that speaks first</h2>
     <p class="section-sub" data-i18n="sniff.sub">A read-only sweep smells health, home, vehicle and web signals, turns them into findings with provenance, and speaks first only when one earns it.</p>
+    <p class="smell-line" data-i18n="sniff.smellLine">Sniffing the room — the part of a dog that notices before you do.</p>
   </div>
 
   <div class="pipeline reveal">
@@ -362,7 +392,7 @@
             <span class="mock-nav-item"><span class="mock-nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 9.4a2 2 0 0 1-2 2H7.3L3.6 14V4.4a2 2 0 0 1 2-2h5.9a2 2 0 0 1 2 2z"/><path d="M5.9 6.1h5.2M5.9 8.5h3.3"/></svg></span><span class="mock-nav-label" data-i18n="console.vChat">Chat</span><span class="mock-nav-drop" aria-hidden="true"></span></span>
             <span class="mock-nav-group" data-i18n="console.grpBrowse">Browse</span>
             <span class="mock-nav-item"><span class="mock-nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.9 9.7 6.3 14.1 8 9.7 9.7 8 14.1 6.3 9.7 1.9 8 6.3 6.3z"/></svg></span><span class="mock-nav-label" data-i18n="console.vSkills">Skills</span><span class="mock-nav-drop" aria-hidden="true"></span></span>
-            <span class="mock-nav-item"><span class="mock-nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4.6 1.9v12.2M11.4 1.9v12.2"/><rect x="3" y="4.7" width="3.2" height="5.6" rx=".8"/><rect x="9.8" y="5.9" width="3.2" height="4.4" rx=".8"/></svg></span><span class="mock-nav-label" data-i18n="console.vExchange">Exchange</span><span class="mock-nav-drop" aria-hidden="true"></span></span>
+            <span class="mock-nav-item"><span class="mock-nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4.6 1.9v12.2M11.4 1.9v12.2"/><rect x="3" y="4.7" width="3.2" height="5.6" rx=".8"/><rect x="9.8" y="5.9" width="3.2" height="4.4" rx=".8"/></svg></span><span class="mock-nav-label" data-i18n="console.vExchange">Extensions</span><span class="mock-nav-drop" aria-hidden="true"></span></span>
             <span class="mock-nav-item"><span class="mock-nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13.3 6.7A5.5 5.5 0 0 0 3.6 6.1"/><path d="M2.7 9.3a5.5 5.5 0 0 0 9.7.6"/><path d="M3.3 2.9v3.3h3.3M12.7 13.1V9.8H9.4"/></svg></span><span class="mock-nav-label" data-i18n="console.vEvolution">Evolution</span><span class="mock-nav-drop" aria-hidden="true"></span></span>
             <span class="mock-nav-item"><span class="mock-nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.4h9M2 8h12M2 11.6h7"/></svg></span><span class="mock-nav-label" data-i18n="console.vStream">Stream</span><span class="mock-nav-drop" aria-hidden="true"></span></span>
             <span class="mock-nav-item"><span class="mock-nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="6.1" cy="5.5" r="2.2"/><path d="M2.4 13a3.7 3.7 0 0 1 7.4 0"/><circle cx="11.5" cy="6.3" r="1.7"/><path d="M11.1 9.7a3 3 0 0 1 2.5 3"/></svg></span><span class="mock-nav-label" data-i18n="console.vCommunity">Community</span><span class="mock-nav-drop" aria-hidden="true"></span></span>
@@ -491,7 +521,7 @@
   </div>
 
   <div class="status-banner reveal">
-    <span class="status-pill"><span class="pulse-dot pulse-amber" aria-hidden="true"></span><span data-i18n="models.status">COMING ONLINE — statistics service not yet live</span></span>
+    <span class="status-pill"><span class="pulse-dot pulse-amber" aria-hidden="true"></span><span data-i18n="models.status">STATISTICS NOT LIVE — this page shows the pipeline until the stats endpoint answers.</span></span>
     <p data-i18n="models.statusBody">The aggregation service is being built. Until it ships, this page shows the pipeline design — and nothing else. Any number here before launch would be a lie, so there are none.</p>
   </div>
 
@@ -500,7 +530,7 @@
     <div class="chart-bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
     <div class="chart-message">
       <span class="chart-icon" aria-hidden="true">◔</span>
-      <span data-i18n="models.chartNote">Data will appear here once the stats API goes live</span>
+      <span data-i18n="models.chartNote">Last checked: never — no stats endpoint has answered yet.</span>
     </div>
     <div class="chart-axis" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
   </div>
@@ -565,6 +595,16 @@
       <h4 data-i18n="security.s6T">Free forever</h4>
       <p data-i18n="security.s6B">Permanently free — no paid tier, no in-app purchase, no usage fee, ever.</p>
     </div>
+    <div class="trust-card">
+      <span class="trust-drop" aria-hidden="true"></span>
+      <h4 data-i18n="sec.bkT">One passphrase, one file</h4>
+      <p data-i18n="sec.bkB">Backup &amp; Restore encrypts your credentials, settings and memory into a single .ckx file inside your browser — the passphrase never reaches the server. You can also schedule agent backups that re-run it on a timer you set, with a local call meter and a round-trip restore check.</p>
+    </div>
+    <div class="trust-card">
+      <span class="trust-drop" aria-hidden="true"></span>
+      <h4 data-i18n="sec.obT">It can be told off, and it keeps the correction</h4>
+      <p data-i18n="sec.obB">Rules and forbidden zones sit directly under the constitution. On any conflict the constitution wins, and the reply has to say which rule it did not apply.</p>
+    </div>
   </div>
 
   <div class="cert">
@@ -588,12 +628,10 @@
       </div>
     </div>
   </div>
-</section>
 
-<!-- ============================================ ARCHITECTURE -->
-<section class="section" id="architecture">
-  <div class="section-head reveal">
-    <span class="section-index">08</span>
+  <!-- ============================================ ARCHITECTURE -->
+<div class="arch-block" id="architecture">
+  <div class="section-head arch-head reveal">
     <h2 data-i18n="arch.title">Architecture</h2>
     <p class="section-sub" data-i18n="arch.sub">Three layers, strictly separated — so the core underneath can be swapped without losing who you are.</p>
   </div>
@@ -616,6 +654,7 @@
   </div>
 
   <p class="arch-note reveal" data-i18n="arch.note">The self-developed core is under active development — we publish what the gates prove, nothing more.</p>
+</div>
 </section>
 
 </main>
@@ -651,6 +690,6 @@
   </div>
 </footer>
 
-<script src="assets/main.js?v=20261025"></script>
+<script src="assets/main.js?v=20261031"></script>
 </body>
 </html>

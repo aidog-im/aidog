@@ -149,6 +149,13 @@ unknown-key survival) and `L8` (env → slot → placeholder, in-process),
 `tmp/e2e_activation_ui.js` `U6` (save → server read-back + restart hint) —
 see [frontend_coverage.md](frontend_coverage.md) §4.
 
+Filling the whitelist gained one-click help in round D car 1 (D1): the Model
+card's DISCOVER panel calls `POST /api/models/discover`, which reads
+`GET {base}/models` — a directory read, zero tokens — and appends the picked
+ids into this same field, so the save path above stays the only writer
+(evidence: `tmp/e2e_d1_discover.py` 37/37 · `tmp/d1_ui_probe.js` 28/28; see
+[model_gateway.md](model_gateway.md) §6).
+
 ## 6. Ride-along items (same car)
 
 - **Weekday localization**: `wd.mon … wd.sun` keys in both packs; the TG

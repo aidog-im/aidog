@@ -372,7 +372,11 @@ h1, h2, h3, h4, .serif {
 .section-sub { max-width: 760px; color: var(--muted); margin-top: 14px;
   font-size: 15.5px; line-height: 1.72; }
 
-.reveal { opacity: 0; transform: translateY(26px);
+/* Round C (S7) progressive enhancement: the hidden state applies ONLY when
+   <html> carries .js — a blocking script in <head> adds it before the first
+   paint. Without JavaScript there is no .js class, so every section is
+   visible instead of an empty page. */
+.js .reveal { opacity: 0; transform: translateY(26px);
   transition: opacity .7s ease, transform .7s ease; }
 .reveal.in { opacity: 1; transform: none; }
 
@@ -775,7 +779,7 @@ h1, h2, h3, h4, .serif {
 .parrow { align-self: center; color: var(--blue); font-size: 22px; }
 
 /* --------------------------------------------------- security/trust --- */
-.trust-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.trust-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
 .trust-card {
   position: relative; border: 1px solid var(--line); background: var(--panel);
   padding: 26px 24px 24px;
@@ -973,7 +977,7 @@ html[lang="zh-Hans"] .cert-eyebrow, html[lang="zh-Hans"] .hero-kicker {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .reveal { opacity: 1; transform: none; transition: none; }
+  .js .reveal { opacity: 1; transform: none; transition: none; }
   .pulse-dot, .fact-strip-track, .orb-drop, .led, .orb-core, .chart-icon {
     animation: none !important;
   }
@@ -1002,9 +1006,11 @@ html[lang="zh-Hans"] .cert-eyebrow, html[lang="zh-Hans"] .hero-kicker {
   outline-offset: 3px;
 }
 
-/* --- capabilities: bento rhythm (same 12 cards, same order, same copy) ---
+/* --- capabilities: bento rhythm (16 cards since round C, order unchanged) -
    6-column track so rows can mix wide and narrow tiles:
-   [1 wide][2] · [3][4][5] · [6][7 wide] · [8][9][10] · [11][12] */
+   [1 wide][2] · [3][4][5] · [6][7 wide] · [8][9][10] · [11][12]
+   · [13][14] · [15][16] — the four round-C trait cards pair up in the last
+   two rows so no row ships a ragged half */
 .feature-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
 .feature-grid .feature { grid-column: span 2; }
 .feature-grid .feature:nth-child(1),
@@ -1012,6 +1018,10 @@ html[lang="zh-Hans"] .cert-eyebrow, html[lang="zh-Hans"] .hero-kicker {
 .feature-grid .feature:nth-child(2) { grid-column: span 2; }
 .feature-grid .feature:nth-child(11),
 .feature-grid .feature:nth-child(12) { grid-column: span 3; }
+.feature-grid .feature:nth-child(13),
+.feature-grid .feature:nth-child(14),
+.feature-grid .feature:nth-child(15),
+.feature-grid .feature:nth-child(16) { grid-column: span 3; }
 /* responsive overrides live HERE, after the base rules, so they win the
    cascade — the earlier 1020/640 blocks are intentionally re-stated */
 @media (max-width: 1020px) {
@@ -1093,4 +1103,76 @@ html[lang="zh-Hans"] .cert-eyebrow, html[lang="zh-Hans"] .hero-kicker {
   .section-index, .engrave-rule, .halo, .nav { animation: none !important; }
   .btn, .feature, .step, .pnode, .trust-card, .nav-link, .copy-btn,
   .mcard, .mock-nav-item, .arch-band { transition: none; }
+}
+
+/* =================== Round C (UX round 2, site half) ==================== */
+/* S3 — one plain-language lead line above the creed in the hero */
+.hero-lead { max-width: 600px; margin-top: 22px;
+  font-size: clamp(15.5px, 1.5vw, 18px); line-height: 1.62; color: var(--ink); }
+
+/* S4 — the payoff line and the install-guide link after the three steps */
+.start-done { margin-top: 28px; font-family: var(--mono); font-size: 13.5px;
+  line-height: 1.6; color: var(--ink); border-left: 3px solid var(--blue);
+  padding-left: 14px; }
+.start-guide { margin-top: 14px; }
+.start-guide a { color: var(--blue-deep); text-decoration: underline;
+  text-underline-offset: 3px; }
+.start-guide a:hover { color: var(--ink); }
+
+/* S1 — the home shelf: real cards mounted from skills/catalog.json */
+.shelf-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px; margin-top: 24px; }
+.shelf-grid[hidden], .shelf-empty[hidden] { display: none; }
+.shelf-card { position: relative; overflow: hidden; border: 1px solid var(--line);
+  background: var(--panel); padding: 18px 18px 16px; }
+.shelf-card::before { content: ""; position: absolute; left: 0; right: 0; top: 0;
+  height: 1px; background: var(--ink); opacity: .5; }
+.shelf-cat { display: inline-block; font-family: var(--mono); font-size: 10px;
+  letter-spacing: .14em; text-transform: uppercase; color: var(--blue-deep);
+  border: 1px solid rgba(40, 146, 255, .4); border-radius: 999px; padding: 3px 9px; }
+.shelf-name { font-family: var(--mono); font-size: 14px; color: var(--ink);
+  margin: 12px 0 8px; overflow-wrap: anywhere; }
+.shelf-card p { font-size: 13.5px; line-height: 1.65; color: var(--muted);
+  display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical;
+  overflow: hidden; }
+.shelf-note { margin-top: 22px; max-width: 760px; color: var(--muted);
+  font-size: 14.5px; line-height: 1.7; }
+.shelf-cta { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 18px; }
+
+/* smell trait — the one line under the sniff section head */
+.smell-line { margin: 14px 0 0; font-family: var(--mono); font-size: 12.5px;
+  letter-spacing: .06em; color: var(--blue-deep); }
+
+/* S8 — architecture folded into the security block as a sub-section */
+.arch-block { margin-top: clamp(40px, 6vh, 68px);
+  padding-top: clamp(28px, 4vh, 44px); border-top: 1px dashed var(--line-2); }
+.arch-block .arch-head { margin-bottom: 6px; }
+
+@media (max-width: 1020px) {
+  .shelf-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 640px) {
+  .shelf-grid { grid-template-columns: minmax(0, 1fr); }
+  .shelf-cta { flex-direction: column; align-items: stretch; }
+}
+
+/* =================== Round C · site styling car (visual pass) ============ */
+/* ① Get Started: step 3's approved copy is much longer, so steps 1 and 2
+   used to end in a void. Each card is now a column and the command block is
+   pushed to the bottom edge — the three commands read as one aligned row,
+   and a short card keeps at least the paragraph gap (its p margin). */
+.step { display: flex; flex-direction: column; }
+.step p { margin-bottom: 16px; }
+.step .cmd { margin-top: auto; }
+
+/* ② Sniff senses are the same 6-col bento: [wide][narrow] then a third card
+   alone on the next row. Let the third one take the whole track so the row
+   is not half empty. min-width scoped on purpose: a span larger than the
+   explicit track count would create implicit columns and overflow on the
+   2-col / 1-col breakpoints. */
+@media (min-width: 1021px) {
+  #sniff .feature-grid .feature:nth-child(3) { grid-column: span 6; }
+}
+@media (min-width: 641px) and (max-width: 1020px) {
+  #sniff .feature-grid .feature:nth-child(3) { grid-column: span 2; }
 }

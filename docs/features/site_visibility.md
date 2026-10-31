@@ -85,7 +85,7 @@ GETs (that is how increment is asserted).
 - `site/assets/main.js`: one `fetch("/api/visits", {cache:"no-store"})` on
   load; on any failure (network error, non-2xx, non-numeric count) the whole
   block stays `hidden`. Success reveals it with the integer.
-- Locale packs (`site/i18n/en.json`, `zh.json`, 284 keys each, same-name
+- Locale packs (`site/i18n/en.json`, `zh.json`, 302 keys each, same-name
   parity): `footer.views` = `"Page views:"` / `"页面浏览："`.
 
 ### Degradation ladder (what happens when a permission is missing)
