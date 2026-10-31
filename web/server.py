@@ -48,6 +48,12 @@ Routes:
   GET  /api/exchange/quote      -> READ-ONLY public market probe: venue +
                                    optional symbol -> {venue, symbol, lines};
                                    own 10/60s sliding window -> 429
+  GET  /api/exchange/plans      -> stored W2 order plans (read, no auth —
+                                   same contract as every GET; fail-soft 503)
+  POST /api/exchange/plans/<id>  -> Bearer WEB_TOKEN; {action: approve|reject|
+                                   cancel} -> {plan} | 400 invalid action |
+                                   404 unknown plan id (the ONLY approval
+                                   surface: the model has no such route)
   GET  /api/chat/history        -> current console session (read, loopback)
   GET  /api/voice               -> voice engine capability (edge-tts presence)
   POST /api/say                 -> synthesize speech -> audio/mpeg (cached,
@@ -223,10 +229,15 @@ DEFAULT_SETTINGS: dict = {
     "media": {"image_base_url": "", "image_model": "", "tts_base_url": "", "tts_model": "",
               "stt_model": "base", "tts_engine": "edge",
               "wake_phrases": ["hey aidog", "\u4f60\u597d\u827e\u591a"]},
+    # W2 Web3 auto-approval caps (owner decree 2026-10-25): FAIL-CLOSED
+    # zeros — 0 means nothing approves itself, so every plan waits for the
+    # owner in the console. Non-secret numbers; mycore.exchanges.thresholds
+    # re-validates them on every read and collapses anything unusable to 0.
+    "web3": {"auto_usd_per_tx": 0.0, "auto_usd_daily": 0.0},
 }
 ALLOWED_TOP = ("language", "refresh_sec", "sound", "voice_volume",
                "alert_preview", "currency", "fx_rate", "mycore", "usage",
-               "evolution", "channels", "hooks", "media")
+               "evolution", "channels", "hooks", "media", "web3")
 USAGE_KEYS = ("metrics_url", "pricing_config", "log_dir")
 MYCORE_KEYS = ("base_url", "model", "context_dirs", "upstreams", "mcp", "shell",
                "tools_off")
@@ -267,6 +278,11 @@ _CHANNEL_SCHEMA = {
 # wake phrases are a short list of single-line strings.
 MEDIA_KEYS = ("image_base_url", "image_model", "tts_base_url", "tts_model",
               "stt_model", "tts_engine", "wake_phrases")
+# W2 Web3 partition: the two auto-approval caps, all-or-nothing like every
+# other block (both keys or neither), numbers only, bounded by the same
+# THRESHOLD_MAX_USD mycore.exchanges applies at read time.
+WEB3_KEYS = ("auto_usd_per_tx", "auto_usd_daily")
+WEB3_CAP_USD = 1000000
 STT_MODELS = ("tiny", "base", "small")
 TTS_ENGINES = ("edge", "byok")
 WAKE_PHRASES_MAX = 3
@@ -870,6 +886,33 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                     clean_med[key] = [p.strip() for p in val]
             if clean_med:
                 clean["media"] = clean_med
+    if "web3" in patch:
+        # W2 auto-approval caps: all-or-nothing (both keys or neither),
+        # numbers only (bools refused), bounded 0..1000000 USD. 0 is legal
+        # and means "nothing auto-approves" — the fail-closed default.
+        w3 = patch["web3"]
+        if not isinstance(w3, dict):
+            errors.append("web3 must be an object")
+        else:
+            before_w3 = len(errors)
+            missing_w3 = [k for k in WEB3_KEYS if k not in w3]
+            if missing_w3:
+                errors.append("web3 must set both keys: "
+                              + "|".join(WEB3_KEYS))
+            clean_w3: dict = {}
+            for key in w3:
+                if key not in WEB3_KEYS:
+                    errors.append(f"unknown web3 key: {key}")
+                    continue
+                val = w3[key]
+                if isinstance(val, bool) or not isinstance(val, (int, float)) \
+                        or not (0 <= val <= WEB3_CAP_USD):
+                    errors.append(f"web3.{key} must be a number in "
+                                  f"0..{WEB3_CAP_USD}")
+                    continue
+                clean_w3[key] = float(val)
+            if len(clean_w3) == len(WEB3_KEYS) and len(errors) == before_w3:
+                clean["web3"] = clean_w3
     if "evolution" in patch:
         clean_evo, evo_errors = evolution.validate_evolution_settings(
             patch["evolution"])
@@ -2125,26 +2168,55 @@ def collect_capabilities() -> dict:
     except Exception as e:  # noqa: BLE001
         sys.stderr.write(f"capabilities local_models failed err={type(e).__name__}\n")
         local_models = {"count": 0, "detected": [], "note": "probe failed"}
-    # W1 web3: read-only exchange block — venue rows exactly as mycore.
-    # exchanges returns them (names/kinds/booleans/sentences only, never a
-    # slot value), the exchange_* tools present in the live registry, and
-    # the registry's honest note when the account tools are withheld.
+    # W1/W2 web3: exchange block — venue rows exactly as mycore.exchanges
+    # returns them (names/kinds/booleans/sentences only, never a slot
+    # value), the exchange_* tools present in the live registry, and the
+    # registry's honest note when the account tools are withheld. W2 flips
+    # the top-level promise from read-only to the REAL surface: three CEX
+    # venues carry orders, and only through prepare -> console approval ->
+    # execute; withdrawals and on-chain transfers do not exist here.
     # Fail-soft like every other probe: a broken module degrades to an empty
     # block + one stderr line, never a 500.
     ex_tools = [str(t.get("name", "")) for t in tools
                 if str(t.get("name", "")).startswith("exchange_")]
+    order_gate = "prepare -> console approval -> execute"
     try:
         if reg is None:
             raise RuntimeError("registry unavailable")
         from mycore import exchanges as _exchanges
-        exchange_blk = {"read_only": True,
+        exchange_blk = {"read_only": False,
+                        "orderable": list(_exchanges.ORDERABLE_VENUES),
+                        "order_gate": order_gate,
+                        "withdrawals": False,
+                        "onchain_transfers": False,
                         "venues": list(_exchanges.catalog()),
                         "tools": ex_tools,
                         "note": getattr(reg, "exchange_note", None)}
     except Exception as e:  # noqa: BLE001 — probe must never break the catalog
         sys.stderr.write(f"capabilities exchange probe failed err={type(e).__name__}\n")
-        exchange_blk = {"read_only": True, "venues": [], "tools": [],
-                        "note": "exchange probe failed"}
+        exchange_blk = {"read_only": False, "orderable": [],
+                        "order_gate": order_gate, "withdrawals": False,
+                        "onchain_transfers": False, "venues": [],
+                        "tools": ex_tools, "note": "exchange probe failed"}
+    # W2 web3 block: the auto-approval caps plus the plan counters — pure
+    # numbers and one date, no credential, no venue data. Fail-soft: same
+    # keys with zeroed values + an honest note, never a 500.
+    try:
+        from mycore import exchanges as _web3
+        th = _web3.thresholds(settings)
+        summ = _web3.plan_summary()
+        web3_blk = {"auto_usd_per_tx": float(th.get("per_tx") or 0.0),
+                    "auto_usd_daily": float(th.get("daily") or 0.0),
+                    "pending_plans": int(summ.get("pending_plans") or 0),
+                    "approved_plans": int(summ.get("approved_plans") or 0),
+                    "spent_today_usd": float(summ.get("spent_today_usd") or 0.0),
+                    "ledger_day": str(summ.get("ledger_day") or "")}
+    except Exception as e:  # noqa: BLE001 — probe must never break the catalog
+        sys.stderr.write(f"capabilities web3 probe failed err={type(e).__name__}\n")
+        web3_blk = {"auto_usd_per_tx": 0.0, "auto_usd_daily": 0.0,
+                    "pending_plans": 0, "approved_plans": 0,
+                    "spent_today_usd": 0.0, "ledger_day": "",
+                    "note": "web3 probe failed"}
     return {
         "version": VERSION,
         "mycore": {"model": model, "upstreams_configured": upstreams_ok,
@@ -2159,8 +2231,10 @@ def collect_capabilities() -> dict:
         "local_models": local_models,
         # car 4c media face: stt/image/tts/connectors — booleans and names only
         "media": media_capability(settings),
-        # W1 web3: 8 read-only venues + live exchange_* tool names
+        # W1/W2 web3: 9 venues (3 orderable behind the approval gate) +
+        # live exchange_* tool names + the fail-closed auto-approval caps
         "exchange": exchange_blk,
+        "web3": web3_blk,
     }
 
 
@@ -2238,6 +2312,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(collect_capabilities())
         if path == "/api/exchange/quote":
             return self._handle_exchange_quote()
+        if path == "/api/exchange/plans":
+            return self._handle_exchange_plans()
         if path.startswith("/api/media/"):
             return self._serve_media(path[len("/api/media/"):])
         if path.startswith("/static/i18n/"):
@@ -2272,6 +2348,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_channel_send()
         if path == "/v1/chat/completions":
             return self._handle_openai_chat()
+        if path.startswith("/api/exchange/plans/"):
+            return self._handle_exchange_plan_decide(
+                path[len("/api/exchange/plans/"):])
         return self._json({"error": "not found"}, 404)
 
     # ------------------------------------------------------ evolution legs ---
@@ -3124,6 +3203,63 @@ class Handler(BaseHTTPRequestHandler):
         lines = [ln for ln in str(text).splitlines() if ln.strip()]
         return self._json({"venue": venue, "symbol": symbol or "",
                            "lines": lines})
+
+    def _handle_exchange_plans(self) -> None:
+        """GET /api/exchange/plans — the stored W2 plans, newest first.
+        Read, no token (same contract as every GET): the payload carries
+        plan parameters and counters only, never a credential. Fail-soft:
+        an unavailable plan store answers 503 {error}, never a 500."""
+        try:
+            from mycore import exchanges as _exchanges
+        except Exception as e:  # noqa: BLE001 — module absent = honest 503
+            sys.stderr.write(f"exchange plans import failed err={type(e).__name__}\n")
+            return self._json({"error": "plan store unavailable"}, 503)
+        try:
+            plans = _exchanges.plans_list()
+        except Exception as e:  # noqa: BLE001 — store trouble = honest 503
+            sys.stderr.write(f"exchange plans list failed err={type(e).__name__}\n")
+            return self._json({"error": "plan store unavailable"}, 503)
+        return self._json({"plans": plans})
+
+    def _handle_exchange_plan_decide(self, plan_id: str) -> None:
+        """POST /api/exchange/plans/<id> — THE approval surface (W2).
+        Bearer WEB_TOKEN first (the model has no token and therefore no
+        approve path), then {action: approve|reject|cancel}. An unknown
+        plan id is a 404, every other ExchangeError a 400 carrying the
+        module's honest text verbatim. The token value never appears in a
+        response, a log line, or an exception."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        action = doc.get("action")
+        if not isinstance(action, str) \
+                or action not in ("approve", "reject", "cancel"):
+            return self._json(
+                {"error": "invalid action",
+                 "details": ["action must be one of approve|reject|cancel"]},
+                400)
+        pid = str(urllib.parse.unquote(plan_id) or "").strip()
+        if not pid:
+            return self._json({"error": "not found"}, 404)
+        try:
+            from mycore import exchanges as _exchanges
+        except Exception as e:  # noqa: BLE001 — module absent = honest 503
+            sys.stderr.write(f"exchange plan decide import failed "
+                             f"err={type(e).__name__}\n")
+            return self._json({"error": "plan store unavailable"}, 503)
+        try:
+            plan = _exchanges.plan_decide(pid, action, decided_by="console")
+        except _exchanges.ExchangeError as e:
+            msg = str(e)
+            if msg.startswith("unknown plan_id"):
+                return self._json({"error": msg}, 404)
+            return self._json({"error": msg}, 400)
+        except Exception as e:  # noqa: BLE001 — store trouble, not a 500
+            sys.stderr.write(f"exchange plan decide failed err={type(e).__name__}\n")
+            return self._json({"error": "plan decision failed"}, 502)
+        return self._json({"plan": plan})
 
     def _serve_media(self, name: str) -> None:
         """GET /api/media/<name> — one generated image, and nothing else:

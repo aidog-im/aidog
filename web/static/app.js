@@ -714,15 +714,22 @@ async function imgGenerate() {
 }
 
 /* ----------------------------------------------------------- exchange --
-   Web3 phase-2 W1 read-only venue panel. It renders ONLY from the
-   `exchange` block of GET /api/capabilities: when that block has not
-   shipped yet the panel states so honestly instead of pretending.
-   Server text (label / summary / reason / note / quote lines / error
-   strings) is rendered verbatim as DATA and never translated; every UI
-   label goes through t(key, fallback) and re-renders on a language switch
-   (renderExchange() is called from loadLang and refreshCaps).
+   Web3 phase-2 W2 approval-gated venue panel. It renders ONLY from the
+   `exchange` + `web3` blocks of GET /api/capabilities and from
+   GET /api/exchange/plans: when those blocks have not shipped yet the
+   panel states so honestly instead of pretending. Public market reads are
+   keyless; orders exist only as PLANS the owner decides in this panel —
+   the model's execute step carries a plan id and can never self-approve.
+   Withdrawals and on-chain transfers do not exist in this product at all.
+   Server text (label / summary / reason / fee_note / status / venue /
+   quote lines / error strings) is rendered verbatim as DATA and never
+   translated; every UI label goes through t(key, fallback) and re-renders
+   on a language switch (renderExchange() is called from loadLang and
+   refreshCaps).
    The probe is a GET with an optional symbol: an empty input omits the
-   parameter so the venue default applies. No write, ever. */
+   parameter so the venue default applies. Writes go through one path only:
+   POST /api/exchange/plans/<id> with the Bearer token (same contract as
+   evoPost()). */
 let exBusy = false;
 let exMsg = null;     // probe status: {k,f,a} translated · {raw} verbatim · null
 let exMsgErr = false;
@@ -792,7 +799,7 @@ function renderExchange() {
         <div class="gal-card" data-venue="${escapeHtml(String(v.key))}" tabindex="0">
           <span class="gal-tag">${escapeHtml(t("ex.kind." + v.kind, String(v.kind)))}</span>
           <div class="gal-name">${escapeHtml(String(v.label || v.key))}</div>
-          <div><span class="chat-badge">${escapeHtml(t("ex.auth." + v.auth, String(v.auth)))}</span></div>
+          <div><span class="head-status"><span class="chat-badge">${escapeHtml(t("ex.auth." + v.auth, String(v.auth)))}</span>${v.orderable ? `<span class="chat-badge">${escapeHtml(t("ex.orderable", "orderable"))}</span>` : ""}</span></div>
           <div class="stat-note">${escapeHtml(t("ex.defaultPair", "default pair {sym}")
             .replace("{sym}", String(v.symbol || "\u2014")))}</div>
           <div class="gal-desc">${escapeHtml(String(v.summary || "\u2014"))}</div>
@@ -847,6 +854,11 @@ function renderExchange() {
       : t("ex.probe.idle", "pick a venue, then press FETCH QUOTE");
   }
   if (exMsg) exSetMsg(exMsg, exMsgErr);   // re-translate the live status line
+
+  // W2: the threshold line and the approval queue ride the same render pass
+  // (language switch / capability refresh re-translate them too)
+  renderExThreshold();
+  renderExPlans();
 }
 
 async function exProbe() {
@@ -888,6 +900,285 @@ async function exProbe() {
     if (btn) btn.disabled = !exRows().length;
   }
   renderExchange();
+}
+
+/* --------------------------------------------- W2 order approval panel --
+   Plans are prepared server-side (exchange_prepare_order) and decided by
+   the OWNER here: the model's execute step receives only the plan id, so it
+   can never approve its own plan. GET /api/exchange/plans lists them newest
+   first; POST /api/exchange/plans/<id> {action: approve|reject|cancel} with
+   the Bearer token makes a decision (same write-op contract as evoPost()).
+   Every server string (reason / fee_note / status / venue / error text) is
+   rendered VERBATIM as data through escapeHtml(); only labels come from the
+   locale packs. Nothing is ever invented: an empty queue says so. */
+let exPlans = null;        // array of plan objects | null (never loaded)
+let exPlansErr = null;     // honest failure string from the list GET (verbatim)
+let exPlansBusy = false;   // list fetch in flight
+const exDeciding = {};     // plan id -> action while its POST is in flight
+let exPlanMsg = null;      // {id, raw} last decision error, shown on that card
+
+function exW3() {
+  return (capsData && capsData.web3 && typeof capsData.web3 === "object")
+    ? capsData.web3 : null;
+}
+
+/* numbers are DATA: fixed-point, trailing zeros trimmed, never localized */
+function exNum(v, dp) {
+  if (v === null || v === undefined || v === "") return "\u2014";
+  const n = Number(v);
+  if (!isFinite(n)) return String(v);
+  let s = n.toFixed(dp === undefined ? 6 : dp);
+  if (s.indexOf(".") >= 0) s = s.replace(/0+$/, "").replace(/\.$/, "");
+  return s;
+}
+
+function exClock(epoch) {           // epoch SECONDS -> local HH:MM:SS
+  const ms = Number(epoch) * 1000;
+  if (!isFinite(ms)) return "\u2014";
+  const d = new Date(ms);
+  const p = x => String(x).padStart(2, "0");
+  return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+}
+
+function exDur(sec) {
+  const s = Math.max(0, Math.floor(sec));
+  const p = x => String(x).padStart(2, "0");
+  return p(Math.floor(s / 3600)) + ":" + p(Math.floor(s / 60) % 60) +
+    ":" + p(s % 60);
+}
+
+function exExpiryText(p) {          // "" when the plan carries no expiry
+  const exp = p && p.expires_at !== null && p.expires_at !== undefined
+    ? Number(p.expires_at) : NaN;
+  if (!isFinite(exp) || exp <= 0) return "";
+  const clock = exClock(exp);
+  const left = exp - Date.now() / 1000;
+  return left > 0
+    ? t("ex.plan.expires", "expires {time} \u00b7 in {left}")
+        .replace("{time}", clock).replace("{left}", exDur(left))
+    : t("ex.plan.expired", "expired {time}").replace("{time}", clock);
+}
+
+/* the server's own failure string, verbatim — never a vague substitute */
+function exErrText(res, body) {
+  if (body && typeof body === "object") {
+    if (typeof body.error === "string" && body.error) return body.error;
+    if (typeof body.message === "string" && body.message) return body.message;
+    if (Array.isArray(body.details) && body.details.length) {
+      return body.details.map(String).join("; ");
+    }
+  }
+  return "HTTP " + (res && res.status ? res.status : 0);
+}
+
+async function exPlansLoad() {
+  if (exPlansBusy) return;
+  exPlansBusy = true;
+  renderExPlans();
+  try {
+    const res = await fetch("/api/exchange/plans");
+    const body = await res.json().catch(() => null);
+    if (res.ok && body && Array.isArray(body.plans)) {
+      exPlans = body.plans.filter(p => p && typeof p === "object");
+      exPlansErr = null;
+    } else {
+      exPlansErr = exErrText(res, body);   // keep any last good list visible
+    }
+  } catch (e) {
+    exPlansErr = String(e).slice(0, 200);
+  } finally {
+    exPlansBusy = false;
+    renderExPlans();
+  }
+}
+
+async function exDecide(id, action) {
+  id = String(id === null || id === undefined ? "" : id);
+  if (!id || exDeciding[id]) return;
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {                 // same honest token rule as every write op
+    exPlanMsg = { id: id, raw: t("save.needToken", "token required") };
+    renderExPlans();
+    return;
+  }
+  exPlanMsg = null;
+  exDeciding[id] = action;
+  renderExPlans();               // buttons go disabled while the POST flies
+  try {
+    const res = await fetch("/api/exchange/plans/" + encodeURIComponent(id), {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify({ action: action }) });
+    const body = await res.json().catch(() => null);
+    if (res.ok && body && body.plan && typeof body.plan === "object") {
+      const list = Array.isArray(exPlans) ? exPlans.slice() : [];
+      const i = list.findIndex(p => p && String(p.id) === id);
+      if (i >= 0) list[i] = body.plan; else list.unshift(body.plan);
+      exPlans = list;
+      exPlanMsg = null;
+      refreshCaps();              // pending/approved/spent counts follow
+    } else {
+      exPlanMsg = { id: id, raw: exErrText(res, body) };  // 401 et al., verbatim
+    }
+  } catch (e) {
+    exPlanMsg = { id: id, raw: String(e).slice(0, 200) };
+  } finally {
+    delete exDeciding[id];
+    renderExPlans();
+  }
+}
+
+function exPlanCard(p) {
+  const id = String(p.id === null || p.id === undefined ? "" : p.id);
+  const rows = exRows();
+  const vrow = rows.find(v => String(v.key) === String(p.venue));
+  const venue = vrow && vrow.label ? String(vrow.label)
+    : (p.venue === null || p.venue === undefined ? "" : String(p.venue));
+  const sym = p.symbol === null || p.symbol === undefined ? "" : String(p.symbol);
+  const raw = v => (v === null || v === undefined ? "" : String(v));
+  const g1 = [raw(p.side), raw(p.order_type)].filter(Boolean).join(" \u00b7 ");
+  const status = raw(p.status);
+  const g2 = [status, raw(p.approval)].filter(Boolean).join(" \u00b7 ");
+  const badges = [g1, g2].filter(Boolean).map(b =>
+    `<span class="chat-badge">${escapeHtml(b)}</span>`).join("");
+
+  const price = (p.price === null || p.price === undefined)
+    ? (raw(p.order_type) || "\u2014") : exNum(p.price);
+  const slip = (p.slippage_bps === null || p.slippage_bps === undefined)
+    ? t("ex.plan.slippageNa", "slippage n/a")
+    : t("ex.plan.slippage", "slippage {v} bps")
+        .replace("{v}", exNum(p.slippage_bps, 2));
+  const fee = (p.fee_usd === null || p.fee_usd === undefined)
+    ? t("ex.plan.feeNote", "fee {note}")
+        .replace("{note}", raw(p.fee_note) || "\u2014")   // note verbatim
+    : t("ex.plan.fee", "fee {v} USD").replace("{v}", exNum(p.fee_usd));
+
+  const lines = [
+    t("ex.plan.qty", "qty {v}").replace("{v}", exNum(p.qty)) + " \u00b7 " +
+      t("ex.plan.price", "price {v}").replace("{v}", price),
+    t("ex.plan.notional", "notional {v} USD")
+        .replace("{v}", exNum(p.notional_usd)) + " \u00b7 " + slip,
+    fee,
+  ];
+  const exp = exExpiryText(p);
+  const expEl = exp ? `<div class="stat-note" data-ex-exp="${escapeHtml(id)}">` +
+    `${escapeHtml(exp)}</div>` : "";
+  const tail = [];
+  if (raw(p.order_id)) tail.push(
+    t("ex.plan.orderId", "order {v}").replace("{v}", raw(p.order_id)));
+  if (raw(p.reason)) tail.push(
+    t("ex.plan.reason", "reason: {v}").replace("{v}", raw(p.reason)));
+
+  const busy = !!exDeciding[id];
+  const acts = status === "pending"
+    ? [["approve", "ex.plan.approve", "APPROVE", true],
+       ["reject", "ex.plan.reject", "REJECT", false]]
+    : status === "approved"
+      ? [["cancel", "ex.plan.cancel", "CANCEL", false]] : [];
+  const buttons = acts.map(a =>
+    `<button class="btn${a[3] ? " primary" : ""}" type="button"` +
+    ` data-ex-act="${a[0]}" data-plan="${escapeHtml(id)}"${busy ? " disabled" : ""}>` +
+    `${escapeHtml(t(a[1], a[2]))}</button>`).join("");
+  let msg = "";
+  if (busy) {
+    msg = `<span class="save-state">${escapeHtml(
+      t("ex.plan.working", "working\u2026"))}</span>`;
+  } else if (exPlanMsg && exPlanMsg.id === id) {
+    msg = `<span class="save-state err">${escapeHtml(String(exPlanMsg.raw))}</span>`;
+  }
+
+  return `<div class="mini" data-plan="${escapeHtml(id)}">` +
+    `<div class="gal-name">${escapeHtml(venue)}${sym ? " \u00b7 " + escapeHtml(sym) : ""}</div>` +
+    (badges ? `<div class="head-status" style="margin-top:6px">${badges}</div>` : "") +
+    lines.map(l => `<div class="stat-note">${escapeHtml(l)}</div>`).join("") +
+    expEl +
+    tail.map(l => `<div class="stat-note">${escapeHtml(l)}</div>`).join("") +
+    ((acts.length || msg)
+      ? `<div class="ctl-actions">${buttons}${msg}</div>` : "") +
+    `</div>`;
+}
+
+function renderExThreshold() {
+  const line = document.getElementById("exThreshold");
+  const hint = document.getElementById("exThresholdHint");
+  const w = exW3();
+  if (!line) return;
+  if (!w) {
+    line.innerHTML = `<span class="chip">${escapeHtml(t("ex.thr.needCaps",
+      "threshold data unavailable \u2014 this build has no web3 capability block"))}</span>`;
+    if (hint) hint.hidden = true;
+    return;
+  }
+  const chips = [
+    t("ex.thr.perTx", "per-tx cap {v} USD")
+      .replace("{v}", exNum(w.auto_usd_per_tx)),
+    t("ex.thr.daily", "daily cap {v} USD")
+      .replace("{v}", exNum(w.auto_usd_daily)),
+    t("ex.thr.spent", "spent today {v} USD \u00b7 {day}")
+      .replace("{v}", exNum(w.spent_today_usd))
+      .replace("{day}", w.ledger_day ? String(w.ledger_day) : "\u2014"),
+  ];
+  line.innerHTML = chips.map(c =>
+    `<span class="chip">${escapeHtml(c)}</span>`).join("");
+  if (hint) {
+    const zero = Number(w.auto_usd_per_tx) === 0 && Number(w.auto_usd_daily) === 0;
+    hint.hidden = !zero;
+    if (zero) hint.textContent = t("ex.thr.hint",
+      "both caps are 0 \u2014 nothing auto-approves; every plan waits for your decision here");
+  }
+}
+
+function renderExPlans() {
+  const w = exW3();
+  const cnt = document.getElementById("exPlansCount");
+  if (cnt) {
+    cnt.textContent = w
+      ? t("ex.plans.count", "{p} pending \u00b7 {a} approved")
+          .replace("{p}", exNum(w.pending_plans, 0))
+          .replace("{a}", exNum(w.approved_plans, 0))
+      : "";
+  }
+  const ex = exBlock();
+  const gate = document.getElementById("exGate");
+  if (gate) {
+    const g = ex && ex.order_gate ? String(ex.order_gate) : "";
+    gate.textContent = g
+      ? t("ex.gate", "approval gate {v}").replace("{v}", g) : "";
+    gate.hidden = !g;
+  }
+
+  const list = document.getElementById("exPlans");
+  if (!list) return;
+  const parts = [];
+  if (exPlansErr) {   // the server's own string, verbatim — never silent
+    parts.push(`<div class="save-state err">${escapeHtml(exPlansErr)}</div>`);
+  }
+  if (exPlans === null) {
+    if (!exPlansErr) parts.push(`<div class="gal-empty">${escapeHtml(
+      t("ex.plans.loading", "loading plans\u2026"))}</div>`);
+  } else if (!exPlans.length) {
+    parts.push(`<div class="gal-empty">${escapeHtml(t("ex.plans.empty",
+      "no plans waiting \u2014 plans are created by exchange_prepare_order; nothing here executes by itself"))}</div>`);
+  } else {
+    parts.push(exPlans.map(exPlanCard).join(""));
+  }
+  list.innerHTML = parts.join("");
+  list.querySelectorAll("[data-ex-act]").forEach(btn => {
+    btn.addEventListener("click", () =>
+      exDecide(btn.getAttribute("data-plan"), btn.getAttribute("data-ex-act")));
+  });
+}
+
+/* per-second expiry line refresh (only the clock/countdown text changes —
+   no full re-render, so in-flight buttons keep their state) */
+function exTick() {
+  if (currentView !== "exchange" || !Array.isArray(exPlans) || !exPlans.length) return;
+  document.querySelectorAll("[data-ex-exp]").forEach(el => {
+    const id = el.getAttribute("data-ex-exp");
+    const p = exPlans.find(x => x && String(x.id) === id);
+    if (p) el.textContent = exExpiryText(p);
+  });
 }
 
 /* ---------------------------------------------------------------- status -- */
@@ -1766,6 +2057,7 @@ function tickClock() {
   document.getElementById("clock").textContent =
     new Date().toLocaleTimeString("en-GB");
   refreshTools();
+  exTick();            // W2: plan expiry countdowns tick with the clock
 }
 
 function escapeHtml(s) {
@@ -1808,6 +2100,10 @@ function setView(name, fromUser) {
     history.replaceState(null, "", location.pathname + "?" + p.toString());
     window.scrollTo(0, 0);
   }
+  // W2: the approval queue loads when the exchange view opens — on a nav
+  // click (fresh data after a decision elsewhere) and on the first paint
+  // (deep link / boot). A language switch only re-renders, it never refetches.
+  if (name === "exchange" && (fromUser || exPlans === null)) exPlansLoad();
 }
 
 /* --------------------------------------------------------- topbar height -- */

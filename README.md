@@ -15,8 +15,8 @@
 <p align="center">
   <a href="https://github.com/aidog-im/aidog/releases"><img src="https://img.shields.io/github/v/release/aidog-im/aidog?display_name=tag&sort=semver&style=flat-square&label=release" alt="latest release"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
-  <img src="https://img.shields.io/badge/core_tests-1087%2F1087-brightgreen?style=flat-square" alt="core tests 1087/1087">
-  <img src="https://img.shields.io/badge/console_smoke-158%2F158-brightgreen?style=flat-square" alt="console smoke 158/158">
+  <img src="https://img.shields.io/badge/core_tests-1160%2F1160-brightgreen?style=flat-square" alt="core tests 1160/1160">
+  <img src="https://img.shields.io/badge/console_smoke-167%2F167-brightgreen?style=flat-square" alt="console smoke 167/167">
   <img src="https://img.shields.io/badge/permanently-free-ff6f00?style=flat-square" alt="permanently free">
 </p>
 
@@ -51,7 +51,7 @@ machine. It is built around three ideas that most assistants skip:
   No vector store you cannot read or audit.
 - **A self-developed core.** The runtime kernel (`mycore`) is written from
   scratch in this repository — an honest function-calling loop with explicit
-  stop reasons, **27 modules ≈ 12.3k LOC, 1,087 tests**, and zero upstream
+  stop reasons, **27 modules ≈ 13.3k LOC, 1,160 tests**, and zero upstream
   dependencies after the core swap. Swap the kernel, never swap "me".
 
 It talks to you over **Telegram**, a **loopback web console**, a
@@ -169,8 +169,8 @@ Every release is cut only after these run green on a clean tree:
 
 | Suite | Result |
 |---|---|
-| `mycore` core suite | **1087/1087** |
-| Console smoke (live HTTP) | **158/158** |
+| `mycore` core suite | **1160/1160** |
+| Console smoke (live HTTP) | **167/167** |
 | Skill router | **30/30** |
 | Memory persistence | **58/58** |
 | Setup wizard | **99/99** |
@@ -178,9 +178,9 @@ Every release is cut only after these run green on a clean tree:
 | Desktop shell (`node --test`) | **15/15** |
 | `aidog doctor` | **0 FAIL · 0 WARN** (honest environment WARN only when egress is fully gone) |
 | Publish gate (deny-by-default manifest) | **READY** |
-| Real-machine E2E | profiles **18/18** · channels **8/8** · domestic channels **44/44** · pipeline **35/35** · web3 read-only **33/33** |
+| Real-machine E2E | profiles **18/18** · channels **8/8** · domestic channels **44/44** · pipeline **35/35** · web3 read-only **33/33** · web3 approval **61/61** |
 
-Locale packs: `en` (default) + `zh`, **348 keys** each, parity lint in CI;
+Locale packs: `en` (default) + `zh`, **375 keys** each, parity lint in CI;
 the marketing site ships its own **165-key** bilingual pack.
 
 ## Documentation

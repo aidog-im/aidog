@@ -56,8 +56,9 @@ def expected_tool_names() -> frozenset[str]:
     registration) + connector_search IFF connectors.status() reports at
     least one credential slot (car 4c, mirrors the registration gate) +
     exchange_markets ALWAYS (keyless public market data, W1) and
-    exchange_portfolio / exchange_orders IFF at least one CEX credential
-    slot is present (W1, mirrors the same gate).
+    exchange_portfolio / exchange_orders / exchange_prepare_order /
+    exchange_execute_order / exchange_plans IFF at least one CEX credential
+    slot is present (W1 account reads + W2 approval gate, the same gate).
     The suite must be green both on hosts with a browser and without —
     with or without connector slots — and with AIDOG_BROWSER_BIN overridden
     to a dead path — so every count assertion derives from this, never a
@@ -78,7 +79,9 @@ def expected_tool_names() -> frozenset[str]:
     try:
         from mycore import exchanges as _ex
         if any(_ex.status().values()):
-            out |= {"exchange_portfolio", "exchange_orders"}
+            out |= {"exchange_portfolio", "exchange_orders",
+                    "exchange_prepare_order", "exchange_execute_order",
+                    "exchange_plans"}
     except Exception:  # noqa: BLE001 — exchange probe must never break
         pass
     return frozenset(out)
@@ -7853,13 +7856,14 @@ def test_tools_toggle() -> None:
     saved_env = os.environ.get("MYCORE_TOOLS_OFF")
     try:
         # catalog sanity: 11 core + generate_image + connector_search
-        # + 6 browser + 3 exchange_* (W1)
+        # + 6 browser + 3 exchange_* (W1) + 3 exchange_* (W2 approval gate)
         check("tools_off: KNOWN_TOOL_NAMES covers core + conditional",
               {"read_file", "run_bash", "cron", "delegate", "execute_code",
                "generate_image", "connector_search", "browser_open",
                "browser_close", "exchange_markets", "exchange_portfolio",
-               "exchange_orders"} <= KNOWN_TOOL_NAMES
-              and len(KNOWN_TOOL_NAMES) == 22,
+               "exchange_orders", "exchange_prepare_order",
+               "exchange_execute_order", "exchange_plans"} <= KNOWN_TOOL_NAMES
+              and len(KNOWN_TOOL_NAMES) == 25,
               str(sorted(KNOWN_TOOL_NAMES)))
 
         # 1) settings dict path disables a core tool
@@ -7938,16 +7942,33 @@ def test_exchanges() -> None:
 
         # --- catalog: 8 venues, stable order, honest reasons ---
         cat = ex.catalog()
-        check("exchanges: catalog has 8 venues in order",
+        check("exchanges: catalog has 9 venues in order",
               [r["key"] for r in cat] ==
               ["okx", "kraken", "jupiter", "velora", "hyperliquid",
-               "dydx", "gmx", "rpc"], str([r["key"] for r in cat]))
-        check("exchanges: every venue declares read_only",
-              all(r.get("read_only") is True for r in cat))
+               "dydx", "gmx", "rpc", "binance"], str([r["key"] for r in cat]))
+        # read_only follows the venue's REAL surface (W2): the six chain
+        # sources are still read-only, the three CEX carry orders — and only
+        # through prepare -> console approval -> execute. Claiming read_only
+        # on an orderable venue would be a false promise.
+        check("exchanges: read_only follows orderability (W2)",
+              all(r.get("read_only") is (r["key"] not in ex.ORDERABLE_VENUES)
+                  and r.get("orderable") is (r["key"] in ex.ORDERABLE_VENUES)
+                  for r in cat)
+              and {r["key"] for r in cat if r.get("orderable")}
+              == {"okx", "kraken", "binance"},
+              str([(r["key"], r.get("read_only")) for r in cat]))
+        check("exchanges: orderable rows disclose the approval path",
+              all("prepare -> console approval -> execute"
+                  in str(r.get("summary", ""))
+                  for r in cat if r.get("orderable")), str(cat[0]))
         check("exchanges: cex/key vs chain/public split",
-              [r["kind"] for r in cat[:2]] == ["cex", "cex"]
-              and all(r["kind"] == "chain" for r in cat[2:])
-              and cat[0]["auth"] == "key" and cat[2]["auth"] == "public",
+              {r["key"] for r in cat if r["kind"] == "cex"}
+              == {"okx", "kraken", "binance"}
+              and all(r["kind"] == "chain" for r in cat
+                      if r["key"] not in ("okx", "kraken", "binance"))
+              and all(r["auth"] == "key" for r in cat if r["kind"] == "cex")
+              and all(r["auth"] == "public" for r in cat
+                      if r["kind"] == "chain"),
               str([(r["key"], r["kind"], r["auth"]) for r in cat]))
         check("exchanges: unconfigured key venue names its slots",
               cat[0].get("configured") is False
@@ -7955,9 +7976,10 @@ def test_exchanges() -> None:
               and "secrets.env" in cat[0].get("reason", ""), str(cat[0]))
         check("exchanges: keyless chain venues carry no reason",
               all("reason" not in r and r.get("configured") is True
-                  for r in cat[2:]), str(cat[2]))
+                  for r in cat if r["kind"] == "chain"),
+              str([r for r in cat if r["kind"] == "chain"][0]))
         check("exchanges: status presence only, nothing leaks",
-              ex.status() == {"okx": False, "kraken": False}
+              ex.status() == {"okx": False, "kraken": False, "binance": False}
               and "SENTINEL" not in str(ex.status()), str(ex.status()))
 
         # --- slots: presence-only status, reasons that name the gap ---
@@ -7966,7 +7988,7 @@ def test_exchanges() -> None:
                       "OKX_API_PASSPHRASE": "OKXPP-SENTINEL-000"})
         st = ex.status()
         check("exchanges: status okx present / kraken absent",
-              st == {"okx": True, "kraken": False}, str(st))
+              st == {"okx": True, "kraken": False, "binance": False}, str(st))
         check("exchanges: configured venue drops the reason",
               [r for r in ex.catalog() if r["key"] == "okx"][0]
               .get("configured") is True, str(st))
@@ -7975,7 +7997,9 @@ def test_exchanges() -> None:
         check("exchanges: missing_slots names only what is absent",
               ex.missing_slots("kraken") ==
               ("KRAKEN_API_KEY", "KRAKEN_API_SECRET")
-              and ex.missing_slots("okx") == (),
+              and ex.missing_slots("okx") == ()
+              and ex.missing_slots("binance") ==
+              ("BINANCE_API_KEY", "BINANCE_API_SECRET"),
               str(ex.missing_slots("kraken")))
 
         # --- Kraken OFFICIAL published example vector (independent truth) ---
@@ -8344,6 +8368,496 @@ def test_exchanges() -> None:
         ex._slot = saved_slot
 
 
+def test_exchanges_w2() -> None:
+    """Web3 phase-2 W2 — quotes, approval gate and order placement: the
+    thresholds fail closed on every unusable shape, plans move pending ->
+    approved -> executed (and refuse every other path), the VWAP/slippage
+    math is checked against a hand-computed book, all three venue signatures
+    are recomputed from the wire bytes, the ledger rolls over on the Beijing
+    date, and this module provably carries NO withdrawal/transfer capability.
+    Zero network, zero real keys: an injected transport answers every venue
+    and the plan store lives in a temp dir."""
+    import hashlib
+    import hmac
+    import inspect
+    import time
+    from mycore import exchanges as ex
+    from mycore.tools import KNOWN_TOOL_NAMES
+
+    saved_slot = ex._slot
+    saved_thresholds = ex.thresholds
+    saved_day = ex._bj_day
+    slots: dict = {}
+    seen: list[dict] = []
+    fee_down = {"on": False}
+
+    book = {"bids": [["99.0", "1"], ["98.0", "2"]],
+            "asks": [["100.0", "1"], ["101.0", "2"], ["102.0", "10"]]}
+
+    def transport(url, method, headers, payload, timeout):
+        seen.append({"url": url, "method": method, "headers": dict(headers),
+                     "payload": payload})
+        if "/api/v5/market/books" in url:
+            return json.dumps({"code": "0", "data": [book]})
+        if "/api/v5/account/trade-fee" in url:
+            if fee_down["on"]:
+                raise ex.ExchangeError("HTTP 401 401: trade permission required")
+            return json.dumps({"code": "0", "data": [{"takerFeeRate": "0.001"}]})
+        if "/api/v5/trade/order" in url:
+            return json.dumps({"code": "0", "data": [
+                {"ordId": "OKX-ORD-1", "sCode": "0", "sMsg": ""}]})
+        if "/api/v3/depth" in url:
+            return json.dumps({"lastUpdateId": 7, "bids": book["bids"],
+                               "asks": book["asks"]})
+        if "/api/v3/account/commission" in url:
+            return json.dumps({"symbol": "BTCUSDT", "commission": "0.001"})
+        if "/api/v3/order" in url:
+            return json.dumps({"symbol": "BTCUSDT", "orderId": 4321})
+        if "/0/public/Depth" in url:
+            return json.dumps({"error": [], "result": {"XXBTZUSD": {
+                "bids": [["99.0", "5", "0"]], "asks": [["100.0", "5", "0"]]}}})
+        if "/0/private/TradeVolume" in url:
+            return json.dumps({"error": [], "result": {
+                "fees": {"XXBTZUSD": {"fee": "0.26", "minfee": "0"}}}})
+        if "/0/private/AddOrder" in url:
+            return json.dumps({"error": [], "result": {"txid": ["KRAKEN-TX-1"]}})
+        raise AssertionError(f"unexpected url {url}")
+
+    def unreachable(url, method, headers, payload, timeout):
+        raise AssertionError("transport must not be reached")
+
+    def store_file(td: str) -> Path:
+        return Path(td) / ex.STORE_NAME
+
+    def mutate(td: str, fn) -> None:
+        p = store_file(td)
+        doc = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+        fn(doc)
+        p.write_text(json.dumps(doc), encoding="utf-8")
+
+    def last(pred) -> dict:
+        for row in reversed(seen):
+            if pred(row["url"]):
+                return row
+        raise AssertionError("no matching request was made")
+
+    def plan_of(td: str, venue: str) -> dict:
+        rows = [p for p in ex.plans_list(state_dir=td) if p["venue"] == venue]
+        return rows[0]
+
+    try:
+        ex._slot = lambda name: slots.get(name, "")   # noqa: E731
+
+        # ---- 1. thresholds: every unusable shape collapses to 0 ---------
+        check("w2: thresholds default to 0 with an empty settings doc",
+              ex.thresholds({}) == {"per_tx": 0.0, "daily": 0.0},
+              str(ex.thresholds({})))
+        check("w2: thresholds reject a non-object web3 block",
+              ex.thresholds({"web3": "high"}) == {"per_tx": 0.0, "daily": 0.0})
+        for bad in (True, "20", None, -1, 1e9, [20], {"a": 1}):
+            got = ex.thresholds({"web3": {"auto_usd_per_tx": bad,
+                                          "auto_usd_daily": 20}})
+            check(f"w2: thresholds reject per_tx={bad!r} -> 0",
+                  got["per_tx"] == 0.0 and got["daily"] == 20.0, str(got))
+        got = ex.thresholds({"web3": {"auto_usd_per_tx": 20,
+                                      "auto_usd_daily": 100}})
+        check("w2: thresholds read numeric caps",
+              got == {"per_tx": 20.0, "daily": 100.0}, str(got))
+        live = ex.thresholds(None)
+        check("w2: file-backed thresholds stay in range",
+              set(live) == {"per_tx", "daily"}
+              and all(isinstance(v, float) and 0.0 <= v <= ex.THRESHOLD_MAX_USD
+                      for v in live.values()), str(live))
+
+        # ---- 2. prepare validation happens BEFORE any network I/O -------
+        bad_calls = [
+            ("jupiter", "buy", "SOL", "limit", 1, 1),
+            ("okx", "hold", "BTC-USDT", "limit", 1, 1),
+            ("okx", "buy", "BTC-USDT", "swap", 1, 1),
+            ("okx", "buy", "BTC-USDT", "limit", 1, None),
+            ("okx", "buy", "BTC-USDT", "limit", 0, 1),
+            ("okx", "buy", "BTC-USDT", "market", 1, 100),
+        ]
+        for args in bad_calls:
+            try:
+                ex.prepare_order(*args, transport=unreachable, state_dir=tempfile.mkdtemp())
+                check(f"w2: prepare rejects {args[0]}/{args[1]}/{args[3]}", False)
+            except ex.ExchangeError as e:
+                check(f"w2: prepare rejects {args[0]}/{args[1]}/{args[3]}",
+                      bool(str(e)), str(e)[:70])
+        # a venue without its full slot set refuses before any request
+        try:
+            ex.prepare_order("okx", "buy", "BTC-USDT", "limit", 1, 100,
+                             transport=unreachable, state_dir=tempfile.mkdtemp())
+            check("w2: prepare refuses a slotless venue", False)
+        except ex.ExchangeError as e:
+            check("w2: prepare refuses a slotless venue and names the slots",
+                  "not configured" in str(e) and "OKX_API_KEY" in str(e), str(e))
+
+        # ---- 3. VWAP / slippage / depth from a hand-computed book -------
+        with tempfile.TemporaryDirectory() as td:
+            slots.update({"OKX_API_KEY": "OKXKEY-SENTINEL-001",
+                          "OKX_API_SECRET": "OKXSEC-SENTINEL-001",
+                          "OKX_API_PASSPHRASE": "OKXPP-SENTINEL-001"})
+            seen.clear()
+            # market BUY 2: 1 @100 + 1 @101 -> vwap 100.5, best 100 -> +50bps
+            out = ex.prepare_order("okx", "buy", "BTC-USDT", "market", 2, None,
+                                   transport=transport, state_dir=td)
+            check("w2: prepare output carries no credential",
+                  "SENTINEL" not in out and "OKX_API" not in out, out[:80])
+            p = plan_of(td, "okx")
+            check("w2: market buy VWAP = 100.5 over the first two levels",
+                  abs(p["vwap"] - 100.5) < 1e-9, str(p["vwap"]))
+            check("w2: market buy slippage = +50 bps vs best ask",
+                  abs(p["slippage_bps"] - 50.0) < 1e-6, str(p["slippage_bps"]))
+            check("w2: depth covered for qty 2", p["depth_ok"] is True)
+            check("w2: market notional = vwap * qty",
+                  abs(p["notional_usd"] - 201.0) < 1e-9, str(p["notional_usd"]))
+            check("w2: fee quoted from the venue and folded into fee_usd",
+                  p["fee_rate"] == 0.001
+                  and abs(p["fee_usd"] - 0.201) < 1e-9, str(p["fee_usd"]))
+            # market BUY 100: full book -> vwap = 1322/13, depth short
+            ex.prepare_order("okx", "buy", "BTC-USDT", "market", 100, None,
+                             transport=transport, state_dir=td)
+            deep = plan_of(td, "okx")
+            check("w2: thin book reports depth_ok=false, not a fake fill",
+                  deep["depth_ok"] is False
+                  and abs(deep["vwap"] - 1322 / 13) < 1e-9,
+                  f"{deep['vwap']} {deep['depth_ok']}")
+            # resting limit below the market: no crossing level, no VWAP
+            ex.prepare_order("okx", "buy", "BTC-USDT", "limit", 2, 95,
+                             transport=transport, state_dir=td)
+            rest = plan_of(td, "okx")
+            check("w2: resting limit reports no fill instead of a VWAP",
+                  rest["vwap"] is None and rest["depth_ok"] is False
+                  and rest["slippage_bps"] is None,
+                  str((rest["vwap"], rest["depth_ok"])))
+            check("w2: resting limit notional = limit price * qty",
+                  abs(rest["notional_usd"] - 190.0) < 1e-9,
+                  str(rest["notional_usd"]))
+            check("w2: plan store never serialises a slot value",
+                  "SENTINEL-001" not in store_file(td).read_text(encoding="utf-8"))
+            # an unreachable fee endpoint = honest unknown, never a guess
+            fee_down["on"] = True
+            ex.prepare_order("okx", "buy", "BTC-USDT", "limit", 1, 100,
+                             transport=transport, state_dir=td)
+            fee_unknown = plan_of(td, "okx")
+            check("w2: failed fee quote stays unknown and uncounted",
+                  fee_unknown["fee_rate"] is None
+                  and fee_unknown["fee_usd"] is None
+                  and "fee unknown" in fee_unknown["fee_note"],
+                  str(fee_unknown["fee_note"]))
+            fee_down["on"] = False
+
+        # ---- 4. approval gate: default 0 blocks everything ---------------
+        with tempfile.TemporaryDirectory() as td:
+            ex.thresholds = lambda settings=None: {"per_tx": 0.0, "daily": 0.0}  # noqa: E731
+            seen.clear()
+            out = ex.prepare_order("okx", "buy", "BTC-USDT", "limit", 1, 100,
+                                   transport=transport, state_dir=td)
+            plan = plan_of(td, "okx")
+            check("w2: default thresholds leave a limit plan pending",
+                  plan["status"] == "pending" and plan["approval"] == "none",
+                  str((plan["status"], plan["approval"])))
+            check("w2: prepare says WHY it needs a human",
+                  "auto approvals disabled" in plan["reason"], plan["reason"])
+            check("w2: prepare output hands back a plan id and the next step",
+                  plan["id"] in out and "exchange_execute_order" in out
+                  and "OWNER approves" in out, out[:120])
+            try:
+                ex.execute_order(plan["id"], transport=transport, state_dir=td)
+                check("w2: executing a pending plan is refused", False)
+            except ex.ExchangeError as e:
+                check("w2: executing a pending plan is refused",
+                      "awaiting human approval" in str(e), str(e))
+            check("w2: a refused execute sends NOTHING to the venue",
+                  not any("/trade/order" in r["url"] for r in seen),
+                  str([r["url"] for r in seen]))
+            try:
+                ex.execute_order("pl_missing", transport=transport, state_dir=td)
+                check("w2: unknown plan id is refused", False)
+            except ex.ExchangeError as e:
+                check("w2: unknown plan id is refused", "unknown plan_id" in str(e), str(e))
+            try:
+                ex.plan_decide(plan["id"], "rubber-stamp", state_dir=td)
+                check("w2: unknown decide action is refused", False)
+            except ex.ExchangeError as e:
+                check("w2: unknown decide action is refused",
+                      "action must be one of" in str(e), str(e))
+
+            # ---- 5. console decision -> execute -> ledger ----------------
+            decided = ex.plan_decide(plan["id"], "approve",
+                                     decided_by="console", state_dir=td)
+            check("w2: console approval flips the plan",
+                  decided["status"] == "approved"
+                  and decided["approval"] == "manual"
+                  and decided["decided_by"] == "console"
+                  and decided["decided_at"] is not None, str(decided["status"]))
+            seen.clear()
+            out = ex.execute_order(plan["id"], transport=transport, state_dir=td)
+            done = plan_of(td, "okx")
+            check("w2: approved plan executes and records the venue order id",
+                  done["status"] == "executed" and done["order_id"] == "OKX-ORD-1"
+                  and done["executed_at"] is not None, str(done["order_id"]))
+            check("w2: execute reports the ledger line",
+                  "ledger day=" in out and "spent_usd=" in out, out[-160:])
+            check("w2: executed order reached the venue exactly once",
+                  sum(1 for r in seen if "/trade/order" in r["url"]) == 1
+                  and done["attempts"] == 1, str(done["attempts"]))
+            try:
+                ex.execute_order(plan["id"], transport=transport, state_dir=td)
+                check("w2: a second execute of the same plan is refused", False)
+            except ex.ExchangeError as e:
+                check("w2: a second execute of the same plan is refused",
+                      "executed" in str(e), str(e))
+
+            # reject path: a rejected plan can never execute
+            ex.prepare_order("okx", "buy", "BTC-USDT", "limit", 1, 100,
+                             transport=transport, state_dir=td)
+            rej = [p for p in ex.plans_list(state_dir=td)
+                   if p["status"] == "pending"][0]
+            ex.plan_decide(rej["id"], "reject", state_dir=td)
+            try:
+                ex.execute_order(rej["id"], transport=transport, state_dir=td)
+                check("w2: a rejected plan can never execute", False)
+            except ex.ExchangeError as e:
+                check("w2: a rejected plan can never execute",
+                      "rejected" in str(e), str(e))
+
+            # ---- 6. TTL: an expired plan is dead --------------------------
+            ex.prepare_order("okx", "buy", "BTC-USDT", "limit", 1, 100,
+                             transport=transport, state_dir=td)
+            ttl = [p for p in ex.plans_list(state_dir=td)
+                   if p["status"] == "pending"][0]
+            ex.plan_decide(ttl["id"], "approve", state_dir=td)
+            mutate(td, lambda doc: doc["plans"][ttl["id"]].update(
+                expires_at=time.time() - 1))
+            try:
+                ex.execute_order(ttl["id"], transport=transport, state_dir=td)
+                check("w2: an expired plan cannot execute", False)
+            except ex.ExchangeError as e:
+                check("w2: an expired plan cannot execute",
+                      "expired" in str(e), str(e))
+            check("w2: expiry is recorded on the plan",
+                  [p for p in ex.plans_list(state_dir=td)
+                   if p["id"] == ttl["id"]][0]["status"] == "expired")
+
+            # ---- 7. plan ordering + plan_summary --------------------------
+            listed = ex.plans_list(state_dir=td)
+            stamps = [p["created_at"] for p in listed]
+            ids = [p["id"] for p in listed]
+            check("w2: plans list newest first",
+                  len(ids) >= 3 and stamps == sorted(stamps, reverse=True),
+                  str(stamps))
+            summ = ex.plan_summary(state_dir=td)
+            check("w2: plan_summary counts and spends honestly",
+                  summ["ledger_day"] == ex._bj_day()
+                  and summ["spent_today_usd"] > 0
+                  and summ["pending_plans"] == sum(
+                      1 for p in listed if p["status"] == "pending")
+                  and summ["approved_plans"] == sum(
+                      1 for p in listed if p["status"] == "approved")
+                  and summ["plans_total"] == len(ids), str(summ))
+
+        # ---- 8. auto thresholds: limits only, and the ledger is real -----
+        with tempfile.TemporaryDirectory() as td:
+            ex.thresholds = lambda settings=None: {"per_tx": 1000.0, "daily": 1000.0}  # noqa: E731
+            ex._bj_day = lambda ts=None: "2026-10-25"  # noqa: E731
+            ex.prepare_order("okx", "buy", "BTC-USDT", "limit", 8, 100,
+                             transport=transport, state_dir=td)
+            auto = plan_of(td, "okx")
+            check("w2: a limit inside both caps auto-approves",
+                  auto["status"] == "approved"
+                  and auto["approval"] == "auto-threshold", str(auto["status"]))
+            ex.prepare_order("okx", "buy", "BTC-USDT", "market", 8, None,
+                             transport=transport, state_dir=td)
+            mkt = plan_of(td, "okx")
+            check("w2: MARKET never auto-approves, whatever the caps",
+                  mkt["status"] == "pending"
+                  and "never auto-approved" in mkt["reason"], str(mkt["reason"]))
+            ex.execute_order(auto["id"], transport=transport, state_dir=td)
+            check("w2: the executed notional lands in today's ledger",
+                  ex.plan_summary(state_dir=td)["spent_today_usd"] == 800.0,
+                  str(ex.plan_summary(state_dir=td)))
+            ex.prepare_order("okx", "buy", "BTC-USDT", "limit", 8, 100,
+                             transport=transport, state_dir=td)
+            over = plan_of(td, "okx")
+            check("w2: the day's ledger blocks a second plan over the cap",
+                  over["status"] == "pending"
+                  and "daily cap" in over["reason"], str(over["reason"]))
+            # rollover: the next Beijing day starts at zero again
+            ex._bj_day = lambda ts=None: "2026-10-26"  # noqa: E731
+            check("w2: ledger day rollover resets the spent budget",
+                  ex.plan_summary(state_dir=td)["spent_today_usd"] == 0.0
+                  and ex.plan_summary(state_dir=td)["ledger_day"] == "2026-10-26",
+                  str(ex.plan_summary(state_dir=td)))
+            ex.prepare_order("okx", "buy", "BTC-USDT", "limit", 8, 100,
+                             transport=transport, state_dir=td)
+            fresh = plan_of(td, "okx")
+            check("w2: a fresh Beijing day auto-approves again",
+                  fresh["status"] == "approved", str(fresh["status"]))
+            # execution-time re-check: the ledger moved AFTER approval
+            ex._bj_day = lambda ts=None: "2026-10-27"  # noqa: E731
+            ex.prepare_order("okx", "buy", "BTC-USDT", "limit", 8, 100,
+                             transport=transport, state_dir=td)
+            recheck = plan_of(td, "okx")
+            mutate(td, lambda doc: doc["ledger"].update({
+                "2026-10-27": {"spent_usd": 900.0, "count": 1}}))
+            try:
+                ex.execute_order(recheck["id"], transport=transport, state_dir=td)
+                check("w2: execution re-checks the day's ledger", False)
+            except ex.ExchangeError as e:
+                check("w2: execution re-checks the day's ledger",
+                      "auto approval no longer valid" in str(e), str(e))
+            demoted = [p for p in ex.plans_list(state_dir=td)
+                       if p["id"] == recheck["id"]][0]
+            check("w2: a voided auto approval falls back to pending",
+                  demoted["status"] == "pending"
+                  and demoted["approval"] == "none",
+                  str((demoted["status"], demoted["approval"])))
+            check("w2: a voided auto approval still sent NOTHING",
+                  not any("/trade/order" in r["url"] for r in seen[-3:]))
+
+        # ---- 9. signatures recomputed from the wire bytes ----------------
+        with tempfile.TemporaryDirectory() as td:
+            ex.thresholds = lambda settings=None: {"per_tx": 0.0, "daily": 0.0}  # noqa: E731
+            ex._bj_day = saved_day
+            slots.update({"KRAKEN_API_KEY": "KRKKEY-SENTINEL-002",
+                          "KRAKEN_API_SECRET": "c2VjcmV0LXNlbnRpbmVsLXNlY3JldA==",
+                          "BINANCE_API_KEY": "BNBKEY-SENTINEL-003",
+                          "BINANCE_API_SECRET": "binance-secret-sentinel"})
+            seen.clear()
+            # OKX: JSON body + timestamp+method+path+body pre-hash
+            ex.prepare_order("okx", "buy", "BTC-USDT", "limit", 1, 100,
+                             transport=transport, state_dir=td)
+            okx_plan = plan_of(td, "okx")
+            ex.plan_decide(okx_plan["id"], "approve", state_dir=td)
+            ex.execute_order(okx_plan["id"], transport=transport, state_dir=td)
+            req = last(lambda u: "/api/v5/trade/order" in u)
+            body = (req["payload"] or b"").decode("utf-8")
+            doc = json.loads(body)
+            hdr = req["headers"]
+            expect = ex.okx_sign(hdr["OK-ACCESS-TIMESTAMP"], "POST",
+                                 "/api/v5/trade/order", body,
+                                 slots["OKX_API_SECRET"])
+            check("w2: okx order body is the signed JSON payload",
+                  hdr.get("OK-ACCESS-SIGN") == expect
+                  and doc == {"instId": "BTC-USDT", "tdMode": "cash",
+                              "side": "buy", "ordType": "limit",
+                              "sz": "1", "px": "100"},
+                  str(doc))
+            check("w2: okx order posts JSON content type",
+                  hdr.get("Content-Type") == "application/json",
+                  str(hdr.get("Content-Type")))
+            check("w2: okx order url carries no credential",
+                  "SENTINEL" not in req["url"]
+                  and slots["OKX_API_SECRET"] not in body)
+            # Binance: hex HMAC over the query string, params in the URL
+            ex.prepare_order("binance", "sell", "BTCUSDT", "limit", 1, 101,
+                             transport=transport, state_dir=td)
+            bn = plan_of(td, "binance")
+            ex.plan_decide(bn["id"], "approve", state_dir=td)
+            seen.clear()
+            ex.execute_order(bn["id"], transport=transport, state_dir=td)
+            req = last(lambda u: "/api/v3/order" in u)
+            query = req["url"].split("?", 1)[1]
+            prehash, _, sig = query.rpartition("&signature=")
+            rebuilt = hmac.new(slots["BINANCE_API_SECRET"].encode("utf-8"),
+                               prehash.encode("utf-8"), hashlib.sha256).hexdigest()
+            check("w2: binance signature is the hex HMAC of the query",
+                  sig == rebuilt and re.fullmatch(r"[0-9a-f]{64}", sig) is not None,
+                  sig[:16])
+            check("w2: binance order carries the API key header, not the secret",
+                  req["headers"].get("X-MBX-APIKEY") == slots["BINANCE_API_KEY"]
+                  and slots["BINANCE_API_SECRET"] not in req["url"]
+                  and "BINANCE_API" not in query)
+            check("w2: binance order params travel in the query",
+                  "symbol=BTCUSDT" in prehash and "side=SELL"
+                  in prehash and "type=LIMIT" in prehash
+                  and req["method"] == "POST", req["method"])
+            # Kraken: nonce form + path/SHA256/nonce signature over AddOrder
+            ex.prepare_order("kraken", "buy", "XBT/USD", "limit", 1, 100,
+                             transport=transport, state_dir=td)
+            kr = plan_of(td, "kraken")
+            ex.plan_decide(kr["id"], "approve", state_dir=td)
+            seen.clear()
+            ex.execute_order(kr["id"], transport=transport, state_dir=td)
+            req = last(lambda u: "/0/private/AddOrder" in u)
+            form = dict(kv.split("=", 1)
+                        for kv in (req["payload"] or b"").decode().split("&"))
+            resign = ex.kraken_sign("/0/private/AddOrder",
+                                    (req["payload"] or b"").decode(),
+                                    form["nonce"], slots["KRAKEN_API_SECRET"])
+            check("w2: kraken AddOrder carries nonce + matching signature",
+                  req["headers"].get("API-Sign") == resign
+                  and form.get("pair") == "XBTUSD" and form.get("price") == "100"
+                  and form.get("ordertype") == "limit",
+                  str(form))
+            check("w2: no credential leaks into any W2 output",
+                  "SENTINEL" not in " ".join(
+                      [json.dumps(ex.plans_list(state_dir=td)),
+                       json.dumps(ex.plan_summary(state_dir=td))]))
+
+        # ---- 10. plan store bounds ---------------------------------------
+        with tempfile.TemporaryDirectory() as td:
+            live = {f"pl_fake{i:03d}": {"id": f"pl_fake{i:03d}",
+                                        "venue": "okx", "status": "pending",
+                                        "expires_at": time.time() + 900,
+                                        "created_at": float(i)}
+                    for i in range(ex.PLAN_MAX)}
+            store_file(td).parent.mkdir(parents=True, exist_ok=True)
+            store_file(td).write_text(json.dumps({"plans": live, "ledger": {}}))
+            try:
+                ex.prepare_order("okx", "buy", "BTC-USDT", "limit", 1, 100,
+                                 transport=transport, state_dir=td)
+                check("w2: a full plan store refuses new plans", False)
+            except ex.ExchangeError as e:
+                check("w2: a full plan store refuses new plans",
+                      "plan store is full" in str(e), str(e))
+            mutate(td, lambda doc: doc["plans"].update(
+                {"pl_fake000": {**live["pl_fake000"], "status": "executed"}}))
+            ex.prepare_order("okx", "buy", "BTC-USDT", "limit", 1, 100,
+                             transport=transport, state_dir=td)
+            kept = json.loads(store_file(td).read_text(encoding="utf-8"))
+            check("w2: terminal plans are pruned before the cap is hit",
+                  len(kept["plans"]) <= ex.PLAN_MAX
+                  and "pl_fake000" not in kept["plans"],
+                  str(len(kept["plans"])))
+
+        # ---- 11. the absence of a fund-moving surface, in this source ----
+        src = Path(ex.__file__).read_text(encoding="utf-8")
+        banned = ("withdraw", "transfer", "deposit", "payout")
+        defs = re.findall(r"^\s*def\s+([A-Za-z_]\w*)", src, flags=re.M)
+        bad_defs = [d for d in defs if any(b in d.lower() for b in banned)]
+        check("w2: source defines no withdrawal/transfer/deposit function",
+              not bad_defs, str(bad_defs))
+        paths = re.findall(r'"(/[^"]*)"', src)
+        bad_paths = [p for p in paths if any(b in p.lower() for b in banned)]
+        check("w2: source calls no withdrawal/transfer endpoint",
+              not bad_paths, str(bad_paths))
+        bad_tools = [n for n in KNOWN_TOOL_NAMES
+                     if any(b in n.lower() for b in banned)]
+        check("w2: no registered tool moves funds", not bad_tools,
+              str(bad_tools))
+        sig = inspect.signature(ex.execute_order)
+        check("w2: execute_order takes plan_id and transport knobs only",
+              list(sig.parameters) == ["plan_id", "transport", "timeout",
+                                       "state_dir"], str(list(sig.parameters)))
+        check("w2: prepare_order never sends an order",
+              "_PLACE_FN" not in inspect.getsource(ex.prepare_order),
+              "prepare body reaches the sender table")
+        check("w2: orderable venues and senders stay in lockstep",
+              set(ex._PLACE_FN) == set(ex.ORDERABLE_VENUES) == set(ex._BOOK_FN)
+              == set(ex._FEE_FN), str(sorted(ex._PLACE_FN)))
+        check("w2: ledger day format is a Beijing YYYY-MM-DD",
+              re.fullmatch(r"\d{4}-\d{2}-\d{2}", saved_day()) is not None,
+              saved_day())
+    finally:
+        ex._slot = saved_slot
+        ex.thresholds = saved_thresholds
+        ex._bj_day = saved_day
+
+
 def main() -> int:
     test_model()
     test_registry_and_tools()
@@ -8387,6 +8901,7 @@ def main() -> int:
     test_connectors()
     test_media_tools()
     test_exchanges()
+    test_exchanges_w2()
     test_tg_media()
     test_service_media()
     test_profiles()

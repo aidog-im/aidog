@@ -1030,22 +1030,33 @@ def main() -> int:
           and all(v not in med_text for v in med_slots),
           f"n_slots={len(med_slots)}")
 
-    # --- W1 Web3: capabilities.exchange — 8 read-only venue rows, keyless
-    # public data only; the serialized block is re-checked against every
-    # secrets.env slot value with the SAME rule as the catalog above. ---
+    # --- W1/W2 Web3: capabilities.exchange — 9 venue rows (6 chain sources
+    # read-only, 3 CEX orderable and only behind the prepare -> console
+    # approval -> execute gate); the serialized block is re-checked against
+    # every secrets.env slot value with the SAME rule as the catalog above.
+    # ---
     s, caps_x = get("/api/capabilities")
     exb = caps_x.get("exchange") if isinstance(caps_x, dict) else None
     ex_venues = exb.get("venues") if isinstance(exb, dict) else None
     exp_ex_keys = {"okx", "kraken", "jupiter", "velora", "hyperliquid",
-                   "dydx", "gmx", "rpc"}
-    row_fields = {"key", "label", "kind", "auth", "configured", "read_only"}
-    check("GET capabilities exchange block (8 read-only venue rows)",
+                   "dydx", "gmx", "rpc", "binance"}
+    orderable_keys = {"okx", "kraken", "binance"}
+    row_fields = {"key", "label", "kind", "auth", "configured", "read_only",
+                  "orderable"}
+    check("GET capabilities exchange block (9 venues, 3 orderable)",
           s == 200 and isinstance(exb, dict)
-          and exb.get("read_only") is True
+          and exb.get("read_only") is False
+          and set(exb.get("orderable") or []) == orderable_keys
+          and exb.get("order_gate") == "prepare -> console approval -> execute"
+          and exb.get("withdrawals") is False
+          and exb.get("onchain_transfers") is False
           and isinstance(exb.get("tools"), list)
-          and isinstance(ex_venues, list) and len(ex_venues) == 8
+          and isinstance(ex_venues, list) and len(ex_venues) == 9
           and all(isinstance(v, dict) and row_fields <= set(v)
-                  and v.get("read_only") is True
+                  # read_only iff this row is a chain source; orderable
+                  # iff this row is one of the three CEX
+                  and v.get("read_only") is (v.get("kind") == "chain")
+                  and v.get("orderable") is (v.get("key") in orderable_keys)
                   and v.get("kind") in ("cex", "chain")
                   and v.get("auth") in ("key", "public")
                   and isinstance(v.get("configured"), bool)
@@ -1061,6 +1072,37 @@ def main() -> int:
           and not ex_leak_keys,
           f"leak_keys={ex_leak_keys} n_slots={len(slot_vals)}")
 
+    # --- W2: capabilities.web3 — the two auto-approval caps (fail-closed
+    # numbers in 0..1e6; 0 = nothing auto-approves) plus the plan counters.
+    # Same zero-credential rule as every catalog block above. ---
+    w3 = caps_x.get("web3") if isinstance(caps_x, dict) else None
+    w3_keys = {"auto_usd_per_tx", "auto_usd_daily", "pending_plans",
+               "approved_plans", "spent_today_usd", "ledger_day"}
+    check("GET capabilities web3 block (six fail-closed keys)",
+          isinstance(w3, dict) and w3_keys <= set(w3)
+          and all(isinstance(w3.get(k), (int, float))
+                  and not isinstance(w3.get(k), bool)
+                  and 0.0 <= float(w3.get(k)) <= 1000000
+                  for k in ("auto_usd_per_tx", "auto_usd_daily",
+                            "spent_today_usd"))
+          and all(isinstance(w3.get(k), int)
+                  and not isinstance(w3.get(k), bool)
+                  and w3.get(k) >= 0
+                  for k in ("pending_plans", "approved_plans"))
+          and isinstance(w3.get("ledger_day"), str)
+          and (not w3.get("ledger_day")
+               or re.fullmatch(r"\d{4}-\d{2}-\d{2}",
+                               w3.get("ledger_day")) is not None),
+          f"web3={w3}")
+    w3_text = json.dumps(w3, ensure_ascii=False) if isinstance(w3, dict) else ""
+    w3_leak_keys = re.findall(r'"[^"\"]*(?:token|secret|password|api_key|apikey)'
+                              r'[^"\"]*"\s*:', w3_text, flags=re.I)
+    check("GET capabilities web3: no credential material",
+          bool(w3_text) and bool(slot_vals)
+          and all(v not in w3_text for v in slot_vals)
+          and not w3_leak_keys,
+          f"leak_keys={w3_leak_keys}")
+
     # --- W1 Web3: GET /api/exchange/quote — route exists, unknown venue is
     # an honest 400 with a non-empty error (offline: _check_venue rejects
     # before any network I/O, so this never needs the internet). ---
@@ -1071,6 +1113,50 @@ def main() -> int:
           s == 400 and isinstance(q, dict)
           and bool(str(q.get("error") or "").strip()),
           f"got {s} {str(q)[:200]}")
+
+    # --- W2: /api/exchange/plans — GET is a plain read (no token, same as
+    # every GET), POST is THE approval surface behind Bearer WEB_TOKEN.
+    # Every POST below targets an unknown plan id or a rejected action, so
+    # this smoke decides no real plan and never writes the plan store. ---
+    s, pl = get("/api/exchange/plans")
+    plans_doc = pl.get("plans") if isinstance(pl, dict) else None
+    check("GET /api/exchange/plans -> 200 {plans: list}",
+          s == 200 and isinstance(pl, dict)
+          and isinstance(plans_doc, list)
+          and all(isinstance(p, dict) for p in plans_doc),
+          f"got {s} {str(pl)[:160]}")
+    pl_text = json.dumps(pl, ensure_ascii=False) if isinstance(pl, dict) else ""
+    pl_leak_keys = re.findall(r'"[^"\"]*(?:token|secret|password|api_key|apikey)'
+                              r'[^"\"]*"\s*:', pl_text, flags=re.I)
+    check("GET /api/exchange/plans: no credential material",
+          isinstance(plans_doc, list) and bool(slot_vals)
+          and all(v not in pl_text for v in slot_vals)
+          and not pl_leak_keys,
+          f"leak_keys={pl_leak_keys} n_slots={len(slot_vals)}")
+    s, body = post("/api/exchange/plans/pl_e2e_missing",
+                   {"action": "approve"}, None)
+    check("POST /api/exchange/plans/<id> without bearer -> 401",
+          s == 401 and isinstance(body, dict), f"got {s} {body}")
+    if token:
+        check("POST plans 401 never echoes the token",
+              token not in json.dumps(body if isinstance(body, dict) else {}),
+              str(body)[:140])
+        s, body = post("/api/exchange/plans/pl_e2e_missing",
+                       {"action": "rubber-stamp"}, token)
+        check("POST plans invalid action -> 400 + details",
+              s == 400 and isinstance(body, dict)
+              and body.get("error") == "invalid action"
+              and "approve|reject|cancel" in str(body.get("details")),
+              f"got {s} {str(body)[:180]}")
+        s, body = post("/api/exchange/plans/pl_e2e_missing",
+                       {"action": "approve"}, token)
+        check("POST plans unknown plan id -> 404 honest error",
+              s == 404 and isinstance(body, dict)
+              and "unknown plan_id" in str(body.get("error")),
+              f"got {s} {str(body)[:180]}")
+        check("POST plans decision response never echoes the token",
+              token not in json.dumps(body if isinstance(body, dict) else {}),
+              str(body)[:140])
 
     # --- car 4c: /api/media served-file whitelist — unknown name, encoded
     # traversal and a non-image suffix all answer a plain 404. ---

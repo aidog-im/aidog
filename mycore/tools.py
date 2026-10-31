@@ -59,8 +59,10 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     # car 4c: media face (always / slot-gated registrants)
     "generate_image", "connector_search",
     # W1 Web3 read-only exchange car (markets always / portfolio+orders
-    # slot-gated on at least one CEX credential slot)
-    "exchange_markets", "exchange_portfolio", "exchange_orders"})
+    # slot-gated on at least one CEX credential slot) + W2 order car
+    # (prepare/execute/plans ride the SAME slot gate as the account reads)
+    "exchange_markets", "exchange_portfolio", "exchange_orders",
+    "exchange_prepare_order", "exchange_execute_order", "exchange_plans"})
 
 # settings key mycore.tools_off + env MYCORE_TOOLS_OFF (owner-approved design)
 TOOLS_OFF_ENV = "MYCORE_TOOLS_OFF"
@@ -628,13 +630,108 @@ def _exchange_portfolio(venue: str) -> str:
 def _exchange_orders(venue: str) -> str:
     """`exchange_orders` handler (W1 Web3 car): READ-ONLY open-order list
     for one CEX venue (slot-gated at registration). Listing reads only —
-    placing an order does not exist in W1. ExchangeError becomes the honest
+    placing an order goes through exchange_prepare_order -> console
+    approval -> exchange_execute_order. ExchangeError becomes the honest
     ERROR line."""
     from . import exchanges  # local import: optional dependency path
     try:
         return exchanges.orders(venue)
     except exchanges.ExchangeError as e:
         raise ToolError(str(e)) from None
+
+
+# --- W2 order face (approval gate lives in the console, never in a tool) ---
+
+def _plan_line(plan: dict) -> str:
+    """One compact `exchange_plans` row: fixed positional fields first,
+    free-text `reason` last (it is the only field that may hold spaces).
+    None renders as `-` — an absent price or order id is stated, never
+    fabricated."""
+    def val(key: str) -> str:
+        v = plan.get(key)
+        if v is None:
+            return "-"
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        if isinstance(v, float):
+            return f"{v:.10g}"
+        return str(v)
+    return (f"{val('id')} {val('status')} {val('venue')} {val('side')} "
+            f"{val('order_type')} {val('symbol')} qty={val('qty')} "
+            f"price={val('price')} notional_usd={val('notional_usd')} "
+            f"approval={val('approval')} expires={val('expires_at')} "
+            f"order_id={val('order_id')} reason={val('reason')}")
+
+
+PLANS_LINE_CAP = 40          # `exchange_plans list` renders at most this many lines
+
+
+def _exchange_prepare_order(venue: str, side: str, symbol: str | None,
+                             order_type: str, qty, price=None,
+                             state_dir: str | Path | None = None) -> str:
+    """`exchange_prepare_order` handler (W2): DRY RUN — validates the order,
+    walks the live book and stores a PLAN. Nothing is sent to a venue from
+    this handler; sending is exchange_execute_order's job and needs an
+    owner-approved plan. ExchangeError (bad shape, missing slot, dead
+    upstream) becomes the honest ERROR line."""
+    from . import exchanges  # local import: optional dependency path
+    try:
+        return exchanges.prepare_order(venue, side, symbol, order_type, qty,
+                                       price, state_dir=state_dir)
+    except exchanges.ExchangeError as e:
+        raise ToolError(str(e)) from None
+
+
+def _exchange_execute_order(plan_id: str,
+                            state_dir: str | Path | None = None) -> str:
+    """`exchange_execute_order` handler (W2): sends ONE stored plan, and the
+    plan id is the ONLY argument — every order parameter is read back from
+    the store, so nothing can be rewritten between approval and execution.
+    A pending plan, an expired plan or an unconfigured venue all surface as
+    an honest ERROR line; no venue call happens on a refusal."""
+    from . import exchanges  # local import: optional dependency path
+    try:
+        return exchanges.execute_order(plan_id, state_dir=state_dir)
+    except exchanges.ExchangeError as e:
+        raise ToolError(str(e)) from None
+
+
+def _exchange_plans(action: str = "list", plan_id: str | None = None,
+                     state_dir: str | Path | None = None) -> str:
+    """`exchange_plans` handler (W2): list stored plans (compact lines) or
+    cancel a plan this model prepared. `approve` / `reject` deliberately do
+    NOT exist here — the model has no approval path: only the OWNER decides
+    in the console behind the Bearer WEB_TOKEN gate. ExchangeError becomes
+    the honest ERROR line."""
+    from . import exchanges  # local import: optional dependency path
+    act = str(action or "").strip().lower()
+    if act == "cancel":
+        pid = str(plan_id or "").strip()
+        if not pid:
+            raise ToolError("cancel needs a plan_id (list them with "
+                            "exchange_plans action=list)")
+        try:
+            plan = exchanges.plan_decide(pid, "cancel", decided_by="model",
+                                         state_dir=state_dir)
+        except exchanges.ExchangeError as e:
+            raise ToolError(str(e)) from None
+        return _plan_line(plan)
+    if act != "list":
+        raise ToolError(f"action must be one of list|cancel (got "
+                        f"{act or 'empty'}); approve and reject exist only in "
+                        "the console behind the WEB_TOKEN gate")
+    try:
+        plans = exchanges.plans_list(state_dir=state_dir)
+    except exchanges.ExchangeError as e:
+        raise ToolError(str(e)) from None
+    if not plans:
+        return "no plans — prepare one with exchange_prepare_order"
+    if len(plans) > PLANS_LINE_CAP:
+        lines = [_plan_line(p) for p in plans[:PLANS_LINE_CAP - 1]]
+        lines.append(f"... {len(plans) - PLANS_LINE_CAP + 1} more plans not "
+                     f"shown (cap {PLANS_LINE_CAP})")
+        return "\n".join(lines)
+    return "\n".join(_plan_line(p) for p in plans)
 
 
 def resolve_disabled_tools(settings: dict | None = None) -> frozenset[str]:
@@ -884,16 +981,19 @@ def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
                                 "(LINEAR_API_KEY / NOTION_API_KEY)")
     except Exception as e:  # noqa: BLE001 — probe must never break the registry
         r.connector_note = f"connectors unavailable: {type(e).__name__}: {e}"
-    # --- W1 Web3 car: read-only exchange face (markets + account reads) ---
+    # --- W1/W2 Web3 car: exchange face (markets + account reads + orders) ---
     # exchange_markets registers ALWAYS: public, keyless market data (same
     # always-register rationale as generate_image — configuration resolves
     # at CALL time, so an unknown venue or a dead upstream surfaces as an
-    # honest ERROR line instead of a missing capability). exchange_portfolio
-    # and exchange_orders register ONLY when at least one CEX credential
-    # slot exists (exactly the connector_search slot-gating pattern:
-    # capability-honest registration), otherwise the registry carries
-    # r.exchange_note naming the unconfigured venues and their missing slots
-    # instead of a dead tool. READ-ONLY: no order placement exists in W1.
+    # honest ERROR line instead of a missing capability). exchange_portfolio,
+    # exchange_orders and the three W2 order tools (prepare / execute / plans)
+    # register ONLY when at least one CEX credential slot exists (exactly the
+    # connector_search slot-gating pattern: capability-honest registration),
+    # otherwise the registry carries r.exchange_note naming the unconfigured
+    # venues and their missing slots instead of a dead tool. The W2 tools can
+    # only PREPARE and execute an owner-approved plan — approve/reject live
+    # solely in the console behind the WEB_TOKEN gate, and no withdrawal or
+    # on-chain transfer exists anywhere in this face.
     r.exchange_note: str | None = None
     ex_rows: list[dict] = []
     try:
@@ -907,13 +1007,15 @@ def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
     # venue enum comes from the live catalog; the literal tuple is only the
     # fail-soft fallback so exchange_markets still registers if the probe broke
     ex_keys = [row.get("key") for row in ex_rows if row.get("key")] or [
-        "okx", "kraken", "jupiter", "velora", "hyperliquid", "dydx", "gmx", "rpc"]
+        "okx", "kraken", "jupiter", "velora", "hyperliquid", "dydx", "gmx",
+        "rpc", "binance"]
     r.register("exchange_markets",
-               "READ-ONLY public market data for one venue (8 venues: "
+               "READ-ONLY public market data for one venue (9 venues: "
                "okx, kraken, jupiter, velora, hyperliquid, dydx, gmx, "
-               "rpc). Keyless — works with zero credentials; no order "
-               "placement exists in W1. `symbol` defaults to the "
-               "venue's default pair.",
+               "rpc, binance). Keyless — works with zero credentials; this "
+               "tool never places an order (W2 orders run exchange_"
+               "prepare_order -> console approval -> exchange_execute_"
+               "order). `symbol` defaults to the venue's default pair.",
                {"type": "object", "properties": {
                    "venue": {"type": "string", "enum": ex_keys},
                    "symbol": {"type": "string",
@@ -924,24 +1026,101 @@ def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
     if r.exchange_note is None:  # probe healthy: gate the account reads on slots
         try:
             if ex_ready:
+                ex_cex = list(ex_mod.CEX_VENUES)   # okx, kraken, binance
                 r.register("exchange_portfolio",
                            "READ-ONLY account balances for one CEX venue "
-                           "(okx or kraken). Slots are read at call time; "
-                           "no order placement exists in W1.",
+                           f"({', '.join(ex_cex)}). Slots are read at call "
+                           "time; this tool never places an order.",
                            {"type": "object", "properties": {
                                "venue": {"type": "string",
-                                         "enum": ["okx", "kraken"]}},
+                                         "enum": ex_cex}},
                             "required": ["venue"]},
                            lambda venue: _exchange_portfolio(venue))
                 r.register("exchange_orders",
                            "READ-ONLY list of open orders for one CEX venue "
-                           "(okx or kraken). Listing only — placing an order "
-                           "does not exist in W1.",
+                           f"({', '.join(ex_cex)}). Listing only — orders go "
+                           "exchange_prepare_order -> console approval -> "
+                           "exchange_execute_order.",
                            {"type": "object", "properties": {
                                "venue": {"type": "string",
-                                         "enum": ["okx", "kraken"]}},
+                                         "enum": ex_cex}},
                             "required": ["venue"]},
                            lambda venue: _exchange_orders(venue))
+                # --- W2: the approval gate. prepare is a DRY RUN; execute
+                # takes a plan_id and NOTHING else; plans lists or cancels.
+                # No tool here can approve — that is console-only.
+                r.register(
+                    "exchange_prepare_order",
+                    "W2 DRY RUN: validate an order, quote the live book and "
+                    "store a PLAN for owner approval. Nothing is sent to a "
+                    "venue from this call. `qty` is a positive base-asset "
+                    "quantity; `price` is REQUIRED for limit and must be "
+                    "absent for market orders. Fail-closed: default "
+                    "thresholds are 0, so every plan waits for a human "
+                    "(market orders never auto-approve whatever the caps). "
+                    "Approval only happens in the console behind the "
+                    "WEB_TOKEN gate — the model has no approve/reject "
+                    "path. W2 ships no withdrawals and no on-chain "
+                    "transfers.",
+                    {"type": "object", "properties": {
+                        "venue": {"type": "string", "enum": ex_keys},
+                        "side": {"type": "string", "enum": ["buy", "sell"]},
+                        "symbol": {"type": "string",
+                                   "description": "Pair/ticker; defaults to "
+                                                  "the venue's default pair."},
+                        "order_type": {"type": "string",
+                                       "enum": ["limit", "market"]},
+                        "qty": {"type": "number", "exclusiveMinimum": 0,
+                                "description": "Base-asset quantity (> 0)."},
+                        "price": {"type": "number", "exclusiveMinimum": 0,
+                                  "description": "Required for limit orders; "
+                                                 "must be absent for market "
+                                                 "orders."}},
+                     "required": ["venue", "side", "order_type", "qty"]},
+                    lambda venue, side, symbol=None, order_type=None,
+                    qty=None, price=None:
+                    _exchange_prepare_order(venue, side, symbol, order_type,
+                                            qty, price, state_dir))
+                r.register(
+                    "exchange_execute_order",
+                    "Send ONE stored plan to its venue. Takes ONLY "
+                    "`plan_id` — every other order parameter (venue, side, "
+                    "symbol, type, qty, price) is read back from the stored "
+                    "plan, so nothing can be rewritten between approval and "
+                    "execution. Fail-closed: the plan must be status="
+                    "approved — approved by the OWNER in the console behind "
+                    "the WEB_TOKEN gate (default thresholds 0 = every plan "
+                    "waits for a human; market orders never auto-approve), "
+                    "or auto-approved under positive thresholds that are "
+                    "re-checked at execution. W2 ships no withdrawals and "
+                    "no on-chain transfers.",
+                    {"type": "object", "properties": {
+                        "plan_id": {"type": "string",
+                                    "description": "Stored plan id from "
+                                                   "exchange_prepare_order."}},
+                     "required": ["plan_id"]},
+                    lambda plan_id: _exchange_execute_order(plan_id,
+                                                             state_dir))
+                r.register(
+                    "exchange_plans",
+                    "List the stored order plans (compact lines, capped at "
+                    "40) or cancel one of them. `action=list` needs nothing "
+                    "else; `action=cancel` needs `plan_id` and marks that "
+                    "plan cancelled. approve and reject do NOT exist here: "
+                    "approval only happens in the console behind the "
+                    "WEB_TOKEN gate, and with the default thresholds of 0 "
+                    "every plan waits for a human (market orders never "
+                    "auto-approve). W2 ships no withdrawals and no "
+                    "on-chain transfers.",
+                    {"type": "object", "properties": {
+                        "action": {"type": "string",
+                                   "enum": ["list", "cancel"]},
+                        "plan_id": {"type": "string",
+                                    "description": "Required for "
+                                                   "action=cancel."}},
+                     "required": ["action"]},
+                    lambda action="list", plan_id=None:
+                    _exchange_plans(action, plan_id, state_dir))
             else:
                 # Honest note naming ONLY the unconfigured venues + missing
                 # slots (catalog rows carry `reason` only for key venues

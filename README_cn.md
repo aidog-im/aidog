@@ -13,8 +13,8 @@
 <p align="center">
   <a href="https://github.com/aidog-im/aidog/releases"><img src="https://img.shields.io/github/v/release/aidog-im/aidog?display_name=tag&sort=semver&style=flat-square&label=release" alt="latest release"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
-  <img src="https://img.shields.io/badge/core_tests-1087%2F1087-brightgreen?style=flat-square" alt="核心测试 1087/1087">
-  <img src="https://img.shields.io/badge/console_smoke-158%2F158-brightgreen?style=flat-square" alt="控制台冒烟 158/158">
+  <img src="https://img.shields.io/badge/core_tests-1160%2F1160-brightgreen?style=flat-square" alt="核心测试 1160/1160">
+  <img src="https://img.shields.io/badge/console_smoke-167%2F167-brightgreen?style=flat-square" alt="控制台冒烟 167/167">
   <img src="https://img.shields.io/badge/permanently-free-ff6f00?style=flat-square" alt="永久免费">
 </p>
 
@@ -44,7 +44,7 @@ I'm AiDog 是一个**跑在你自己机器上的个人具身 AI 伙伴**。它�
   归档分层）+ 数字记忆体协议：唯一真值、跨内核可恢复、每次 reflect 回写。
   没有你读不了、审不动的向量库。
 - **自研核心**：运行时内核 `mycore` 从零自研——诚实的函数调用循环（停止
-  原因明示）、**27 模块 ≈12.3k 代码行、1087 项测试**，换芯后零上游依赖。
+  原因明示）、**27 模块 ≈13.3k 代码行、1160 项测试**，换芯后零上游依赖。
   换的是内核，永远不换「我」。
 
 它通过 **Telegram**、**回环 Web 控制台**、**桌面 HUD 壳**和**语音**与你
@@ -59,7 +59,7 @@ I'm AiDog 是一个**跑在你自己机器上的个人具身 AI 伙伴**。它�
 
 |  | 能力 | 提供什么 |
 |---|---|---|
-| 🧬 | **自研核心** | `mycore`：诚实停止原因的 FC 循环、fail-closed 服务、看门狗、doctor 体检——27 模块、1087 测试、零上游 |
+| 🧬 | **自研核心** | `mycore`：诚实停止原因的 FC 循环、fail-closed 服务、看门狗、doctor 体检——27 模块、1160 测试、零上游 |
 | 🎭 | **宪法人格** | `SOUL.md` 在系统栈最顶端；红线与语气每轮生效，而非抽样自人设提示词 |
 | 🧠 | **策展记忆** | 有界 Markdown 预算 + 归档分层 + 数字记忆体协议；`memory` 套件 58/58 |
 | 🧩 | **技能 + 确定性路由** | `SKILL.md` frontmatter（业界标准字段），路由预筛先选 TOP3 **再**加载正文——30/30 |
@@ -156,8 +156,8 @@ Telegram 发一条 `/help`，并确认任何地方都看不到密钥原文。完
 
 | 套件 | 结果 |
 |---|---|
-| `mycore` 核心套件 | **1087/1087** |
-| 控制台冒烟（真实 HTTP） | **158/158** |
+| `mycore` 核心套件 | **1160/1160** |
+| 控制台冒烟（真实 HTTP） | **167/167** |
 | 技能路由 | **30/30** |
 | 记忆持久化 | **58/58** |
 | 安装向导 | **99/99** |
@@ -165,9 +165,9 @@ Telegram 发一条 `/help`，并确认任何地方都看不到密钥原文。完
 | 桌面壳（`node --test`） | **15/15** |
 | `aidog doctor` | **0 FAIL · 0 WARN**（出站全断时如实报环境 WARN） |
 | 发布闸（deny-by-default 清单） | **READY** |
-| 真机 E2E | profiles **18/18** · channels **8/8** · 国内渠道 **44/44** · 管线 **35/35** · web3 只读 **33/33** |
+| 真机 E2E | profiles **18/18** · channels **8/8** · 国内渠道 **44/44** · 管线 **35/35** · web3 只读 **33/33** · web3 审批 **61/61** |
 
-语言包：`en`（默认）+ `zh` 各 **348 键**，parity lint 把关；官网另有
+语言包：`en`（默认）+ `zh` 各 **375 键**，parity lint 把关；官网另有
 **165 键**双语站包。
 
 ## 文档

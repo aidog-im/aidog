@@ -53,12 +53,24 @@ branch. All of these are refused with a `400` and an exact
 
 Only the offending **tool name** is ever echoed — never a value, never
 anything secret (the field holds names only, so there is no secret to leak).
-The catalog lives in `mycore/tools.py::KNOWN_TOOL_NAMES` (22 names = 11 core
-+ `generate_image` + `connector_search` + the six `browser_*` + the three
+The catalog lives in `mycore/tools.py::KNOWN_TOOL_NAMES` (**25 names** = 11
+core + `generate_image` + `connector_search` + the six `browser_*` + the six
 `exchange_*`);
 capability-honest registration (browser binary / connector slots / CEX
 credential slots — see [exchanges.md](exchanges.md)) still
 governs whether a *known* tool actually appears — the switch can only remove.
+
+The three W2 order tools joined the catalog with the order car:
+`exchange_prepare_order` (dry run — stores a plan, sends nothing),
+`exchange_execute_order` (takes only `plan_id`, fail-closed), and
+`exchange_plans` (`list`/`cancel` — no approve, approval is console-only).
+They are gated exactly like the W1 account reads: registered only when
+**at least one CEX credential slot set exists**, otherwise withheld with the
+registry's honest `exchange_note` naming the missing slots. Knowing a name
+is not having the capability — and like every other name, they can be
+*removed* with `MYCORE_TOOLS_OFF=exchange_execute_order` (env) or
+`"mycore": {"tools_off": ["exchange_execute_order"]}` (settings); the kill
+switch can never *enable* a slot-gated tool.
 
 An **unknown name from the env var** is not fatal: it is ignored with one
 honest, non-secret stderr note per name —

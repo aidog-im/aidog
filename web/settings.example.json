@@ -35,5 +35,9 @@
       "hey aidog",
       "你好艾多"
     ]
+  },
+  "web3": {
+    "auto_usd_per_tx": 0,
+    "auto_usd_daily": 0
   }
 }

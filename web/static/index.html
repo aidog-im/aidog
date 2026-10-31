@@ -322,28 +322,46 @@
       </section>
     </section>
 
-    <!-- EXCHANGE: Web3 phase-2 W1 read-only venue panel. It renders ONLY
-         from GET /api/capabilities -> exchange: when that backend block is
-         absent the panel says so honestly instead of pretending. Nothing
-         here ever places an order — reads only (see the disclosure). -->
+    <!-- EXCHANGE: Web3 phase-2 W2 approval-gated venue panel. It renders
+         ONLY from GET /api/capabilities (exchange + web3 blocks) and from
+         GET /api/exchange/plans: when those blocks are absent the panel
+         says so honestly instead of pretending. Public market reads are
+         keyless; orders exist only as PLANS that the owner approves or
+         rejects in this panel (prepare -> console approval -> execute) —
+         the model's execute step receives a plan id and can never approve
+         its own plan. Withdrawals and on-chain transfers do not exist in
+         this product at all (see the disclosure below). -->
     <section class="view" id="view-exchange" data-view="exchange">
       <div class="view-head">
         <div class="view-titles">
           <h2 data-i18n="view.exchange.title">Exchange</h2>
-          <p class="view-sub" data-i18n="view.exchange.sub">Read-only venues, tools and a market probe</p>
+          <p class="view-sub" data-i18n="view.exchange.sub">Approval-gated venues, order plans and a market probe</p>
         </div>
       </div>
       <div class="ov-grid">
         <section class="card span-3">
-          <h2><span data-i18n="sec.exchange">READ-ONLY EXCHANGE</span>
-              <span class="chat-badge" data-i18n="ex.badge">read-only</span></h2>
-          <p class="auth-lead" data-i18n="ex.lead">This panel reads market data only: no order placement, no transfers, no withdrawals — this release ships no trading writes.</p>
+          <h2><span data-i18n="sec.exchange">EXCHANGE</span>
+              <span class="chat-badge" data-i18n="ex.badge">approval-gated</span></h2>
+          <p class="auth-lead" data-i18n="ex.lead">Market reads are keyless. Orders exist only as plans: this panel is where you approve or reject them — the model's execute step receives a plan id and can never approve its own plan. Withdrawals and on-chain transfers do not exist in this product at all.</p>
           <ul class="reason-list" id="exDisclosure">
             <li data-i18n="ex.disc.fees">The product is permanently free, but exchange fees and on-chain gas are not zero: you settle them yourself with the exchange or the chain.</li>
             <li data-i18n="ex.disc.advice">Nothing on this panel is investment advice.</li>
             <li data-i18n="ex.disc.risk">Trading risk is borne by you: you are responsible for the outcome of any trade you make.</li>
             <li data-i18n="ex.disc.creds">Credentials stay on this machine (secrets.env) and are never echoed into chats, logs or documents.</li>
           </ul>
+        </section>
+
+        <section class="card span-3">
+          <h2><span data-i18n="ex.thr">AUTO-APPROVAL THRESHOLDS</span></h2>
+          <div class="head-status" id="exThreshold"></div>
+          <div class="stat-note" id="exThresholdHint" hidden></div>
+        </section>
+
+        <section class="card span-3">
+          <h2><span data-i18n="ex.plans">ORDER APPROVAL</span>
+              <span class="gal-count" id="exPlansCount"></span></h2>
+          <div class="stat-note" id="exGate" hidden></div>
+          <div class="gal-grid" id="exPlans"></div>
         </section>
 
         <section class="card span-3">

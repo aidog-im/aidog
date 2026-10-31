@@ -3,11 +3,21 @@
 Three hard contracts (owner decrees, 2026-10-24) that this file enforces in
 code rather than in configuration:
 
-1. READ-ONLY. Every request here fetches data. There is no order placement,
-   no transfer, no withdrawal, no transaction signing anywhere in this
-   module — the prepare/execute split of phase 2 is a boundary drawn in
-   CODE, so no settings value, env var or model instruction can turn this
-   file into a writer. Order placement lands in W2 behind an approval gate.
+1. READ-ONLY UNTIL A HUMAN SAYS OTHERWISE (W1 -> W2). W1: every request
+   here fetched data. W2 (owner decree 2026-10-25) adds ORDER PLACEMENT and
+   nothing else, behind a prepare/execute split drawn in CODE:
+   ``prepare_order`` builds a dry-run plan (book, VWAP, fees, thresholds)
+   and ``execute_order`` takes the plan id and NOTHING ELSE — every order
+   parameter is read back from the stored plan, so no prompt, settings value
+   or env var can rewrite an order between approval and execution. Execution
+   is fail-closed: status must be `approved` (the OWNER's console decision
+   behind the Bearer WEB_TOKEN write gate, or a POSITIVE auto threshold
+   re-checked against the day's ledger at execution time), default
+   thresholds are 0 = nothing auto-approves, MARKET orders never
+   auto-approve. WITHDRAWALS, ON-CHAIN TRANSFERS and TRANSACTION SIGNING DO
+   NOT EXIST in this module — no settings value, env var or model
+   instruction can turn this file into a fund mover, and the core suite
+   asserts that absence against this very source file.
 2. ZERO CREDENTIAL ECHO. Slot values are read only to sign a request and
    are never returned, logged, formatted or embedded in an error. Errors
    name the SLOT (``OKX_API_KEY``), never the value.
@@ -39,13 +49,15 @@ import hmac
 import json
 import os
 import re
+import secrets
 import threading
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Callable
 
 from lib import profile_paths as pp  # noqa: E402  (per-profile secrets)
@@ -104,14 +116,25 @@ VENUES: dict[str, Venue] = {v.key: v for v in (
           "BTC", "GMX pairs feed (keyless, no account involved)"),
     Venue("rpc", "Public RPC", "chain", "public", (),
           "base", "JSON-RPC chain head (base | ethereum | solana)"),
+    # Third CEX (owner decree 2026-10-25): Binance has NO official MCP/agent
+    # API (GitHub org search: 0 repos, verified 2026-10-24) — only the
+    # official Skills Hub + REST. This is our OWN thin adapter over the
+    # documented REST surface; no third-party server ever sees the key.
+    Venue("binance", "Binance", "cex", "key",
+          ("BINANCE_API_KEY", "BINANCE_API_SECRET"),
+          "BTCUSDT", "Spot REST (official Skills + REST, no official MCP)"),
 )}
 
 CEX_VENUES = tuple(k for k, v in VENUES.items() if v.kind == "cex")
+# Venues that can carry an ORDER (W2). Still read-only by construction:
+# placing one goes through prepare -> human approval -> execute.
+ORDERABLE_VENUES = CEX_VENUES
 
 # Base URL per venue (env AIDOG_EX_<VENUE>_URL overrides — offline E2E seam).
 _BASE = {
     "okx": "https://www.okx.com",
     "kraken": "https://api.kraken.com",
+    "binance": "https://api.binance.com",
     "jupiter": "https://lite-api.jup.ag",
     "velora": "https://api.velora.xyz",
     "hyperliquid": "https://api.hyperliquid.xyz",
@@ -168,8 +191,15 @@ def catalog() -> list[dict]:
     st = status()
     rows = []
     for key, v in VENUES.items():
+        # `read_only` is a promise about THIS product's capability, so it
+        # follows the venue's real surface: the six chain sources stay
+        # read-only, the three CEX can carry an order — and only through the
+        # W2 prepare -> console approval -> execute path. Claiming
+        # read_only on an orderable venue would be a false promise.
+        orderable = key in ORDERABLE_VENUES
         row: dict = {"key": key, "label": v.label, "kind": v.kind,
-                     "auth": v.auth, "read_only": True,
+                     "auth": v.auth, "read_only": not orderable,
+                     "orderable": orderable,
                      "symbol": v.symbol, "summary": v.summary}
         if v.auth == "key":
             ready = bool(st.get(key))
@@ -180,6 +210,9 @@ def catalog() -> list[dict]:
                                  f"{' / '.join(missing)} in secrets.env)")
         else:
             row["configured"] = True
+        if orderable:
+            row["summary"] = (v.summary + " — order placement only via "
+                              "prepare -> console approval -> execute")
         rows.append(row)
     return rows
 
@@ -339,8 +372,11 @@ def _okx_public(path_query: str, *, transport: Transport,
     return doc
 
 
-def _okx_private(path_query: str, *, transport: Transport,
-                 timeout: float) -> object:
+def _okx_private(path_query: str, *, body: str = "",
+                 transport: Transport, timeout: float) -> object:
+    """Signed OKX request. `body` empty = GET; a body means POST and takes
+    part in the signature (OKX v5 pre-hash: timestamp+method+path+body),
+    which is how the W2 order endpoint is called."""
     key = _slot("OKX_API_KEY")
     secret = _slot("OKX_API_SECRET")
     passphrase = _slot("OKX_API_PASSPHRASE")
@@ -349,20 +385,39 @@ def _okx_private(path_query: str, *, transport: Transport,
             "okx not configured (set OKX_API_KEY / OKX_API_SECRET / "
             "OKX_API_PASSPHRASE in secrets.env)")
     ts = _okx_timestamp()
-    sign = okx_sign(ts, "GET", path_query, "", secret)
+    method = "POST" if body else "GET"
+    sign = okx_sign(ts, method, path_query, body, secret)
     headers = {"OK-ACCESS-KEY": key, "OK-ACCESS-SIGN": sign,
                "OK-ACCESS-TIMESTAMP": ts, "OK-ACCESS-PASSPHRASE": passphrase}
-    doc = _get(_base("okx") + path_query, transport=transport, timeout=timeout,
-               headers=headers)
+    if body:
+        # OKX's order endpoint takes a JSON body (application/json), and the
+        # body is part of the v5 pre-hash — sign exactly these bytes.
+        hdr = {"Content-Type": "application/json"}
+        hdr.update(headers)
+        doc = _post_form(_base("okx") + path_query, body, hdr,
+                         transport=transport, timeout=timeout)
+    else:
+        doc = _get(_base("okx") + path_query, transport=transport,
+                   timeout=timeout, headers=headers)
     if isinstance(doc, dict) and str(doc.get("code", "0")) != "0":
         raise ExchangeError(f"okx: {_err(doc)}")
     return doc
 
 
-def _kraken_private(path: str, *, transport: Transport,
-                    timeout: float) -> object:
-    """POST <base><path> with a nonce body; path starts at /0/private (the
-    signed prefix per the official authentication guide)."""
+def _kraken_pair(sym: str) -> str:
+    """Kraken's compact pair spelling: separators dropped, BTC -> XBT
+    (XBTUSD), exactly what the public Ticker and AddOrder endpoints take."""
+    pair = "".join(ch for ch in sym.upper().replace("BTC", "XBT") if ch.isalnum())
+    if not pair:
+        raise ExchangeError(f"kraken: no tradable pair in {sym}")
+    return pair
+
+
+def _kraken_private(path: str, *, fields: dict | None = None,
+                    transport: Transport, timeout: float) -> object:
+    """POST <base><path> with a nonce body (`fields` adds the call's own
+    parameters — AddOrder in W2); path starts at /0/private (the signed
+    prefix per the official authentication guide)."""
     key = _slot("KRAKEN_API_KEY")
     secret = _slot("KRAKEN_API_SECRET")
     if not (key and secret):
@@ -370,7 +425,10 @@ def _kraken_private(path: str, *, transport: Transport,
             "kraken not configured (set KRAKEN_API_KEY / KRAKEN_API_SECRET "
             "in secrets.env)")
     nonce = _nonce()
-    postdata = urllib.parse.urlencode({"nonce": nonce})
+    payload: dict = {"nonce": nonce}
+    if fields:
+        payload.update(fields)
+    postdata = urllib.parse.urlencode(payload)
     sign = kraken_sign(path, postdata, nonce, secret)
     doc = _post_form(_base("kraken") + path, postdata,
                      {"API-Key": key, "API-Sign": sign},
@@ -405,9 +463,7 @@ def _mkt_okx(sym: str, transport: Transport, timeout: float) -> list[str]:
 def _mkt_kraken(sym: str, transport: Transport, timeout: float) -> list[str]:
     # Kraken's base asset for BTC is XBT, and the public endpoint takes the
     # compact spelling (XBTUSD / ETHUSD): drop separators, map BTC->XBT.
-    pair = "".join(ch for ch in sym.upper().replace("BTC", "XBT") if ch.isalnum())
-    if not pair:
-        raise ExchangeError(f"kraken: no tradable pair in {sym}")
+    pair = _kraken_pair(sym)
     doc = _get(f"{_base('kraken')}/0/public/Ticker?pair={urllib.parse.quote(pair)}",
                transport=transport, timeout=timeout)
     if isinstance(doc, dict) and doc.get("error"):
@@ -603,10 +659,26 @@ def _mkt_rpc(sym: str, transport: Transport, timeout: float) -> list[str]:
     return [f"{head} method={method} (public, keyless)"]
 
 
+def _mkt_binance(sym: str, transport: Transport, timeout: float) -> list[str]:
+    doc = _get(f"{_base('binance')}/api/v3/ticker/24hr?symbol={urllib.parse.quote(sym)}",
+               transport=transport, timeout=timeout)
+    if not isinstance(doc, dict) or doc.get("code") is not None:
+        raise ExchangeError(f"binance: {_err(doc) if doc else 'empty response'}")
+    last, opn = _num(doc.get("lastPrice")), _num(doc.get("prevClosePrice"))
+    return [f"{doc.get('symbol')} last={_fmt(doc.get('lastPrice'))} "
+            f"ask={_fmt(doc.get('askPrice'))} bid={_fmt(doc.get('bidPrice'))} "
+            f"chg24h={_pct(last, opn)} "
+            f"high24h={_fmt(doc.get('highPrice'))} "
+            f"low24h={_fmt(doc.get('lowPrice'))} "
+            f"vol24h={_fmt(doc.get('volume'))} "
+            f"quote_vol={_fmt(doc.get('quoteVolume'))}"]
+
+
 _MARKET_FN = {
     "okx": _mkt_okx, "kraken": _mkt_kraken, "jupiter": _mkt_jupiter,
     "velora": _mkt_velora, "hyperliquid": _mkt_hyperliquid,
     "dydx": _mkt_dydx, "gmx": _mkt_gmx, "rpc": _mkt_rpc,
+    "binance": _mkt_binance,
 }
 
 
@@ -688,6 +760,87 @@ def _kraken_orders(transport: Transport, timeout: float) -> list[str]:
     return lines
 
 
+# ------------------------------------------------- Binance (W2 third CEX) --
+# Official surface: there is NO official MCP/agent API (org search = 0 on
+# 2026-10-24) — only Skills + REST, so this is our own thin adapter.
+# Auth: `X-MBX-APIKEY: <key>` header + `signature = HMAC_SHA256(secret,
+# queryString)` in HEX, appended to the query string (params travel in the
+# URL for both GET and POST; the POST carries no body).
+
+
+def _binance_request(path: str, params: dict, *, signed: bool,
+                     method: str = "GET", transport: Transport,
+                     timeout: float) -> object:
+    key = _slot("BINANCE_API_KEY")
+    secret = _slot("BINANCE_API_SECRET")
+    if signed and not (key and secret):
+        raise ExchangeError(
+            "binance not configured (set BINANCE_API_KEY / "
+            "BINANCE_API_SECRET in secrets.env)")
+    query = urllib.parse.urlencode(params) if params else ""
+    headers: dict = {}
+    if signed:
+        joiner = "&" if query else ""
+        query = (f"{query}{joiner}timestamp={int(time.time() * 1000)}"
+                 f"&recvWindow=5000")
+        digest = hmac.new(secret.encode("utf-8"), query.encode("utf-8"),
+                          hashlib.sha256).hexdigest()
+        query = f"{query}&signature={digest}"
+        headers["X-MBX-APIKEY"] = key
+    url = _base("binance") + path + (f"?{query}" if query else "")
+    doc = _doc(transport(url, method, headers, None, timeout))
+    if isinstance(doc, dict) and doc.get("code") is not None:
+        raise ExchangeError(f"binance: {_err(doc)}")
+    return doc
+
+
+def _binance_portfolio(transport: Transport, timeout: float) -> list[str]:
+    doc = _binance_request("/api/v3/account", {}, signed=True,
+                           transport=transport, timeout=timeout)
+    balances = doc.get("balances") if isinstance(doc, dict) else None
+    if not isinstance(balances, list):
+        raise ExchangeError("binance: unexpected account response shape")
+    lines = ["balances (free + locked; this endpoint carries no USD "
+             "valuation — quote them from exchange_markets)"]
+    for row in balances[:MAX_LINES * 4]:
+        if not isinstance(row, dict):
+            continue
+        if _num(row.get("free")) == 0 and _num(row.get("locked")) == 0:
+            continue
+        lines.append(f"{row.get('asset')} free={_fmt(row.get('free'))} "
+                     f"locked={_fmt(row.get('locked'))}")
+    if len(lines) == 1:
+        lines.append("no non-zero balances")
+    return lines[:MAX_LINES]
+
+
+def _binance_orders(transport: Transport, timeout: float) -> list[str]:
+    doc = _binance_request("/api/v3/openOrders", {}, signed=True,
+                           transport=transport, timeout=timeout)
+    if not isinstance(doc, list):
+        raise ExchangeError("binance: unexpected openOrders response shape")
+    if not doc:
+        return ["no open orders"]
+    lines = []
+    for row in doc[:MAX_LINES]:
+        if not isinstance(row, dict):
+            continue
+        lines.append(f"{row.get('orderId')} {row.get('symbol')} "
+                     f"{row.get('side')} {row.get('type')} "
+                     f"px={_fmt(row.get('price'))} "
+                     f"qty={_fmt(row.get('origQty'))} "
+                     f"status={row.get('status')}")
+    return lines
+
+
+# Account legs per venue (keeps portfolio()/orders() dispatch data-driven —
+# adding a venue means adding a row, not another if/else chain).
+_PORTFOLIO_FN = {"okx": _okx_portfolio, "kraken": _kraken_portfolio,
+                 "binance": _binance_portfolio}
+_ORDERS_FN = {"okx": _okx_orders, "kraken": _kraken_orders,
+              "binance": _binance_orders}
+
+
 # ------------------------------------------------------------------- API ----
 
 def _check_venue(venue: str) -> Venue:
@@ -723,7 +876,7 @@ def portfolio(venue: str, *, transport: Transport | None = None,
             f"{venue} has no account surface here (chain venues are public "
             "market sources only; balances stay on the exchange venue)")
     transport = transport or _urllib_transport
-    fn = _okx_portfolio if venue == "okx" else _kraken_portfolio
+    fn = _PORTFOLIO_FN[venue]
     return "\n".join(fn(transport, timeout))
 
 
@@ -737,7 +890,7 @@ def orders(venue: str, *, transport: Transport | None = None,
             f"{venue} has no order surface here (chain venues are public "
             "market sources only)")
     transport = transport or _urllib_transport
-    fn = _okx_orders if venue == "okx" else _kraken_orders
+    fn = _ORDERS_FN[venue]
     return "\n".join(fn(transport, timeout))
 
 
@@ -746,3 +899,676 @@ def quote(venue: str, symbol: str | None = None, *, timeout: float = 10.0) -> st
     a short timeout and an injectable-transport-free signature (the HTTP
     surface never exposes account reads — those are model tools only)."""
     return markets(venue, symbol, timeout=timeout)
+
+
+# ============================================================ W2: orders ==
+#
+# W2 (owner decree 2026-10-25) adds ORDER PLACEMENT behind a hard approval
+# gate that lives in CODE, not in configuration:
+#
+#  * prepare / execute are separate functions. ``execute_order`` takes a
+#    plan_id and NOTHING else: venue, side, symbol, type, qty and price are
+#    read back from the stored plan, so no prompt, settings value or env var
+#    can rewrite an order between approval and execution.
+#  * ``execute_order`` fails closed. A plan must be status=approved — the
+#    OWNER approved it in the console (Bearer WEB_TOKEN write gate, a
+#    credential the model never sees), or ``prepare_order`` auto-approved it
+#    under a POSITIVE threshold and the day's ledger still allows it when it
+#    executes. Default thresholds are 0 -> every plan waits for a human.
+#    MARKET orders never auto-approve, whatever the thresholds say.
+#  * WITHDRAWALS AND ON-CHAIN TRANSFERS DO NOT EXIST HERE: no function, no
+#    endpoint, no settings key can move funds off a venue. The core suite
+#    asserts that absence against this very source file.
+#
+# State is one JSON file, <state_dir>/web3_orders.json: the plans plus a
+# Beijing-date daily ledger of everything executed (manual approvals count
+# too — a spent day is a smaller tomorrow). Writes are serialised by a
+# module lock and land atomically (tmp + os.replace).
+
+PLAN_TTL_SEC = 900            # a plan lives 15 minutes, then expires
+PLAN_MAX = 50                 # at most this many plans are kept
+STORE_NAME = "web3_orders.json"
+BJT = timezone(timedelta(hours=8))   # ledger day = Beijing date (cron parity)
+PLAN_ACTIONS = ("approve", "reject", "cancel")
+ORDER_TYPES = ("limit", "market")
+SIDES = ("buy", "sell")
+OPEN_STATUSES = ("pending", "approved")
+TERMINAL_STATUSES = ("rejected", "executed", "expired", "cancelled")
+THRESHOLD_MAX_USD = 1_000_000.0      # above this a cap is treated as invalid
+
+_store_lock = threading.Lock()
+
+
+def _maybe_float(v: object) -> float | None:
+    """Strict numeric read for provider fields: None when the value is not a
+    usable finite number — never a silent 0.0, which would fake a zero fee."""
+    try:
+        f = float(str(v))
+    except (TypeError, ValueError):
+        return None
+    if f != f or f in (float("inf"), float("-inf")):
+        return None
+    return f
+
+
+def _bj_day(ts: float | None = None) -> str:
+    """Beijing calendar date (YYYY-MM-DD) for the daily ledger — the same
+    day boundary the cron scheduler uses, so "today" means the same thing
+    everywhere in the product."""
+    if ts is None:
+        moment = datetime.now(BJT)
+    else:
+        moment = datetime.fromtimestamp(float(ts), BJT)
+    return moment.strftime("%Y-%m-%d")
+
+
+def thresholds(settings: dict | None = None) -> dict:
+    """Auto-approval caps in USD: {"per_tx": float, "daily": float} from
+    settings.web3.auto_usd_per_tx / auto_usd_daily. FAIL-CLOSED: a missing
+    block, a non-numeric value, a boolean, a negative or an out-of-range
+    number all collapse to 0.0 — and 0.0 means nothing auto-approves."""
+    if settings is None:
+        try:
+            settings = json.loads(pp.settings_path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            settings = {}
+    block = settings.get("web3") if isinstance(settings, dict) else None
+    if not isinstance(block, dict):
+        block = {}
+    out: dict = {}
+    for src, key in (("auto_usd_per_tx", "per_tx"),
+                     ("auto_usd_daily", "daily")):
+        val = block.get(src)
+        if isinstance(val, bool) or not isinstance(val, (int, float)) \
+                or not (0.0 <= float(val) <= THRESHOLD_MAX_USD):
+            out[key] = 0.0
+        else:
+            out[key] = float(val)
+    return out
+
+
+def _store_path(state_dir: str | Path | None = None) -> Path:
+    root = Path(state_dir) if state_dir else pp.state_dir()
+    return Path(root) / STORE_NAME
+
+
+def _load_store(path: Path) -> dict:
+    """Plan store reader; a missing or corrupt file reads as an EMPTY store
+    (fail-closed for orders: no plan -> nothing executes, never a crash)."""
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        doc = {}
+    plans = doc.get("plans") if isinstance(doc, dict) else None
+    ledger = doc.get("ledger") if isinstance(doc, dict) else None
+    return {"plans": plans if isinstance(plans, dict) else {},
+            "ledger": ledger if isinstance(ledger, dict) else {}}
+
+
+def _save_store(path: Path, store: dict) -> None:
+    """Atomic write: a reader never observes a half-written plan file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(store, ensure_ascii=True, indent=1,
+                              sort_keys=True), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _spent_today(store: dict) -> float:
+    entry = store["ledger"].get(_bj_day())
+    if not isinstance(entry, dict):
+        return 0.0
+    return _maybe_float(entry.get("spent_usd")) or 0.0
+
+
+def _sweep_expired(store: dict) -> bool:
+    """Lazily expire plans whose TTL elapsed (pending/approved only — an
+    executed plan keeps its history). Returns True when anything changed."""
+    now = time.time()
+    changed = False
+    for plan in store["plans"].values():
+        if not isinstance(plan, dict):
+            continue
+        if plan.get("status") in OPEN_STATUSES:
+            expires = _maybe_float(plan.get("expires_at"))
+            if expires is None or expires <= now:
+                plan["status"] = "expired"
+                plan["reason"] = (f"plan TTL elapsed ({PLAN_TTL_SEC}s); "
+                                  "prepare a new plan")
+                changed = True
+    return changed
+
+
+def _insert_plan(store: dict, plan: dict) -> None:
+    plans = store["plans"]
+    if len(plans) >= PLAN_MAX:
+        terminal = [pid for pid, p in plans.items()
+                    if isinstance(p, dict) and p.get("status") in TERMINAL_STATUSES]
+        if not terminal:
+            raise ExchangeError(
+                f"plan store is full ({PLAN_MAX} live plans); approve, "
+                "execute or reject them before preparing another")
+        terminal.sort(key=lambda pid: _maybe_float(plans[pid].get("created_at")) or 0.0)
+        while len(plans) >= PLAN_MAX and terminal:
+            plans.pop(terminal.pop(0), None)
+    plans[plan["id"]] = plan
+
+
+# ------------------------------------------------------------ order books --
+
+def _levels(raw: object) -> list[tuple[float, float]]:
+    """Book rows -> [(price, size), ...], dropping anything malformed. A
+    corrupt level never becomes a fabricated price: it is skipped."""
+    out: list[tuple[float, float]] = []
+    if isinstance(raw, (list, tuple)):
+        for lvl in raw:
+            if not isinstance(lvl, (list, tuple)) or len(lvl) < 2:
+                continue
+            px, sz = _maybe_float(lvl[0]), _maybe_float(lvl[1])
+            if px is None or sz is None or px <= 0 or sz <= 0:
+                continue
+            out.append((px, sz))
+    return out
+
+
+def _book_okx(sym: str, transport: Transport, timeout: float) -> tuple[list, list]:
+    doc = _okx_public(f"/api/v5/market/books?instId={urllib.parse.quote(sym)}&sz=50",
+                      transport=transport, timeout=timeout)
+    data = doc.get("data") if isinstance(doc, dict) else None
+    if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+        raise ExchangeError(f"okx: no book for {sym}")
+    row = data[0]
+    return _levels(row.get("bids")), _levels(row.get("asks"))
+
+
+def _book_kraken(sym: str, transport: Transport, timeout: float) -> tuple[list, list]:
+    pair = _kraken_pair(sym)
+    doc = _get(f"{_base('kraken')}/0/public/Depth?pair={urllib.parse.quote(pair)}&count=100",
+               transport=transport, timeout=timeout)
+    if isinstance(doc, dict) and doc.get("error"):
+        raise ExchangeError(f"kraken: {_err(doc)}")
+    result = doc.get("result") if isinstance(doc, dict) else None
+    row = next(iter(result.values()), None) if isinstance(result, dict) else None
+    if not isinstance(row, dict):
+        raise ExchangeError(f"kraken: no book for {sym}")
+    return _levels(row.get("bids")), _levels(row.get("asks"))
+
+
+def _book_binance(sym: str, transport: Transport, timeout: float) -> tuple[list, list]:
+    doc = _get(f"{_base('binance')}/api/v3/depth?symbol={urllib.parse.quote(sym)}&limit=100",
+               transport=transport, timeout=timeout)
+    if not isinstance(doc, dict) or doc.get("code") is not None:
+        raise ExchangeError(f"binance: {_err(doc) if doc else 'empty response'}")
+    return _levels(doc.get("bids")), _levels(doc.get("asks"))
+
+
+_BOOK_FN = {"okx": _book_okx, "kraken": _book_kraken,
+            "binance": _book_binance}
+
+
+def _fill_quote(side: str, bids: list, asks: list, qty: float,
+                price: float | None) -> tuple[float, float | None, float, bool]:
+    """Walk one side of the book for `qty` -> (filled, vwap, best, depth_ok).
+    A limit price filters the walk to marketable levels, so a resting limit
+    honestly reports depth_ok=False instead of a fabricated fill."""
+    top = asks if side == "buy" else bids
+    if not top:
+        return 0.0, None, 0.0, False
+    best = (min(px for px, _ in top) if side == "buy"
+            else max(px for px, _ in top))
+    if side == "buy":
+        levels = sorted(asks, key=lambda lv: lv[0])
+        if price is not None:
+            levels = [lv for lv in levels if lv[0] <= price * (1 + 1e-12)]
+    else:
+        levels = sorted(bids, key=lambda lv: -lv[0])
+        if price is not None:
+            levels = [lv for lv in bids if lv[0] >= price * (1 - 1e-12)]
+            levels = sorted(levels, key=lambda lv: -lv[0])
+    filled = 0.0
+    cost = 0.0
+    for px, sz in levels:
+        if filled >= qty - 1e-12:
+            break
+        take = min(sz, qty - filled)
+        if take <= 0:
+            continue
+        filled += take
+        cost += take * px
+    vwap = cost / filled if filled > 0 else None
+    return filled, vwap, best, filled >= qty - 1e-12
+
+
+def _slippage_bps(side: str, vwap: float | None, best: float,
+                  filled: float) -> float | None:
+    """VWAP distance from the top of book in basis points, POSITIVE when the
+    walk is worse for the trader. None when nothing filled."""
+    if vwap is None or filled <= 0 or best <= 0:
+        return None
+    if side == "buy":
+        return (vwap - best) / best * 10000.0
+    return (best - vwap) / best * 10000.0
+
+
+# ---------------------------------------------------------------- fees -----
+# Fees are quoted only from the venue's own signed endpoints, and only when
+# the venue's slots exist. No slot (or a failed quote) = rate None + an honest
+# note: the fee is never guessed and never folded into a threshold it did not
+# contribute to.
+
+def _fee_okx(sym: str, transport: Transport, timeout: float) -> tuple[float | None, str]:
+    missing = missing_slots("okx")
+    if missing:
+        return None, (f"fee unknown (set {' / '.join(missing)} in secrets.env "
+                      "to quote okx fees)")
+    try:
+        doc = _okx_private(
+            f"/api/v5/account/trade-fee?instType=SPOT&instId={urllib.parse.quote(sym)}",
+            transport=transport, timeout=timeout)
+    except ExchangeError as e:
+        return None, f"fee unknown ({e})"
+    data = doc.get("data") if isinstance(doc, dict) else None
+    row = data[0] if isinstance(data, list) and data and isinstance(data[0], dict) else {}
+    for key in ("takerFeeRate", "makerFeeRate"):
+        rate = _maybe_float(row.get(key))
+        if rate is not None and rate >= 0:
+            return rate, f"okx spot {key}={_fmt(rate)} (trade-fee endpoint)"
+    return None, "fee unknown (trade-fee response carried no numeric rate)"
+
+
+def _fee_kraken(sym: str, transport: Transport, timeout: float) -> tuple[float | None, str]:
+    missing = missing_slots("kraken")
+    if missing:
+        return None, (f"fee unknown (set {' / '.join(missing)} in secrets.env "
+                      "to quote kraken fees)")
+    try:
+        doc = _kraken_private("/0/private/TradeVolume", transport=transport,
+                              timeout=timeout)
+    except ExchangeError as e:
+        return None, f"fee unknown ({e})"
+    result = doc.get("result") if isinstance(doc, dict) else None
+    fees = result.get("fees") if isinstance(result, dict) else None
+    if isinstance(fees, dict) and fees:
+        first = next(iter(fees.values()))
+        pct = _maybe_float(first.get("fee")) if isinstance(first, dict) else None
+        if pct is not None and pct >= 0:
+            return pct / 100.0, (f"kraken account fee {_fmt(pct)}% -> "
+                                 f"{pct / 100.0} fraction (TradeVolume)")
+    return None, "fee unknown (TradeVolume returned no fee tier)"
+
+
+def _fee_binance(sym: str, transport: Transport, timeout: float) -> tuple[float | None, str]:
+    missing = missing_slots("binance")
+    if missing:
+        return None, (f"fee unknown (set {' / '.join(missing)} in secrets.env "
+                      "to quote binance fees)")
+    try:
+        doc = _binance_request("/api/v3/account/commission",
+                               {"symbol": sym.upper()}, signed=True,
+                               transport=transport, timeout=timeout)
+    except ExchangeError as e:
+        return None, f"fee unknown ({e})"
+    rate = _maybe_float(doc.get("commission")) if isinstance(doc, dict) else None
+    if rate is None and isinstance(doc, dict):
+        rates = doc.get("commissionRates")
+        if isinstance(rates, dict):
+            rate = _maybe_float(rates.get("taker"))
+    if rate is not None and rate >= 0:
+        return rate, f"binance spot commission={_fmt(rate)} (commission endpoint)"
+    return None, "fee unknown (commission response carried no numeric rate)"
+
+
+_FEE_FN = {"okx": _fee_okx, "kraken": _fee_kraken, "binance": _fee_binance}
+
+
+# ------------------------------------------------------------ order sends ---
+# Each sender takes the STORED plan only — no caller-supplied parameter
+# reaches a venue. A venue rejection is an honest ExchangeError; the plan
+# keeps its status (attempts += 1) so a failed send can be retried or
+# rejected, and it never touches the ledger.
+
+def _place_okx(plan: dict, transport: Transport, timeout: float) -> str:
+    path = "/api/v5/trade/order"
+    body: dict = {"instId": plan["symbol"], "tdMode": "cash",
+                  "side": plan["side"], "ordType": plan["order_type"],
+                  "sz": _fmt(plan.get("qty"))}
+    if plan.get("order_type") == "limit":
+        body["px"] = _fmt(plan.get("price"))
+    doc = _okx_private(path, body=json.dumps(body, separators=(",", ":")),
+                       transport=transport, timeout=timeout)
+    data = doc.get("data") if isinstance(doc, dict) else None
+    if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+        raise ExchangeError("okx: unexpected order response shape")
+    row = data[0]
+    if str(row.get("sCode", "0")) not in ("0", ""):
+        raise ExchangeError(
+            f"okx order rejected: {row.get('sMsg') or 'unknown venue error'}")
+    oid = row.get("ordId")
+    if not oid:
+        raise ExchangeError("okx: order acknowledged without an order id")
+    return str(oid)
+
+
+def _place_kraken(plan: dict, transport: Transport, timeout: float) -> str:
+    path = "/0/private/AddOrder"
+    fields: dict = {"pair": _kraken_pair(str(plan["symbol"])),
+                    "type": plan["side"],
+                    "ordertype": ("limit" if plan.get("order_type") == "limit"
+                                  else "market"),
+                    "volume": _fmt(plan.get("qty"))}
+    if plan.get("order_type") == "limit":
+        fields["price"] = _fmt(plan.get("price"))
+    doc = _kraken_private(path, fields=fields, transport=transport, timeout=timeout)
+    result = doc.get("result") if isinstance(doc, dict) else None
+    txids = result.get("txid") if isinstance(result, dict) else None
+    if not isinstance(txids, list) or not txids:
+        raise ExchangeError("kraken: order acknowledged without a transaction id")
+    return str(txids[0])
+
+
+def _place_binance(plan: dict, transport: Transport, timeout: float) -> str:
+    params: dict = {"symbol": str(plan["symbol"]).upper(),
+                    "side": str(plan["side"]).upper(),
+                    "type": ("LIMIT" if plan.get("order_type") == "limit"
+                             else "MARKET"),
+                    "quantity": _fmt(plan.get("qty"))}
+    if plan.get("order_type") == "limit":
+        params["timeInForce"] = "GTC"
+        params["price"] = _fmt(plan.get("price"))
+    doc = _binance_request("/api/v3/order", params, signed=True, method="POST",
+                           transport=transport, timeout=timeout)
+    oid = doc.get("orderId") if isinstance(doc, dict) else None
+    if oid is None:
+        raise ExchangeError("binance: order acknowledged without an order id")
+    return str(oid)
+
+
+_PLACE_FN = {"okx": _place_okx, "kraken": _place_kraken,
+             "binance": _place_binance}
+
+
+# ------------------------------------------------------- approval verdict ---
+
+def _auto_verdict(order_type: str, notional: float, spent: float,
+                   th: dict) -> tuple[bool, str]:
+    """May this plan approve itself? EVERY condition must hold, in this
+    order, and the message says exactly which one failed."""
+    if order_type == "market":
+        return False, "market orders are never auto-approved (W2 hard rule)"
+    if th["per_tx"] <= 0:
+        return False, "auto approvals disabled (web3.auto_usd_per_tx = 0)"
+    if notional > th["per_tx"]:
+        return False, (f"notional_usd {_fmt(notional)} exceeds the per-transaction "
+                       f"cap {_fmt(th['per_tx'])}")
+    if th["daily"] <= 0:
+        return False, "daily cap disabled (web3.auto_usd_daily = 0)"
+    if spent + notional > th["daily"]:
+        return False, (f"would exceed the daily cap {_fmt(th['daily'])} "
+                       f"(already spent {_fmt(spent)} today)")
+    return True, (f"limit order within caps (notional {_fmt(notional)} <= "
+                  f"per-tx {_fmt(th['per_tx'])}, day "
+                  f"{_fmt(spent + notional)} <= {_fmt(th['daily'])})")
+
+
+# ------------------------------------------------------------ plan state ----
+
+def prepare_order(venue: str, side: str, symbol: str | None, order_type: str,
+                  qty: object, price: object = None, *,
+                  transport: Transport | None = None,
+                  timeout: float = DEFAULT_TIMEOUT,
+                  state_dir: str | Path | None = None) -> str:
+    """W2 DRY RUN. Validates the order, walks the live book for a VWAP and
+    a depth verdict, quotes the fee when the venue is configured, applies the
+    auto-approval thresholds and stores a plan. Nothing is sent to a venue
+    here — sending is ``execute_order``'s job and needs an approved plan."""
+    _check_venue(venue)
+    if venue not in ORDERABLE_VENUES:
+        raise ExchangeError(
+            f"{venue} cannot carry an order (chain venues are public market "
+            f"sources; orderable venues: {'|'.join(ORDERABLE_VENUES)})")
+    side = str(side or "").strip().lower()
+    if side not in SIDES:
+        raise ExchangeError(f"side must be one of {'|'.join(SIDES)}")
+    order_type = str(order_type or "").strip().lower()
+    if order_type not in ORDER_TYPES:
+        raise ExchangeError(f"order_type must be one of {'|'.join(ORDER_TYPES)}")
+    qty_f = _maybe_float(qty)
+    if qty_f is None or qty_f <= 0:
+        raise ExchangeError("qty must be a positive number")
+    if order_type == "limit":
+        price_f = _maybe_float(price)
+        if price_f is None or price_f <= 0:
+            raise ExchangeError("limit orders require a positive price")
+    else:
+        if price not in (None, "", 0, 0.0):
+            raise ExchangeError("market orders take no price")
+        price_f = None
+    sym = _symbol(symbol, venue)
+    missing = missing_slots(venue)
+    if missing:
+        raise ExchangeError(
+            f"{venue} not configured (set {' / '.join(missing)} in secrets.env)")
+    transport = transport or _urllib_transport
+    bids, asks = _BOOK_FN[venue](sym, transport, timeout)
+    if not bids and not asks:
+        raise ExchangeError(f"{venue}: empty book for {sym}")
+    filled, vwap, best, depth_ok = _fill_quote(side, bids, asks, qty_f, price_f)
+    slip = _slippage_bps(side, vwap, best, filled)
+    if order_type == "market":
+        if vwap is None or filled <= 0:
+            raise ExchangeError(
+                f"{venue}: no marketable depth for {sym} at the top of book")
+        notional = vwap * qty_f
+    else:
+        notional = (price_f or 0.0) * qty_f
+    fee_rate, fee_note = _FEE_FN[venue](sym, transport, timeout)
+    fee_usd = fee_rate * notional if fee_rate is not None else None
+    th = thresholds()
+    with _store_lock:
+        path = _store_path(state_dir)
+        store = _load_store(path)
+        _sweep_expired(store)
+        spent = _spent_today(store)
+        auto, verdict = _auto_verdict(order_type, notional, spent, th)
+        plan: dict = {
+            "id": "pl_" + secrets.token_hex(6),
+            "venue": venue, "side": side, "symbol": sym,
+            "order_type": order_type, "qty": qty_f, "price": price_f,
+            "notional_usd": notional,
+            "vwap": vwap, "slippage_bps": slip, "depth_ok": bool(depth_ok),
+            "fee_rate": fee_rate, "fee_usd": fee_usd, "fee_note": fee_note,
+            "status": "approved" if auto else "pending",
+            "approval": "auto-threshold" if auto else "none",
+            "reason": verdict,
+            "created_at": time.time(), "expires_at": time.time() + PLAN_TTL_SEC,
+            "decided_at": time.time() if auto else None,
+            "decided_by": "auto-threshold" if auto else None,
+            "order_id": None, "executed_at": None, "attempts": 0,
+        }
+        _insert_plan(store, plan)
+        _save_store(path, store)
+        spent = _spent_today(store)
+    fee_line = fee_note if fee_usd is None else f"{fee_note} (fee_usd={_fmt(fee_usd)})"
+    lines = [
+        f"plan {plan['id']} created — status={plan['status']} "
+        f"(approval={plan['approval']})",
+        f"venue={venue} side={side} symbol={sym} type={order_type} "
+        f"qty={_fmt(qty_f)}" + (f" price={_fmt(price_f)}" if price_f is not None else ""),
+        f"notional_usd={_fmt(notional)} vwap={_fmt(vwap) if vwap is not None else 'n/a'} "
+        f"slippage_bps={f'{slip:.2f}' if slip is not None else 'n/a'} "
+        f"depth_ok={'true' if depth_ok else 'false'}",
+        f"fee: {fee_line}",
+        f"thresholds: per_tx={_fmt(th['per_tx'])} daily={_fmt(th['daily'])} "
+        f"spent_today_usd={_fmt(spent)}",
+        f"reason: {verdict}",
+    ]
+    if plan["status"] == "approved":
+        lines.append(f"next: run exchange_execute_order with "
+                     f"plan_id={plan['id']} (auto-approved within thresholds)")
+    else:
+        lines.append("next: the OWNER approves or rejects this plan in the "
+                     "console (Exchange view -> pending plan); then run "
+                     f"exchange_execute_order with plan_id={plan['id']}")
+    lines.append(f"plans stay valid for {PLAN_TTL_SEC}s; expiry makes this "
+                 "plan unexecutable — prepare a new one")
+    return "\n".join(lines)
+
+
+def execute_order(plan_id: str, *, transport: Transport | None = None,
+                  timeout: float = DEFAULT_TIMEOUT,
+                  state_dir: str | Path | None = None) -> str:
+    """W2 EXECUTE — accepts a plan id and NOTHING ELSE. Every order
+    parameter comes from the stored plan. Fail-closed chain, in order:
+    plan exists -> not expired -> approved (a pending plan tells you the
+    OWNER must approve it in the console) -> auto approvals re-check the
+    day's ledger -> only then is the order sent, while the store lock is
+    held, so one plan can never be sent twice."""
+    pid = str(plan_id or "").strip()
+    transport = transport or _urllib_transport
+    with _store_lock:
+        path = _store_path(state_dir)
+        store = _load_store(path)
+        plan = store["plans"].get(pid)
+        if not isinstance(plan, dict):
+            raise ExchangeError(
+                f"unknown plan_id {pid!r} (list plans with exchange_plans)")
+        status = plan.get("status")
+        if status in OPEN_STATUSES:
+            expires = _maybe_float(plan.get("expires_at"))
+            if expires is None or expires <= time.time():
+                plan["status"] = "expired"
+                plan["reason"] = (f"plan TTL elapsed ({PLAN_TTL_SEC}s); "
+                                  "prepare a new plan")
+                _save_store(path, store)
+                raise ExchangeError(
+                    f"plan expired (TTL {PLAN_TTL_SEC}s elapsed); prepare a new plan")
+        if status == "pending":
+            raise ExchangeError(
+                "awaiting human approval; the OWNER approves this plan in the "
+                "console (Exchange view -> pending plan -> approve)")
+        if status != "approved":
+            raise ExchangeError(f"plan is {status}; only an approved plan executes")
+        if plan.get("approval") == "auto-threshold":
+            th = thresholds()
+            notional = _maybe_float(plan.get("notional_usd")) or 0.0
+            auto, verdict = _auto_verdict(str(plan.get("order_type")), notional,
+                                          _spent_today(store), th)
+            if not auto:
+                plan["status"] = "pending"
+                plan["approval"] = "none"
+                plan["reason"] = f"auto approval void at execution: {verdict}"
+                _save_store(path, store)
+                raise ExchangeError(
+                    "auto approval no longer valid at execution (caps or day's "
+                    f"ledger moved): {verdict}; the OWNER must approve it now")
+        venue = str(plan.get("venue") or "")
+        sender = _PLACE_FN.get(venue)
+        if sender is None:
+            raise ExchangeError(f"{venue} has no order endpoint wired")
+        try:
+            order_id = sender(plan, transport, timeout)
+        except ExchangeError:
+            plan["attempts"] = int(_maybe_float(plan.get("attempts")) or 0) + 1
+            _save_store(path, store)
+            raise
+        now = time.time()
+        plan["status"] = "executed"
+        plan["order_id"] = str(order_id)
+        plan["executed_at"] = now
+        plan["attempts"] = int(_maybe_float(plan.get("attempts")) or 0) + 1
+        if plan.get("decided_at") is None:
+            plan["decided_at"] = now
+            plan["decided_by"] = plan.get("decided_by") or "auto-threshold"
+        day = _bj_day(now)
+        entry = store["ledger"].get(day)
+        if not isinstance(entry, dict):
+            entry = {"spent_usd": 0.0, "count": 0}
+        spent = (_maybe_float(entry.get("spent_usd")) or 0.0) + notional_of(plan)
+        entry["spent_usd"] = spent
+        entry["count"] = int(_maybe_float(entry.get("count")) or 0) + 1
+        store["ledger"][day] = entry
+        _save_store(path, store)
+    return "\n".join([
+        f"plan {pid} executed — order_id={plan['order_id']} venue={venue}",
+        f"{plan['side']} {plan['order_type']} {plan['symbol']} "
+        f"qty={_fmt(plan.get('qty'))}"
+        + (f" price={_fmt(plan.get('price'))}" if plan.get("price") is not None else ""),
+        f"notional_usd={_fmt(plan.get('notional_usd'))} sent to {venue} "
+        f"(attempts={plan['attempts']})",
+        f"ledger day={day} spent_usd={_fmt(spent)} count={entry['count']} "
+        "— today's remaining auto budget is smaller now",
+    ])
+
+
+def notional_of(plan: dict) -> float:
+    """Plan notional as a number (never a TypeError inside the ledger)."""
+    return _maybe_float(plan.get("notional_usd")) or 0.0
+
+
+def plan_decide(plan_id: str, action: str, *, decided_by: str = "console",
+                state_dir: str | Path | None = None) -> dict:
+    """CONSOLE-ONLY decision (approve | reject | cancel). Callers: the
+    console write gate, which demands the Bearer WEB_TOKEN the model does
+    not have. There is no tool wrapper for this function — the model cannot
+    approve its own plan."""
+    pid = str(plan_id or "").strip()
+    action = str(action or "").strip().lower()
+    if action not in PLAN_ACTIONS:
+        raise ExchangeError(f"action must be one of {'|'.join(PLAN_ACTIONS)}")
+    with _store_lock:
+        path = _store_path(state_dir)
+        store = _load_store(path)
+        plan = store["plans"].get(pid)
+        if not isinstance(plan, dict):
+            raise ExchangeError(f"unknown plan_id {pid!r}")
+        _sweep_expired(store)
+        status = plan.get("status")
+        if status not in OPEN_STATUSES:
+            _save_store(path, store)
+            raise ExchangeError(
+                f"plan is {status}; a {action} decision is no longer possible")
+        if action == "approve" and status != "pending":
+            _save_store(path, store)
+            raise ExchangeError("plan is already approved")
+        actor = str(decided_by or "console")[:64]
+        now = time.time()
+        if action == "approve":
+            plan.update(status="approved", approval="manual", decided_at=now,
+                        decided_by=actor, reason="approved by the owner in the console")
+        elif action == "reject":
+            plan.update(status="rejected", decided_at=now, decided_by=actor,
+                        reason="rejected in the console")
+        else:
+            plan.update(status="cancelled", decided_at=now, decided_by=actor,
+                        reason="cancelled in the console")
+        _save_store(path, store)
+        return dict(plan)
+
+
+def plans_list(*, state_dir: str | Path | None = None) -> list[dict]:
+    """Read-only plan listing, newest first, with TTL expiry applied."""
+    with _store_lock:
+        path = _store_path(state_dir)
+        store = _load_store(path)
+        if _sweep_expired(store):
+            _save_store(path, store)
+        plans = [dict(p) for p in store["plans"].values() if isinstance(p, dict)]
+    plans.sort(key=lambda p: _maybe_float(p.get("created_at")) or 0.0, reverse=True)
+    return plans[:PLAN_MAX]
+
+
+def plan_summary(*, state_dir: str | Path | None = None) -> dict:
+    """Console-facing counts (no credentials, no venue data): how many plans
+    wait for a human, how many are ready to execute, and today's spent USD."""
+    with _store_lock:
+        path = _store_path(state_dir)
+        store = _load_store(path)
+        if _sweep_expired(store):
+            _save_store(path, store)
+        plans = [p for p in store["plans"].values() if isinstance(p, dict)]
+        pending = sum(1 for p in plans if p.get("status") == "pending")
+        approved = sum(1 for p in plans if p.get("status") == "approved")
+        spent = _spent_today(store)
+    return {"pending_plans": pending, "approved_plans": approved,
+            "spent_today_usd": spent, "ledger_day": _bj_day(),
+            "plans_total": len(plans)}

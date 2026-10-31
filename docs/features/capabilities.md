@@ -2,7 +2,9 @@
 
 Status: shipped in car 4a (`web/server.py`), extended in car 4b with the
 `browser` / `terminal` / `local_models` blocks, in car 4c with the
-`media` block and in the W1 Web3 car with the `exchange` block. Companion pages:
+`media` block, in the W1 Web3 car with the `exchange` block and in the W2
+order car with the top-level `web3` block (plus the `exchange` block's real,
+non-read-only surface). Companion pages:
 [openai_api_server.md](openai_api_server.md),
 [browser_automation.md](browser_automation.md),
 [terminal_backends.md](terminal_backends.md),
@@ -44,14 +46,27 @@ Status: shipped in car 4a (`web/server.py`), extended in car 4b with the
     "connectors": {"linear": false, "notion": false}
   },
   "exchange": {
-    "read_only": true,
+    "read_only": false,
+    "orderable": ["okx", "kraken", "binance"],
+    "order_gate": "prepare -> console approval -> execute",
+    "withdrawals": false,
+    "onchain_transfers": false,
     "venues": [{"key": "okx", "label": "OKX", "kind": "cex", "auth": "key",
-                "configured": false, "read_only": true, "symbol": "BTC-USDT",
-                "summary": "Spot REST v5, signed with a Read-only API key",
+                "configured": false, "read_only": false, "orderable": true,
+                "symbol": "BTC-USDT",
+                "summary": "Spot REST v5, signed with a Read-only API key — order placement only via prepare -> console approval -> execute",
                 "reason": "not configured (set OKX_API_KEY / OKX_API_SECRET / OKX_API_PASSPHRASE in secrets.env)"},
-               "… 7 more venue rows (kraken, jupiter, velora, hyperliquid, dydx, gmx, rpc)"],
+               "… 8 more venue rows (kraken, jupiter, velora, hyperliquid, dydx, gmx, rpc, binance)"],
     "tools": ["exchange_markets"],
     "note": "exchange account tools not configured: …"
+  },
+  "web3": {
+    "auto_usd_per_tx": 0.0,
+    "auto_usd_daily": 0.0,
+    "pending_plans": 0,
+    "approved_plans": 0,
+    "spent_today_usd": 0.0,
+    "ledger_day": ""
   }
 }
 ```
@@ -72,7 +87,8 @@ Field sources:
 | `terminal` | `terminal.parse(settings mycore.shell)` | parsed backend **kind** (`local`/`docker`/`ssh`) + `spec_set` bool; the raw spec (user, host, identity path) **never serializes**; invalid line → `backend:null` + `note` — see [terminal_backends.md](terminal_backends.md) |
 | `local_models` | `mycore.localmodels.probe()` | `count` + `detected[]` of `{kind, base_url, model}` — loopback endpoints, `userinfo` stripped before serializing; probe failure → `count:0` + `note` (never fabricated) — see [zero_key_onboarding.md](zero_key_onboarding.md) |
 | `media` | `media_capability(settings)` | four sub-blocks, booleans and engine/model **names** only — see the next section; the serialized block is asserted to contain no URL and no slot value — see [voice_session.md](voice_session.md), [image_generation.md](image_generation.md), [tts_engines.md](tts_engines.md), [connectors.md](connectors.md) |
-| `exchange` | `mycore.exchanges.catalog()` + `build_registry().exchange_note` | the W1 read-only venue block: 8 catalog rows (names, kinds, presence booleans, honest per-venue `reason`), the live `exchange_*` tool names and the registry's honest `note` when account tools are withheld — **booleans, names and sentences only**, never a slot value and never a URL — see [exchanges.md](exchanges.md) |
+| `exchange` | `mycore.exchanges.catalog()` + `build_registry().exchange_note` | the Web3 venue block (W1+W2): **9 catalog rows** (names, kinds, presence booleans, `read_only` iff the row is a chain source, `orderable` iff it is one of the three CEX, honest per-venue `reason`), the block-level order surface (`read_only: false`, `orderable`, `order_gate`, `withdrawals: false`, `onchain_transfers: false`), the live `exchange_*` tool names and the registry's honest `note` when account/order tools are withheld — **booleans, names and sentences only**, never a slot value and never a URL — see [exchanges.md](exchanges.md) |
+| `web3` | `mycore.exchanges.thresholds(settings)` + `plan_summary()` | the W2 order-approval block: the two fail-closed auto-approval caps in USD plus plan counters and the Beijing ledger date — pure numbers and one date string, no credential, no venue data — see [exchanges.md](exchanges.md) §6 |
 
 ## The `media` block (car 4c — four sub-blocks)
 
@@ -109,23 +125,46 @@ block is held to it on its own serialized text (§ *The `media` block*): the
 smoke asserts **no URL and no slot value** there independently of the full-
 catalog assertion.
 
-## The `exchange` block (W1 — read-only Web3 venues)
+## The `exchange` block (W1 + W2 — Web3 venues and the real order surface)
 
 | Field | Shape | Meaning |
 |---|---|---|
-| `read_only` | always `true` | the whole block describes read-only surfaces; W1 ships no order placement (hard code boundary, not a setting) |
-| `venues` | 8 rows `{key, label, kind, auth, configured, read_only, symbol, summary[, reason]}` | one row per catalog venue (OKX, Kraken, Jupiter, Velora, Hyperliquid, dYdX, GMX, public RPC); `configured` is slot **presence** (keyless chain venues are always `true`); `reason` appears only for a key venue without a full slot set and **names the missing slots** (e.g. `not configured (set OKX_API_KEY / OKX_API_SECRET / OKX_API_PASSPHRASE in secrets.env)`) |
-| `tools` | string array | the `exchange_*` names present in the **live** registry — `exchange_markets` always; `exchange_portfolio` / `exchange_orders` only when at least one CEX slot set exists |
-| `note` | string \| null | the registry's honest `exchange_note` when the account tools are withheld (naming exactly which slots are missing), else `null` |
+| `read_only` | always `false` (W2) | the block states the REAL surface: three CEX venues can carry an order — only through `prepare -> console approval -> execute`. W1's `read_only: true` was true then and is deliberately flipped now; claiming read-only over an orderable venue would be a false promise |
+| `orderable` | `["okx", "kraken", "binance"]` | exactly the venues whose rows can carry an order (mirrors `exchanges.ORDERABLE_VENUES`); the six chain sources are never orderable |
+| `order_gate` | `"prepare -> console approval -> execute"` | the one sentence describing HOW an order happens — dry run, then the owner's console decision behind the `WEB_TOKEN` gate, then `execute(plan_id)`; no other path exists |
+| `withdrawals` | always `false` | no withdrawal capability exists in the module — not gated, absent (asserted by the core suite) |
+| `onchain_transfers` | always `false` | same absence for on-chain transfers / tx signing |
+| `venues` | 9 rows `{key, label, kind, auth, configured, read_only, orderable, symbol, summary[, reason]}` | one row per catalog venue (OKX, Kraken, Jupiter, Velora, Hyperliquid, dYdX, GMX, public RPC, Binance); `configured` is slot **presence** (keyless chain venues are always `true`); `read_only` is `true` **iff** the row is a chain source and `orderable` **iff** it is one of the three CEX (they are exact complements); `reason` appears only for a key venue without a full slot set and **names the missing slots** (e.g. `not configured (set OKX_API_KEY / OKX_API_SECRET / OKX_API_PASSPHRASE in secrets.env)`); orderable rows append the gate to `summary` |
+| `tools` | string array | the `exchange_*` names present in the **live** registry — `exchange_markets` always; `exchange_portfolio` / `exchange_orders` / `exchange_prepare_order` / `exchange_execute_order` / `exchange_plans` only when at least one CEX slot set exists |
+| `note` | string \| null | the registry's honest `exchange_note` when the account/order tools are withheld (naming exactly which slots are missing), else `null` |
 
-Fail-soft like every other probe: a broken exchange module degrades to an
-empty `venues`/`tools` plus `note: "exchange probe failed"` and one stderr
-line, never a 500. The smoke asserts the serialized block against every
-`secrets.env` slot value and rejects credential-bearing key names in it.
-The console's public market probe is a **separate** endpoint —
+Fail-soft like every other probe: a broken exchange module degrades to the
+same keys with empty `venues`/`tools` plus `note: "exchange probe failed"`
+and one stderr line, never a 500. The smoke asserts the serialized block
+against every `secrets.env` slot value and rejects credential-bearing key
+names in it. The console's public market probe is a **separate** endpoint —
 `GET /api/exchange/quote` (200 lines / 400 honest error / 429 at 10 requests
 per minute); account reads never surface over HTTP — see
 [exchanges.md](exchanges.md) §5.
+
+## The `web3` block (W2 — order-approval caps and plan counters)
+
+| Field | Type | Meaning |
+|---|---|---|
+| `auto_usd_per_tx` | number (`0..1e6`) | per-transaction auto-approval cap in USD from settings `web3.auto_usd_per_tx`; **fail-closed**: missing block / non-numeric / boolean / out-of-range collapses to `0.0`, and `0` means nothing auto-approves |
+| `auto_usd_daily` | number (`0..1e6`) | daily cap in USD from settings `web3.auto_usd_daily`, same fail-closed parsing; both caps default to `0` — every plan waits for the owner |
+| `pending_plans` | int ≥ 0 | stored plans awaiting a decision (TTL sweep applied before counting) |
+| `approved_plans` | int ≥ 0 | plans ready to execute (owner-approved or auto-approved and still valid) |
+| `spent_today_usd` | number ≥ 0 | today's executed notional from the Beijing-date ledger — manual approvals count too |
+| `ledger_day` | `"YYYY-MM-DD"` or `""` | the ledger's Beijing calendar date (same day boundary as the cron scheduler); empty when there is no ledger entry yet |
+
+Fail-soft like every other probe: an exchange-module failure degrades to
+the **same six keys** with zeroed values plus `note: "web3 probe failed"`
+and one stderr line — never a 500, never a fabricated number. The smoke
+asserts the six keys' types and ranges and re-checks the serialized block
+against every `secrets.env` slot value (numbers and one date only — no
+capability here can leak a credential). See [exchanges.md](exchanges.md)
+§6 for the threshold semantics and the approval flow these numbers feed.
 
 ## Console display status
 
@@ -140,14 +179,22 @@ follow-up that owns `web/static/app.js`.
 ## Testing evidence
 
 `tests/web_console_p3.py`: shape check (the catalog blocks with their inner
-types), the 7-route list, the car-4b block checks (`browser.available` agreed
+types), the channels route list (all 9 routes), the car-4b block checks (`browser.available` agreed
 against the live registered tool list, `terminal` kind-only with the raw spec
 withheld, `local_models.count == len(detected)` with a loopback host per
 entry), the car-4c `media` block check (all four sub-blocks with their inner
-types, `active ∈ {edge, byok}`), the W1 `exchange` block check (8 read-only
-venue rows with `read_only: true` and the `tools` list, serialized block free
-of slot values and credential-bearing key names, plus
-`GET /api/exchange/quote` answering an unknown venue with an honest 400), and
+types, `active ∈ {edge, byok}`), the W1/W2 `exchange` block check (9 venue
+rows with `read_only` iff chain and `orderable` iff one of the three CEX,
+block `read_only: false` + `order_gate` + `withdrawals`/`onchain_transfers`
+`false`, serialized block free of slot values and credential-bearing key
+names, plus
+`GET /api/exchange/quote` answering an unknown venue with an honest 400),
+the W2 `web3` block check (six keys, numeric caps in `0..1e6`, non-negative
+plan counters, `ledger_day` empty-or-`YYYY-MM-DD`, serialized block free of
+credential material), the `GET /api/exchange/plans` plain-read check (list
+shape + no credential material) and the `POST /api/exchange/plans/<id>`
+refusal legs (401 without bearer / 400 bad action / 404 unknown id, token
+never echoed), and
 the zero-credential assertion (response
 text contains no slot value and no secret-like keys) — applied to the
 serialized `media` block on its own as well: no URL, no slot value.
