@@ -78,6 +78,19 @@ Modes:
               and logged as DRYRUN_SEND instead of sendMessage. Use it only
               when consuming pending updates on the second bot is acceptable.
 
+Channel inbound (C car): alongside the Telegram legs, run() evaluates
+_maybe_poll_channels() at most once per CHANNEL_POLL_SEC (30s). Each route
+from channels.load_channels() is polled once; every inbound message passes
+an allowlist gate (web/settings.json channels.<route>.allow — empty or
+absent = deny all, fail-closed, CHANNEL_DENY logged at the deny throttle)
+before it enters the SAME command/pipeline path. The conversation key is
+the string Inbound.key ("route:sender") — sessions live at
+sessions/<key>.jsonl, /reset archives them like any TG session, and the
+reply goes back through the SAME route's send(target, reply). Dry-run
+evaluates and logs channel replies without transmitting them, exactly like
+TG sends; any channel failure costs one CHANNEL_* log line, never a dead
+loop.
+
 Credentials: the poll token comes from MYCORE_TG_TOKEN at call time through
 TgClient.polling_token() (README contract 2 — never logged, never echoed).
 Observation scrubbing: chat replies never carry stack traces, absolute
@@ -98,6 +111,7 @@ import time
 import urllib.parse
 from pathlib import Path
 
+from . import channels as channels_mod
 from . import checkpoint
 from . import cli
 from . import evolution
@@ -134,6 +148,7 @@ MAX_POLL_ERRORS = 20                   # bounded backoff, then give up (tg.py pa
 DEFAULT_POLL_TIMEOUT = 30              # long-poll seconds (0 in --once mode)
 REFLECT_CHECK_SEC = 60.0               # evolution cron evaluation cadence
 TYPING_INTERVAL_SEC = 4.0               # TG typing heartbeat (5s Telegram TTL)
+CHANNEL_POLL_SEC = 30                   # channel inbound leg cadence (seconds)
 
 # Honest one-line replies. The English constants stay importable (tests and
 # tooling compare against them); live replies resolve the SAME keys through
@@ -332,12 +347,15 @@ class ChatService:
                     is constructed and no endpoint is contacted
         repo=       repo root used to read web/settings.json (defaults to
                     mycore.cli.REPO — production and cli agree)
+        channels=   injected route adapters (dict[str, Channel]); when None
+                    the map is built from web/settings.json on each poll
         now/sleep=  clock and sleep for deterministic tests
     """
 
     def __init__(self, state_dir: str | Path, allowlist,
                  *, dry_run: bool = False,
                  transport=None, chat=None, repo: str | Path | None = None,
+                 channels=None,
                  now=lambda: time.time(), sleep=time.sleep,
                  max_poll_errors: int = MAX_POLL_ERRORS) -> None:
         allow = frozenset(allowlist)
@@ -354,6 +372,7 @@ class ChatService:
         self.allowlist = allow
         self.dry_run = dry_run
         self.chat = chat                       # injected model callable or None
+        self.channels = channels               # injected route adapters; None = built from settings
         self.repo = Path(repo) if repo is not None else Path(cli.REPO)
         self._now = now
         self._sleep = sleep
@@ -363,6 +382,7 @@ class ChatService:
         self._deny_stamp: dict[str, float] = {}
         self._reflect_check = 0.0       # last evolution cron evaluation (clock)
         self._cron_check = 0.0          # last scheduler evaluation (clock)
+        self._chan_check = 0.0          # last channel inbound poll (clock)
         self.log = ServiceLog(self.state / LOG_NAME, now=now)
         self.lang = self._load_lang()
         # HARD token gate (tg.py): dedicated MYCORE_TG_TOKEN required here too.
@@ -454,6 +474,7 @@ class ChatService:
                 errors = 0
                 self._maybe_reflect()          # evolution cron leg (no-op when off)
                 self._maybe_fire_cron()        # scheduler leg (no-op with no due jobs)
+                self._maybe_poll_channels()    # channel leg (throttled, fail-soft)
                 if once and not updates:
                     break                          # nothing pending: exit 0
                 for upd in updates:
@@ -518,7 +539,8 @@ class ChatService:
             self._send(cid, reply)
 
     def _send(self, chat_id: int, text: str) -> bool:
-        """The single outbound point (dry-run stops here)."""
+        """The single Telegram outbound point (dry-run stops here; channel
+        replies go through _channel_send with the same dry-run contract)."""
         if self.dry_run:
             preview = _scrub_paths(text)[:120]
             self.log.write("DRYRUN_SEND", f"chat={redact_chat(chat_id)}",
@@ -537,13 +559,19 @@ class ChatService:
             return False
 
     # ---------------------------------------------------------- commands ----
-    def _settings_block(self) -> dict:
+    def _settings_doc(self) -> dict:
+        """The raw web/settings.json document. {} on any read/parse failure
+        (callers fail closed on absence, never crash — same contract the
+        mycore block reader has always had)."""
         try:
             doc = json.loads(
                 (self.repo / "web" / "settings.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}
-        mc = doc.get("mycore") if isinstance(doc, dict) else None
+        return doc if isinstance(doc, dict) else {}
+
+    def _settings_block(self) -> dict:
+        mc = self._settings_doc().get("mycore")
         return mc if isinstance(mc, dict) else {}
 
     def _budget(self) -> int | None:
@@ -568,24 +596,24 @@ class ChatService:
                 return out
         return [cli.resolve_model_config().model]
 
-    def _session_path(self, chat_id: int) -> Path:
+    def _session_path(self, chat_id: int | str) -> Path:
         return self.sessions / f"{chat_id}.jsonl"
 
-    def _override_path(self, chat_id: int) -> Path:
+    def _override_path(self, chat_id: int | str) -> Path:
         return self.sessions / f"{chat_id}{MODEL_EXT}"
 
-    def _read_override(self, chat_id: int) -> str | None:
+    def _read_override(self, chat_id: int | str) -> str | None:
         try:
             val = self._override_path(chat_id).read_text(encoding="utf-8").strip()
         except OSError:
             return None
         return val or None
 
-    def _write_override(self, chat_id: int, model: str) -> None:
+    def _write_override(self, chat_id: int | str, model: str) -> None:
         self.sessions.mkdir(parents=True, exist_ok=True)
         self._override_path(chat_id).write_text(model + "\n", encoding="utf-8")
 
-    def _model_for_chat(self, chat_id: int):
+    def _model_for_chat(self, chat_id: int | str):
         """Effective ModelConfig for this chat: cli resolution + override."""
         cfg = cli.resolve_model_config()
         override = self._read_override(chat_id)
@@ -593,7 +621,7 @@ class ChatService:
             cfg.model = override
         return cfg
 
-    def _archive_session(self, chat_id: int) -> bool:
+    def _archive_session(self, chat_id: int | str) -> bool:
         """Rotate the chat's session file into sessions/archive/ (/reset)."""
         src = self._session_path(chat_id)
         if not src.is_file():
@@ -610,7 +638,7 @@ class ChatService:
         self.log.write("ARCHIVE", f"chat={redact_chat(chat_id)}")
         return True
 
-    def _command(self, chat_id: int, text: str) -> str:
+    def _command(self, chat_id: int | str, text: str) -> str:
         parts = text.split()
         name = parts[0][1:].split("@", 1)[0].lower()   # strip "/" and "@botname"
         arg = " ".join(parts[1:]).strip()
@@ -660,7 +688,7 @@ class ChatService:
             return self._checkpoint_command(chat_id, arg)
         return self._t("cmd.unknown")
 
-    def _lang_command(self, chat_id: int, arg: str) -> str:
+    def _lang_command(self, chat_id: int | str, arg: str) -> str:
         """`/lang` (show) and `/lang <code>` (switch, persisted service-wide).
 
         Only discovered packs are switchable — an unknown code changes
@@ -830,7 +858,7 @@ class ChatService:
         except Exception as e:  # noqa: BLE001 — a reflect failure never kills the loop
             self.log.write("REFLECT_ERR", f"err={type(e).__name__}")
 
-    def _cron_command(self, chat_id: int, arg: str) -> str:
+    def _cron_command(self, chat_id: int | str, arg: str) -> str:
         """`/cron` (list) · `/cron add [kind] <spec> :: <text>` · `/cron del <id>`.
 
         The structured leg of the dual-driven scheduler (the model `cron`
@@ -906,7 +934,7 @@ class ChatService:
             return self._t("cmd.cron.deleted", id=job_id)
         return self._t("cmd.cron.usage")
 
-    def _checkpoint_command(self, chat_id: int, arg: str) -> str:
+    def _checkpoint_command(self, chat_id: int | str, arg: str) -> str:
         """`/checkpoint` (list) · `/checkpoint restore <id>` (rollback) —
         the write safety net (car 1-D2): write_file/edit_file snapshot the
         previous bytes and mycore.checkpoint owns the store. A bare numeric
@@ -954,8 +982,25 @@ class ChatService:
 
     def _cron_deliver(self, job: dict, text: str) -> str:
         """One fired job's output -> origin chat, else MYCORE_WD_CHAT, else
-        log-only. Returns the delivery label for CRON_FIRE (observed fact)."""
+        log-only. Returns the delivery label for CRON_FIRE (observed fact).
+
+        A string origin is a channel endpoint `route:target` (the job was
+        created inside a channel turn): it answers on the same route, and an
+        unknown route or an honest send failure falls back to the existing
+        int-origin > MYCORE_WD_CHAT > log-only chain."""
         origin = job.get("origin")
+        if isinstance(origin, str):
+            route, sep, dest = origin.partition(":")
+            if sep and dest:
+                try:
+                    chan = self._channel_map().get(route)
+                except Exception as e:  # noqa: BLE001 — fallback below, loop lives
+                    self.log.write("CHANNEL_ERR", "phase=cron",
+                                   f"err={type(e).__name__}")
+                    chan = None
+                if chan is not None and \
+                        self._channel_send(chan, route, dest, text):
+                    return f"channel:{route}"
         target = origin if isinstance(origin, int) else self._wd_chat_target()
         if not isinstance(target, int):
             return "none"
@@ -1017,8 +1062,123 @@ class ChatService:
         except Exception as e:  # noqa: BLE001 — a fire failure never kills the loop
             self.log.write("CRON_ERR", f"err={type(e).__name__}")
 
+    # ------------------------------------------------------------ channels --
+    def _channel_map(self) -> dict:
+        """Route adapters for this evaluation: the injected dict (tests) or
+        freshly built from web/settings.json with the SERVICE state root, so
+        cursors, sessions and the log share one directory. Settings values
+        are only read, never logged."""
+        if self.channels is not None:
+            return self.channels
+        cfg = dict(self._settings_doc())
+        cfg["state_dir"] = str(self.state)
+        return channels_mod.load_channels(self.repo, cfg)
+
+    @staticmethod
+    def _channel_allow(route_cfg: object) -> frozenset[str]:
+        """`channels.<route>.allow` -> accepted senders. Fail-closed: a
+        missing block, a non-list, or non-string entries all yield the empty
+        set, which denies every inbound message (same rule as ALLOW_ENV)."""
+        if not isinstance(route_cfg, dict):
+            return frozenset()
+        raw = route_cfg.get("allow")
+        if not isinstance(raw, list):
+            return frozenset()
+        return frozenset(v for v in raw if isinstance(v, str))
+
+    def _channel_send(self, chan, route: str, target: str, text: str) -> bool:
+        """One outbound channel reply — the dry-run contract mirrors _send:
+        evaluated, previewed and logged, never transmitted. Returns True on
+        an accepted delivery (or a dry-run), False on an honest failure."""
+        who = f"route={route} chat={redact_chat(target)}"
+        if self.dry_run:
+            preview = _scrub_paths(text)[:120]
+            self.log.write("DRYRUN_SEND", who, f"chars={len(text)}")
+            print(f"[dry-run] would send {who} chars={len(text)} "
+                  f"preview={preview!r}")
+            return True                       # dry-run counts as delivered
+        try:
+            ok = bool(chan.send(target, text))
+        except Exception as e:  # noqa: BLE001 — adapters promise never to raise
+            self.log.write("CHANNEL_SEND_FAIL", who, f"err={type(e).__name__}")
+            return False
+        if ok:
+            self.log.write("CHANNEL_SEND_OK", who, f"chars={len(text)}")
+        else:
+            self.log.write("CHANNEL_SEND_FAIL", who)
+        return ok
+
+    def _handle_channel_inbound(self, route: str, chan, inbound,
+                                allow: frozenset[str]) -> None:
+        """One inbound message -> allowlist gate -> the SAME command/pipeline
+        path as Telegram -> reply through the SAME route. The conversation
+        key is Inbound.key (str, `route:sender`): session jsonl, /model
+        override and cron origins all live under that string."""
+        sender = str(getattr(inbound, "sender", "") or "")
+        key = str(getattr(inbound, "key", None) or f"{route}:{sender}")
+        if sender not in allow:
+            nowt = self._now()
+            last = self._deny_stamp.get(key)
+            if last is None or nowt - last >= DENY_WARN_THROTTLE:
+                self._deny_stamp[key] = nowt
+                self.log.write("CHANNEL_DENY", f"route={route}",
+                               f"sender={redact_chat(sender)}",
+                               "reason=not-in-allowlist")
+            return                                   # no reply, ever
+        text = str(getattr(inbound, "text", "") or "").strip()
+        if not text:
+            return
+        target = str(getattr(inbound, "target", "") or "")
+        self.log.write("CHANNEL_IN", f"route={route}",
+                       f"sender={redact_chat(sender)}", f"chars={len(text)}")
+        try:
+            if text.startswith("/"):
+                reply = self._command(key, text)
+            else:
+                reply = self._pipeline(key, text)
+        except Exception as e:  # noqa: BLE001 — one bad message, one line
+            self.log.write("CHANNEL_ERR", f"route={route}",
+                           f"chat={redact_chat(key)}", f"err={type(e).__name__}")
+            reply = self._t("err.internal")
+        if reply:
+            self._channel_send(chan, route, target, reply)
+
+    def _maybe_poll_channels(self) -> None:
+        """Channel inbound leg: throttled to CHANNEL_POLL_SEC; poll every
+        route once, gate each message on its allowlist (fail-closed), answer
+        in place. Every failure mode maps to one CHANNEL_* line and a skip —
+        a broken route, a bad settings file or a crashing turn never kills
+        the main loop (the reflect/cron legs' philosophy)."""
+        nowt = self._now()
+        if nowt - self._chan_check < CHANNEL_POLL_SEC:
+            return
+        self._chan_check = nowt
+        try:
+            route_map = self._channel_map()
+            cfg_doc = self._settings_doc().get("channels")
+        except Exception as e:  # noqa: BLE001 — a config error costs one line
+            self.log.write("CHANNEL_ERR", "phase=load", f"err={type(e).__name__}")
+            return
+        block = cfg_doc if isinstance(cfg_doc, dict) else {}
+        for route, chan in route_map.items():
+            try:
+                items = chan.poll()
+            except Exception as e:  # noqa: BLE001 — one bad route, one line
+                self.log.write("CHANNEL_ERR", f"route={route}", "phase=poll",
+                               f"err={type(e).__name__}")
+                continue
+            if not isinstance(items, list):
+                continue
+            allow = self._channel_allow(block.get(route))
+            for inbound in items:
+                try:
+                    self._handle_channel_inbound(route, chan, inbound, allow)
+                except Exception as e:  # noqa: BLE001 — one bad message, one line
+                    self.log.write("CHANNEL_ERR", f"route={route}",
+                                   f"err={type(e).__name__}")
+
     # ------------------------------------------------------------ turn ------
-    def _typing_heartbeat(self, chat_id: int):
+    def _typing_heartbeat(self, chat_id: int | str):
         """Start a best-effort `typing` indicator for one pipeline turn and
         return the stop callable (always `finally`-stopped by _pipeline).
 
@@ -1028,7 +1188,9 @@ class ChatService:
         fires on the daemon thread right away (the model call overlaps it),
         then repeats every TYPING_INTERVAL_SEC until the stop callable runs.
         """
-        if self.dry_run:
+        if self.dry_run or not isinstance(chat_id, int):
+            # Channel turns carry str session keys: typing is a Telegram-only
+            # action (numeric chat id) and never a channel reply path.
             return lambda: None
         stop = threading.Event()
 
@@ -1045,7 +1207,7 @@ class ChatService:
                          daemon=True).start()
         return stop.set
 
-    def _pipeline(self, chat_id: int, text: str) -> str:
+    def _pipeline(self, chat_id: int | str, text: str) -> str:
         """Session load -> body stack -> run_turn -> persisted delta -> reply.
 
         Returns the final reply text (honest short lines on failure); the

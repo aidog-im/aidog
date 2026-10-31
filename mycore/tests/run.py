@@ -3198,6 +3198,666 @@ for line in sys.stdin:
           str(rpc_err))
 
 
+def test_channels() -> None:
+    """Channels framework (C car): 4-route send request shapes, poll cursor
+    increment, configured/status structure, webhook auth helper, zero secret
+    echo — offline fake transport, no network, no real credentials."""
+    import contextlib
+    import io
+    from mycore import channels
+
+    tok_d = "discord-TOK-abc123XYZ"
+    tok_s = "slack-TOK-def456UVW"
+    slot_vals = {
+        "CHANNEL_DISCORD_TOKEN": tok_d,
+        "CHANNEL_SLACK_TOKEN": tok_s,
+        "CHANNEL_SMTP_USER": "smtp-user-1",
+        "CHANNEL_SMTP_PASS": "smtp-pass-SECRET1",
+        "CHANNEL_IMAP_USER": "imap-user-1",
+        "CHANNEL_IMAP_PASS": "imap-pass-SECRET2",
+        "CHANNEL_WEBHOOK_SECRET": "whsec-SECRET3",
+    }
+    saved = {k: os.environ.get(k) for k in list(slot_vals) + ["AIDOG_MC_STATE"]}
+    repo = Path(tempfile.mkdtemp(prefix="channels_repo_"))
+    state = Path(tempfile.mkdtemp(prefix="channels_state_"))
+
+    class FakeTransport:
+        """Records calls (url, payload, headers); replays scripted replies
+        (str = response text, Exception = raised verbatim)."""
+
+        def __init__(self, replies=()):
+            self.calls = []
+            self.replies = list(replies)
+
+        def __call__(self, url, payload, headers, timeout):
+            self.calls.append({"url": url, "payload": payload,
+                               "headers": dict(headers), "timeout": timeout})
+            if not self.replies:
+                raise AssertionError("scripted transport reply missing")
+            item = self.replies.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+    try:
+        for key, val in slot_vals.items():
+            os.environ[key] = val
+        email_cfg = {"enabled": True, "allow": [], "to": "to@example.test",
+                     "from": "bot@example.test", "smtp_host": "smtp.example.test",
+                     "smtp_port": 587, "smtp_ssl": False,
+                     "imap_host": "imap.example.test", "imap_port": 993}
+        settings = {"state_dir": str(state), "channels": {
+            "discord": {"enabled": True, "allow": [], "channel_ids": ["C1"]},
+            "slack": {"enabled": True, "allow": [], "channel_ids": ["C9"]},
+            "email": dict(email_cfg),
+            "webhook": {"enabled": True, "allow": [],
+                        "url": "http://127.0.0.1:9/hook"},
+        }}
+
+        # --- factory + Inbound contract ---------------------------------
+        loaded = channels.load_channels(repo, settings, transport=FakeTransport())
+        check("channels: load_channels returns 4 routes",
+              tuple(loaded) == channels.CHANNELS
+              and all(isinstance(v, channels.Channel) for v in loaded.values()))
+        ib = channels.Inbound(route="discord", sender="u1", target="C1", text="hi")
+        check("channels: Inbound.key is route:sender", ib.key == "discord:u1")
+
+        # --- discord send shape ------------------------------------------
+        tr = FakeTransport([json.dumps({"id": "9"})])
+        d_chan = channels.load_channels(repo, settings, transport=tr)["discord"]
+        ok = d_chan.send("C1", "hello world")
+        call = tr.calls[0]
+        check("channels discord: send url shape",
+              ok is True
+              and call["url"] == "https://discord.com/api/v10/channels/C1/messages")
+        check("channels discord: token in Authorization header only",
+              call["headers"].get("Authorization") == f"Bot {tok_d}"
+              and tok_d not in call["url"]
+              and call["headers"].get("Content-Type") == "application/json")
+        check("channels discord: send body is content json",
+              json.loads(call["payload"]) == {"content": "hello world"})
+        check("channels: repr never contains token", tok_d not in repr(d_chan))
+        tr2 = FakeTransport([json.dumps({"id": "10"})])
+        d_long = channels.load_channels(repo, settings, transport=tr2)["discord"]
+        d_long.send("C1", "x" * 5000)
+        sent = json.loads(tr2.calls[0]["payload"])["content"]
+        check("channels discord: send content capped at 2000",
+              len(sent) <= 2000 and sent.endswith("…[truncated]"), str(len(sent)))
+
+        # --- zero echo on failure paths ----------------------------------
+        tr_bad = FakeTransport([RuntimeError(f"boom at url with {tok_d}")])
+        d_bad = channels.load_channels(repo, settings, transport=tr_bad)["discord"]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            sent_ok = d_bad.send("C1", "x")
+        log = buf.getvalue()
+        check("channels: send failure -> False + honest log, no token",
+              sent_ok is False and "CHANNEL_SEND_FAIL" in log
+              and tok_d not in log, log.strip())
+        tr_bad2 = FakeTransport([RuntimeError(f"boom with {tok_d}")])
+        d_bad2 = channels.load_channels(repo, settings, transport=tr_bad2)["discord"]
+        try:
+            d_bad2._send("C1", "x")
+            check("channels: transport failure sanitized to ChannelError", False)
+        except channels.ChannelError as e:
+            check("channels: transport failure sanitized to ChannelError",
+                  tok_d not in str(e) and tok_d not in repr(e)
+                  and "discord.send" in str(e), str(e))
+        tr_poll_bad = FakeTransport([RuntimeError(f"leak {tok_d}")])
+        d_poll_bad = channels.load_channels(repo, settings,
+                                            transport=tr_poll_bad)["discord"]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            got = d_poll_bad.poll()
+        check("channels: poll failure -> [] + no token in log",
+              got == [] and "CHANNEL_POLL_FAIL" in buf.getvalue()
+              and tok_d not in buf.getvalue())
+
+        # --- configured: missing slot honest reason ----------------------
+        os.environ.pop("CHANNEL_DISCORD_TOKEN", None)
+        ok_c, reason = d_chan.configured()
+        check("channels: configured False names slot, never values",
+              ok_c is False and "missing CHANNEL_DISCORD_TOKEN slot" == reason
+              and tok_d not in reason and tok_s not in reason, reason)
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            sent_ok = d_chan.send("C1", "x")
+        check("channels: unconfigured send -> False, reason logged",
+              sent_ok is False and "CHANNEL_DISCORD_TOKEN" in buf.getvalue()
+              and tok_s not in buf.getvalue())
+        os.environ["CHANNEL_DISCORD_TOKEN"] = tok_d
+
+        # --- disabled route never touches transport ----------------------
+        off = dict(settings)
+        off["channels"] = dict(settings["channels"])
+        off["channels"]["discord"] = {"enabled": False, "allow": [],
+                                       "channel_ids": ["C1"]}
+        tr_off = FakeTransport()
+        d_off = channels.load_channels(repo, off, transport=tr_off)["discord"]
+        with contextlib.redirect_stderr(io.StringIO()):
+            sent_ok = d_off.send("C1", "x")
+        check("channels: disabled route send False, zero transport calls",
+              sent_ok is False and tr_off.calls == [])
+
+        # --- discord poll cursor increment --------------------------------
+        m1 = {"id": "101", "author": {"id": "u1"}, "content": "alpha"}
+        m2 = {"id": "102", "author": {"id": "u2"}, "content": "beta"}
+        m3 = {"id": "103", "author": {"id": "u1"}, "content": "gamma"}
+        tr_p = FakeTransport([json.dumps([m1, m2]), json.dumps([m2, m3])])
+        d_p = channels.load_channels(repo, settings, transport=tr_p)["discord"]
+        first = d_p.poll()
+        check("channels discord: first poll returns batch",
+              [i.text for i in first] == ["alpha", "beta"]
+              and first[0].route == "discord" and first[0].sender == "u1"
+              and first[0].target == "C1")
+        check("channels discord: first poll is GET without after",
+              tr_p.calls[0]["payload"] is None
+              and "after=" not in tr_p.calls[0]["url"])
+        cursor_file = state / "channels" / "discord.cursor"
+        check("channels discord: cursor persisted at <state>/channels/route.cursor",
+              cursor_file.is_file())
+        second = d_p.poll()
+        check("channels discord: second poll uses after cursor",
+              "after=102" in tr_p.calls[1]["url"])
+        check("channels discord: second poll delivers only new message",
+              [i.text for i in second] == ["gamma"], str([i.text for i in second]))
+
+        # --- slack send + poll --------------------------------------------
+        tr_s = FakeTransport([json.dumps({"ok": True})])
+        s_chan = channels.load_channels(repo, settings, transport=tr_s)["slack"]
+        ok = s_chan.send("C9", "hi slack")
+        call = tr_s.calls[0]
+        check("channels slack: send url + Bearer header",
+              ok is True and call["url"] == "https://slack.com/api/chat.postMessage"
+              and call["headers"].get("Authorization") == f"Bearer {tok_s}"
+              and tok_s not in call["url"])
+        check("channels slack: send body channel+text",
+              json.loads(call["payload"]) == {"channel": "C9", "text": "hi slack"})
+        tr_s2 = FakeTransport([json.dumps({"ok": False,
+                                           "error": "channel_not_found"})])
+        s2 = channels.load_channels(repo, settings, transport=tr_s2)["slack"]
+        with contextlib.redirect_stderr(io.StringIO()):
+            ok = s2.send("C9", "x")
+        check("channels slack: api ok:false -> honest False", ok is False)
+        s1a = {"ts": "100.000001", "user": "U1", "text": "one"}
+        s1b = {"ts": "100.000002", "user": "U2", "text": "two"}
+        s1c = {"ts": "100.000003", "user": "U1", "text": "three"}
+        tr_sp = FakeTransport([
+            json.dumps({"ok": True, "messages": [s1b, s1a]}),
+            json.dumps({"ok": True, "messages": [s1c, s1b, s1a]}),
+        ])
+        s_p = channels.load_channels(repo, settings, transport=tr_sp)["slack"]
+        first = s_p.poll()
+        check("channels slack: first poll returns batch sorted by ts",
+              [i.text for i in first] == ["one", "two"]
+              and first[0].key == "slack:U1")
+        check("channels slack: first poll body has no oldest",
+              "oldest" not in json.loads(tr_sp.calls[0]["payload"]))
+        second = s_p.poll()
+        check("channels slack: second poll sends oldest cursor",
+              json.loads(tr_sp.calls[1]["payload"]).get("oldest") == "100.000002")
+        check("channels slack: second poll delivers only new message",
+              [i.text for i in second] == ["three"], str([i.text for i in second]))
+        check("channels slack: cursor persisted",
+              (state / "channels" / "slack.cursor").is_file())
+
+        # --- email send via fake SMTP --------------------------------------
+        smtp_box = []
+
+        class FakeSMTP:
+            def __init__(self, host, port, ssl_on, timeout):
+                self.host, self.port, self.ssl_on = host, port, ssl_on
+                self.started = self.logged = self.quit_called = False
+                self.creds = None
+                self.sent = None
+                smtp_box.append(self)
+
+            def starttls(self):
+                self.started = True
+
+            def login(self, user, password):
+                self.logged = True
+                self.creds = (user, password)
+
+            def sendmail(self, frm, to, data):
+                self.sent = (frm, to, data)
+
+            def quit(self):
+                self.quit_called = True
+
+        class FakeSMTPFail(FakeSMTP):
+            def login(self, user, password):
+                raise RuntimeError(f"login failed for {user}:{password}")
+
+        e_chan = channels.EmailChannel(repo=repo, cfg=settings["channels"]["email"],
+                                       state=state, smtp_factory=FakeSMTP,
+                                       imap_factory=FakeTransport)
+        ok = e_chan.send("to@example.test", "hi there")
+        sess = smtp_box[-1]
+        check("channels email: send connects right host/port with STARTTLS",
+              ok is True and sess.host == "smtp.example.test"
+              and sess.port == 587 and sess.ssl_on is False and sess.started
+              and sess.quit_called)
+        check("channels email: send logs in with slot values (never echoed)",
+              sess.logged and sess.creds == ("smtp-user-1", "smtp-pass-SECRET1"))
+        check("channels email: sendmail envelope + body",
+              sess.sent[0] == "bot@example.test"
+              and sess.sent[1] == ["to@example.test"]
+              and "Subject: AiDog" in sess.sent[2]
+              and "hi there" in sess.sent[2])
+        e_fail = channels.EmailChannel(repo=repo, cfg=settings["channels"]["email"],
+                                       state=state, smtp_factory=FakeSMTPFail,
+                                       imap_factory=FakeTransport)
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            ok = e_fail.send("to@example.test", "x")
+        check("channels email: login failure sanitized, password never echoed",
+              ok is False and "CHANNEL_SEND_FAIL" in buf.getvalue()
+              and "smtp-pass-SECRET1" not in buf.getvalue()
+              and "smtp-user-1" not in buf.getvalue())
+
+        # --- email poll via fake IMAP (UNSEEN + UIDNEXT cursor) ------------
+        imap_box = []
+        mail_raw = {
+            "5": (b"From: Alice <alice@example.test>\r\n"
+                  b"Subject: Hello five\r\n\r\nBody five\r\n"),
+            "6": (b"From: Bob <bob@example.test>\r\n"
+                  b"Subject: Hello six\r\n\r\nBody six\r\n"),
+        }
+
+        class FakeIMAP:
+            def __init__(self, host, port, timeout):
+                self.host, self.port = host, port
+                self.uidnext = 7
+                self.logged = False
+                imap_box.append(self)
+
+            def login(self, user, password):
+                self.logged = True
+                self.creds = (user, password)
+
+            def select(self, box):
+                return "OK", [b"1"]
+
+            def uid(self, cmd, *args):
+                if cmd == "search":
+                    return "OK", [b"5 6"]        # UNSEEN repeats every poll
+                if cmd == "fetch":
+                    raw = mail_raw.get(args[0])
+                    return "OK", [(b"1 (RFC822 {1}", raw), b")"]
+                return "NO", [b""]
+
+            def response(self, name):
+                if name == "UIDNEXT":
+                    return name, [str(self.uidnext).encode()]
+                return None, None
+
+            def logout(self):
+                pass
+
+        e_poll = channels.EmailChannel(repo=repo, cfg=settings["channels"]["email"],
+                                       state=state, smtp_factory=FakeSMTP,
+                                       imap_factory=FakeIMAP)
+        first = e_poll.poll()
+        check("channels email: first poll parses unseen mail",
+              [i.text.splitlines()[0] for i in first] == ["Hello five", "Hello six"]
+              and first[0].sender == "alice@example.test"
+              and first[0].route == "email"
+              and "Body five" in first[0].text)
+        check("channels email: poll logs in with slot values",
+              imap_box[-1].logged
+              and imap_box[-1].creds == ("imap-user-1", "imap-pass-SECRET2"))
+        check("channels email: UIDNEXT cursor persisted",
+              (state / "channels" / "email.cursor").read_text() == "7")
+        second = e_poll.poll()          # same UNSEEN set, cursor=7 -> no repeat
+        check("channels email: second poll delivers nothing (cursor holds)",
+              second == [], str([i.text for i in second]))
+
+        # --- webhook outbound + auth helper ---------------------------------
+        tr_w = FakeTransport([json.dumps({"ok": True})])
+        w_chan = channels.WebhookChannel(repo=repo,
+                                         cfg=settings["channels"]["webhook"],
+                                         state=state, transport=tr_w)
+        ok = w_chan.send("t1", "wh hi")
+        call = tr_w.calls[0]
+        check("channels webhook: send posts json to configured url",
+              ok is True and call["url"] == "http://127.0.0.1:9/hook"
+              and call["headers"].get("Content-Type") == "application/json")
+        check("channels webhook: send body text+route+target",
+              json.loads(call["payload"]) ==
+              {"text": "wh hi", "route": "webhook", "target": "t1"})
+        check("channels webhook: poll is empty by design", w_chan.poll() == [])
+        w_no_url = channels.WebhookChannel(repo=repo,
+                                           cfg={"enabled": True, "url": ""},
+                                           state=state, transport=tr_w)
+        ok_c, reason = w_no_url.configured()
+        check("channels webhook: configured False names missing url key",
+              ok_c is False and reason == "missing channels.webhook.url setting",
+              reason)
+        os.environ.pop("CHANNEL_WEBHOOK_SECRET", None)
+        ok_c, reason = w_chan.configured()
+        check("channels webhook: configured False names secret slot",
+              ok_c is False and reason == "missing CHANNEL_WEBHOOK_SECRET slot"
+              and "SECRET3" not in reason, reason)
+        os.environ["CHANNEL_WEBHOOK_SECRET"] = slot_vals["CHANNEL_WEBHOOK_SECRET"]
+        sec = slot_vals["CHANNEL_WEBHOOK_SECRET"]
+        check("channels webhook: bearer auth accepts correct secret",
+              channels.check_webhook_auth(f"Bearer {sec}", sec) is True
+              and channels.check_webhook_auth(f"bearer {sec}", sec) is True)
+        check("channels webhook: bearer auth rejects wrong/missing/empty",
+              channels.check_webhook_auth("Bearer nope", sec) is False
+              and channels.check_webhook_auth(None, sec) is False
+              and channels.check_webhook_auth("Basic x", sec) is False
+              and channels.check_webhook_auth(f"Bearer {sec}", "") is False)
+
+        # --- status() structure ---------------------------------------------
+        st = channels.status(settings, repo)
+        check("channels status: 4 rows with exact keys",
+              len(st) == 4 and [r["name"] for r in st] == list(channels.CHANNELS)
+              and all(set(r) == {"name", "enabled", "configured", "note",
+                                 "inbound"} for r in st))
+        by_name = {r["name"]: r for r in st}
+        check("channels status: ready routes configured with empty note",
+              by_name["discord"]["configured"] is True
+              and by_name["discord"]["note"] == ""
+              and by_name["discord"]["enabled"] is True
+              and by_name["discord"]["inbound"] is True)
+        check("channels status: zero secret echo in full dump",
+              all(v not in json.dumps(st) for v in slot_vals.values()))
+        off2 = dict(settings)
+        off2["channels"] = dict(settings["channels"])
+        off2["channels"]["slack"] = {"enabled": False, "allow": [],
+                                      "channel_ids": ["C9"]}
+        st2 = channels.status(off2, repo)
+        check("channels status: disabled route note says disabled",
+              {r["name"]: r for r in st2}["slack"]["note"] == "disabled")
+        os.environ.pop("CHANNEL_SLACK_TOKEN", None)
+        st3 = channels.status(settings, repo)
+        note = {r["name"]: r for r in st3}["slack"]["note"]
+        check("channels status: enabled-unconfigured note names slot only",
+              "missing CHANNEL_SLACK_TOKEN slot" == note
+              and tok_s not in json.dumps(st3), note)
+        os.environ["CHANNEL_SLACK_TOKEN"] = tok_s
+        st4 = channels.status({}, repo)
+        check("channels status: empty settings tolerated",
+              len(st4) == 4 and all(r["note"] == "disabled" for r in st4))
+
+        # --- state root precedence ------------------------------------------
+        check("channels: state_root honors settings state_dir",
+              channels.state_root(repo, {"state_dir": str(state)}) == state)
+        os.environ["AIDOG_MC_STATE"] = str(state)
+        check("channels: state_root falls back to env then repo default",
+              channels.state_root(repo, {}) == state)
+        os.environ.pop("AIDOG_MC_STATE", None)
+        check("channels: state_root default is repo/data/mycore_service",
+              channels.state_root(repo, {}) == repo / "data" / "mycore_service")
+    finally:
+        for key, val in saved.items():
+            if val is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = val
+        shutil.rmtree(repo, True)
+        shutil.rmtree(state, True)
+
+
+def test_channels_service() -> None:
+    """C car service leg: channel poll -> allowlist fail-closed -> the same
+    command/pipeline path -> same-route reply; str session keys (jsonl +
+    /reset archive); cron str origin delivery; dry-run and loop survival —
+    offline injected route adapters, zero network, zero credentials."""
+    import contextlib
+    import io
+    import os
+    from mycore import channels as ch
+    from mycore import scheduler as sch
+    from mycore.service import CHANNEL_POLL_SEC, ChatService
+    from mycore.session import Session
+    from mycore.tg import POLL_BOT_ENV
+
+    saved = {k: os.environ.get(k) for k in (POLL_BOT_ENV, "MYCORE_WD_CHAT")}
+    os.environ[POLL_BOT_ENV] = "second-bot-TEST-token"
+    os.environ.pop("MYCORE_WD_CHAT", None)
+
+    class FakeChannel:
+        """Scripted route adapter: queued inbound batch, recorded sends."""
+
+        def __init__(self, name="discord", inbound=None,
+                     fail_poll=False, send_ok=True):
+            self.name = name
+            self.queue = list(inbound or [])
+            self.fail_poll = fail_poll
+            self.send_ok = send_ok
+            self.sent = []                 # [(target, text)] in call order
+            self.polls = 0
+
+        def poll(self):
+            self.polls += 1
+            if self.fail_poll:
+                raise RuntimeError("poll exploded (test)")
+            out, self.queue = self.queue, []
+            return out
+
+        def send(self, target, text):
+            self.sent.append((target, text))
+            return self.send_ok
+
+    def ib(sender, text, route="discord", target="C1"):
+        return ch.Inbound(route=route, sender=sender, target=target, text=text)
+
+    ok_chat = lambda messages=None, tools=None, **kw: fake_response(text="pong")  # noqa: E731
+
+    try:
+        clock = [1000.0]
+        nowf = lambda: clock[0]  # noqa: E731
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            repo = tdp / "cfg"
+            (repo / "web").mkdir(parents=True)
+            me = "user1234567890"
+
+            def write_settings(allow):
+                (repo / "web" / "settings.json").write_text(json.dumps(
+                    {"channels": {"discord": {"enabled": True,
+                                              "allow": list(allow),
+                                              "channel_ids": ["C1"]}}}),
+                    encoding="utf-8")
+
+            # --- allowed inbound -> pipeline reply on the same route -------
+            write_settings([me])
+            chan = FakeChannel(inbound=[ib(me, "hello there")])
+            tg1 = FakeTgTransport()
+            svc = ChatService(tdp / "st1", frozenset({111}), transport=tg1,
+                              chat=ok_chat, repo=repo, now=nowf,
+                              channels={"discord": chan})
+            svc._maybe_poll_channels()
+            check("channels svc: allowed inbound answered on the same route",
+                  chan.sent == [("C1", "pong")], str(chan.sent))
+            check("channels svc: channel reply never touches the TG transport",
+                  tg1.sends == [], str(tg1.sends))
+            sess = svc.sessions / f"discord:{me}.jsonl"
+            check("channels svc: str session key persisted to its own jsonl",
+                  sess.is_file()
+                  and [m["role"] for m in Session(sess).load()]
+                  == ["user", "assistant"])
+            log1 = svc.log.read_text()
+            check("channels svc: log redacts the sender to its last 4",
+                  f"chat=id:{me[-4:]}" in log1 and me not in log1,
+                  log1[-300:])
+
+            # --- throttle: one poll per CHANNEL_POLL_SEC --------------------
+            chan.queue = [ib(me, "again")]
+            svc._maybe_poll_channels()                # inside the window
+            check("channels svc: poll leg throttled to CHANNEL_POLL_SEC",
+                  chan.polls == 1 and chan.queue, f"polls={chan.polls}")
+            clock[0] += CHANNEL_POLL_SEC + 1
+            svc._maybe_poll_channels()
+            check("channels svc: poll leg runs again after the window",
+                  chan.polls == 2 and len(chan.sent) == 2, str(chan.sent))
+
+            # --- allow empty -> fail-closed deny, throttled, no reply -------
+            write_settings([])
+            intruder = "intruder9999"
+            sends_before = list(chan.sent)
+            chan.queue = [ib(intruder, "sneak in")]
+            clock[0] += CHANNEL_POLL_SEC + 1
+            svc._maybe_poll_channels()
+            deny_log = svc.log.read_text()
+            check("channels svc: empty allowlist denies every message",
+                  chan.sent == sends_before, str(chan.sent))
+            check("channels svc: deny logged throttled, sender last4 only",
+                  deny_log.count("CHANNEL_DENY") == 1
+                  and f"sender=id:{intruder[-4:]}" in deny_log
+                  and intruder not in deny_log, deny_log[-300:])
+            chan.queue = [ib(intruder, "sneak again")]
+            clock[0] += CHANNEL_POLL_SEC + 1
+            svc._maybe_poll_channels()                # still inside 60s window
+            check("channels svc: deny WARN throttled like the TG leg",
+                  svc.log.read_text().count("CHANNEL_DENY") == 1)
+            chan.queue = [ib(intruder, "sneak once more")]
+            clock[0] += 120
+            svc._maybe_poll_channels()
+            check("channels svc: deny WARN reappears after the window",
+                  svc.log.read_text().count("CHANNEL_DENY") == 2)
+
+            # --- '/' commands run the same path, reply on the route ---------
+            write_settings([me])
+            chan3 = FakeChannel(inbound=[ib(me, "first words"),
+                                         ib(me, "/help"),
+                                         ib(me, "/reset")])
+            svc3 = ChatService(tdp / "st3", frozenset({111}),
+                               transport=FakeTgTransport(), chat=ok_chat,
+                               repo=repo, now=nowf,
+                               channels={"discord": chan3})
+            svc3._maybe_poll_channels()
+            check("channels svc: '/' inbound runs the command path",
+                  len(chan3.sent) == 3 and chan3.sent[1][0] == "C1"
+                  and "Commands:" in chan3.sent[1][1],
+                  str([t[:20] for _, t in chan3.sent]))
+            check("channels svc: /reset archives the str-key session",
+                  not (svc3.sessions / f"discord:{me}.jsonl").exists()
+                  and len(list((svc3.sessions / "archive")
+                               .glob(f"discord:{me}.*.jsonl"))) == 1
+                  and "archived" in chan3.sent[2][1], str(chan3.sent[2]))
+
+            # --- cron: str origin delivers on its channel ------------------
+            chan4 = FakeChannel()
+            svc4 = ChatService(tdp / "st4", frozenset({111}),
+                               transport=FakeTgTransport(), chat=ok_chat,
+                               repo=repo, now=nowf,
+                               channels={"discord": chan4})
+            reg4 = svc4.state / sch.STATE_FILE_NAME
+            out = svc4._command(f"discord:{me}",
+                                "/cron add every 1m :: from channel")
+            jobs4 = sch.load_jobs(reg4)
+            check("channels svc: /cron in a channel turn keeps str origin",
+                  out.startswith("cron ") and len(jobs4) == 1
+                  and jobs4[0]["origin"] == f"discord:{me}", str(out))
+            sch.save_jobs(reg4, [])
+            jl = sch.load_jobs(reg4)
+            sch.create_job(jl, "every 1m", "channel cron",
+                           origin="discord:C9", now=clock[0] - 120)
+            sch.save_jobs(reg4, jl)
+            svc4._cron_check = 0.0
+            svc4._maybe_fire_cron()
+            check("channels svc: cron str origin delivers on the channel",
+                  chan4.sent == [("C9", "channel cron")], str(chan4.sent))
+            check("channels svc: cron delivery label names the route",
+                  "delivered=channel:discord" in svc4.log.read_text())
+
+            # send failure -> honest fallback down the none/wd chain
+            clock[0] += 70
+            sch.save_jobs(reg4, [])
+            jl = sch.load_jobs(reg4)
+            sch.create_job(jl, "every 1m", "failing send",
+                           origin="discord:C9", now=clock[0] - 120)
+            sch.save_jobs(reg4, jl)
+            chan4.send_ok = False
+            svc4._cron_check = 0.0
+            svc4._maybe_fire_cron()
+            check("channels svc: failed channel send falls back to log-only",
+                  "delivered=none" in svc4.log.read_text()
+                  and "CHANNEL_SEND_FAIL" in svc4.log.read_text(),
+                  svc4.log.read_text()[-300:])
+            chan4.send_ok = True
+
+            # unknown route -> same honest fallback, no crash
+            clock[0] += 70
+            sch.save_jobs(reg4, [])
+            jl = sch.load_jobs(reg4)
+            sch.create_job(jl, "every 1m", "lost route",
+                           origin="carrier:C9", now=clock[0] - 120)
+            sch.save_jobs(reg4, jl)
+            svc4._cron_check = 0.0
+            svc4._maybe_fire_cron()
+            check("channels svc: unknown cron route -> log-only, no crash",
+                  "delivered=none" in svc4.log.read_text())
+
+            # --- a crashing route never kills the loop ---------------------
+            bad = FakeChannel(name="slack", fail_poll=True)
+            good = FakeChannel(inbound=[ib(me, "still alive")])
+            fake6 = FakeTgTransport([])
+            svc6 = ChatService(tdp / "st6", frozenset({111}), transport=fake6,
+                               chat=ok_chat, repo=repo, now=nowf,
+                               channels={"slack": bad, "discord": good})
+            n6 = svc6.run(once=True)
+            check("channels svc: --once runs the channel poll leg",
+                  n6 == 0 and good.sent == [("C1", "pong")],
+                  f"n={n6} sent={good.sent}")
+            check("channels svc: poll exception logged, loop survives",
+                  "CHANNEL_ERR" in svc6.log.read_text()
+                  and "route=slack" in svc6.log.read_text(),
+                  svc6.log.read_text()[-300:])
+            check("channels svc: one bad route does not stop the others",
+                  bad.polls == 1 and good.polls == 1)
+
+            # --- dry-run evaluates but never transmits ---------------------
+            chan7 = FakeChannel(inbound=[ib(me, "dry channel turn")])
+            svc7 = ChatService(tdp / "st7", frozenset({111}),
+                               transport=FakeTgTransport(), chat=ok_chat,
+                               repo=repo, now=nowf, dry_run=True,
+                               channels={"discord": chan7})
+            out_buf = io.StringIO()
+            with contextlib.redirect_stdout(out_buf):
+                svc7._maybe_poll_channels()
+            check("channels svc: dry-run never transmits a channel reply",
+                  chan7.sent == [], str(chan7.sent))
+            check("channels svc: dry-run previews the channel reply",
+                  "DRYRUN_SEND" in svc7.log.read_text()
+                  and "[dry-run] would send" in out_buf.getvalue()
+                  and "route=discord" in out_buf.getvalue(),
+                  out_buf.getvalue()[:120])
+            check("channels svc: dry-run still ran the turn (session kept)",
+                  (svc7.sessions / f"discord:{me}.jsonl").is_file())
+
+            # --- scheduler origin: int | str | None ------------------------
+            sch.set_origin("discord:C9")
+            str_job = sch.create_job([], "daily 09:00", "x",
+                                     origin=sch.get_origin(), now=clock[0])
+            check("cron: str origin accepted and kept by create_job",
+                  str_job["origin"] == "discord:C9"
+                  and sch.get_origin() == "discord:C9")
+            sch.clear_origin()
+            check("cron: origin context cleared after the turn",
+                  sch.get_origin() is None)
+            check("cron: int origin unchanged, garbage origin dropped",
+                  sch.create_job([], "daily 09:00", "x", origin=42,
+                                 now=clock[0])["origin"] == 42
+                  and sch.create_job([], "daily 09:00", "x", origin=1.5,
+                                     now=clock[0])["origin"] is None)
+            roundtrip = tdp / "cron_roundtrip.json"
+            sch.save_jobs(roundtrip, [str_job])
+            check("cron: str origin survives the registry round-trip",
+                  sch.load_jobs(roundtrip)[0]["origin"] == "discord:C9")
+    finally:
+        sch.clear_origin()
+        for key, val in saved.items():
+            if val is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = val
+
+
 def main() -> int:
     test_model()
     test_registry_and_tools()
@@ -3223,6 +3883,8 @@ def main() -> int:
     test_subagent()
     test_execute_code()
     test_mcp()
+    test_channels()
+    test_channels_service()
     print(f"\n{len(PASS)} pass · {len(FAIL)} fail")
     if FAIL:
         print("failed: " + ", ".join(FAIL))

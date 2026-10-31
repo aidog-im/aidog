@@ -45,7 +45,10 @@ Execution order in the due leg: persist the mark FIRST, then execute —
 a crash mid-fire can lose one delivery but never duplicates it.
 
 Delivery (why the notebook says "MYCORE_WD_CHAT unset -> log, no error"):
-    job.origin (the chat that created it, when known) -> _send
+    job.origin as int (the chat that created it)   -> _send
+    job.origin as str "route:target" (a channel   -> same-route channel send
+      turn endpoint; an unknown route or a failed
+      send falls back down this list)
     else env MYCORE_WD_CHAT (int)                    -> _send
     else                                             -> log only
 State: <state>/cron_jobs.json — env AIDOG_MC_STATE when set, else
@@ -337,11 +340,14 @@ def new_id(jobs: list[dict]) -> str:
 
 def create_job(jobs: list[dict], spec: str, text: str, *,
                kind: str = "message", source: str = "command",
-               origin: int | None = None, now: float | None = None) -> dict:
+               origin: int | str | None = None,
+               now: float | None = None) -> dict:
     """Validate + append one job (mutates `jobs`, returns it).
 
     Refuses (SpecError): bad spec, once in the past, empty/oversized text,
-    unknown kind, or a full table. The new job's `id` is assigned here."""
+    unknown kind, or a full table. The new job's `id` is assigned here.
+    `origin` is an int chat id or a str channel endpoint "route:target"
+    (anything else becomes None — JSON serialization keeps both)."""
     fields = parse_spec(spec)
     if kind not in KINDS:
         raise SpecError(f"unknown kind {kind!r} — message | prompt")
@@ -360,7 +366,7 @@ def create_job(jobs: list[dict], spec: str, text: str, *,
         if at <= now:
             raise SpecError("once time has already passed")
     job = {"id": new_id(jobs), **fields, "text": body, "kind": kind,
-           "origin": origin if isinstance(origin, int) else None,
+           "origin": origin if isinstance(origin, (int, str)) else None,
            "source": source if source in SOURCES else "command",
            "created_at": now, "last_fired": None, "done": False}
     jobs.append(job)
@@ -382,12 +388,14 @@ def due_jobs(jobs: list[dict], now: float) -> list[dict]:
 
 
 # ---------------------------------------------------------- origin context --
-_ORIGIN: dict[str, int | None] = {}
+_ORIGIN: dict[str, int | str | None] = {}
 
 
-def set_origin(chat_id: int | None) -> None:
-    """Remember which chat this turn belongs to (single-threaded poll loop;
-    the web console leaves it unset -> jobs get origin=None)."""
+def set_origin(chat_id: int | str | None) -> None:
+    """Remember which conversation this turn belongs to (single-threaded
+    poll loop; the web console leaves it unset -> jobs get origin=None).
+    Values: an int Telegram chat id, or a str channel endpoint
+    "route:target" — a job created in a channel turn answers on it."""
     _ORIGIN["chat"] = chat_id
 
 
@@ -395,9 +403,9 @@ def clear_origin() -> None:
     _ORIGIN.pop("chat", None)
 
 
-def get_origin() -> int | None:
+def get_origin() -> int | str | None:
     value = _ORIGIN.get("chat")
-    return value if isinstance(value, int) else None
+    return value if isinstance(value, (int, str)) else None
 
 
 # ------------------------------------------------------------------ CLI -----

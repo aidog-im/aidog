@@ -431,6 +431,85 @@ def main() -> int:
         check("response never echoes token",
               token not in json.dumps(body if isinstance(body, dict) else {}))
 
+    # --- channels (car C): status endpoint, settings partition, webhook gate. --
+    # The settings document is snapshotted as raw text and restored after the
+    # channels writes, so this smoke never leaves personal config behind.
+    settings_path = SECRETS.parent / "web" / "settings.json"
+    try:
+        settings_backup = settings_path.read_text(encoding="utf-8")
+    except OSError:
+        settings_backup = None
+
+    s, ch = get("/api/channels")
+    rows = ch.get("channels") if isinstance(ch, dict) else None
+    check("GET /api/channels 200 + channels list",
+          s == 200 and isinstance(rows, list), f"got {s} {str(ch)[:140]}")
+    rows = rows if isinstance(rows, list) else []
+    if rows:
+        check("GET /api/channels element fields",
+              all(isinstance(r, dict)
+                  and {"name", "enabled", "configured"} <= set(r)
+                  for r in rows), str(rows)[:200])
+    else:
+        # empty list is only legal when honestly explained by a note
+        check("GET /api/channels empty list carries a note",
+              isinstance(ch, dict) and isinstance(ch.get("note"), str)
+              and bool(ch.get("note")), f"got {ch}")
+
+    if token:
+        s, body = post("/api/settings",
+                       {"channels": {"discord": {"enabled": False,
+                                                 "allow": ["u-1"],
+                                                 "channel_ids": ["c-1"]}}},
+                       token)
+        dsc = (body.get("settings", {}).get("channels", {}).get("discord", {})
+               if isinstance(body, dict) else {})
+        check("POST settings channels legal merge -> 200",
+              s == 200 and isinstance(body, dict) and body.get("ok") is True
+              and dsc.get("allow") == ["u-1"]
+              and dsc.get("channel_ids") == ["c-1"],
+              f"got {s} {str(body)[:160]}")
+        s, body = post("/api/settings",
+                       {"channels": {"webhook": {"enabled": "yes"}}}, token)
+        check("POST settings channels bad type -> 400", s == 400,
+              f"got {s} {str(body)[:160]}")
+        s, body = post("/api/settings", {"channels": {"nope": {}}}, token)
+        check("POST settings channels unknown key -> 400", s == 400,
+              f"got {s} {str(body)[:160]}")
+        s, body = post("/api/settings",
+                       {"channels": {"email": {"smtp_port": 0}}}, token)
+        check("POST settings channels bad port -> 400", s == 400,
+              f"got {s} {str(body)[:160]}")
+
+    # --- webhook inbound gate: the test never configures a real secret.
+    # Missing slot = honest 503 naming the slot; a present slot must refuse
+    # a wrong/absent bearer with 401 and leak nothing either way. ---
+    wh_m = re.search(r"(?m)^CHANNEL_WEBHOOK_SECRET=(\S+)$",
+                     SECRETS.read_text()) if SECRETS.exists() else None
+    wh_val = wh_m.group(1) if wh_m else None
+    s, body = post("/api/channels/webhook", {"text": "ping"}, None)
+    s2, body2 = post("/api/channels/webhook", {"text": "ping"}, "wrong-bearer")
+    if wh_val is None:
+        check("POST /api/channels/webhook no secret slot -> 503",
+              s == 503 and s2 == 503
+              and "CHANNEL_WEBHOOK_SECRET" in str(body),
+              f"got {s}/{s2} {body}")
+    else:
+        check("POST /api/channels/webhook wrong bearer -> 401",
+              s == 401 and s2 == 401, f"got {s}/{s2}")
+    blob = json.dumps([b for b in (body, body2) if isinstance(b, dict)])
+    check("POST /api/channels/webhook never echoes the secret",
+          wh_val is None or wh_val not in blob)
+
+    if settings_backup is not None:
+        try:
+            settings_path.write_text(settings_backup, encoding="utf-8")
+            check("settings.json restored after channels writes",
+                  settings_path.read_text(encoding="utf-8") == settings_backup)
+        except OSError as e:  # noqa: BLE001
+            check("settings.json restored after channels writes", False,
+                  type(e).__name__)
+
     print(f"\n{len(PASS)} pass · {len(FAIL)} fail")
     if FAIL:
         print("failed: " + ", ".join(FAIL))

@@ -27,6 +27,12 @@ Routes:
   POST /api/chat                -> Bearer; {text} streams an agent turn as SSE
                                    (meta/delta/tool/done/error); {action:"clear"}
                                    archives the console session
+  GET  /api/channels            -> channel adapter status (list of {name,
+                                   enabled, configured, ...}; empty list +
+                                   "note" when the channel module is absent)
+  POST /api/channels/webhook    -> Bearer CHANNEL_WEBHOOK_SECRET; {text,
+                                   sender?} -> one in-process turn ->
+                                   {ok, reply} (no SSE, own session)
   GET  /api/chat/history        -> current console session (read, loopback)
   GET  /api/voice               -> voice engine capability (edge-tts presence)
   POST /api/say                 -> synthesize speech -> audio/mpeg (cached,
@@ -155,10 +161,20 @@ DEFAULT_SETTINGS: dict = {
     "usage": {"metrics_url": "http://127.0.0.1:3456/metrics",
               "pricing_config": "",
               "log_dir": ""},
+    # Inbound/outbound channel adapters (car C): non-secret config only —
+    # credentials live in secrets.env slots (CHANNEL_*), never here.
+    "channels": {
+        "discord": {"enabled": False, "allow": [], "channel_ids": []},
+        "slack": {"enabled": False, "allow": [], "channel_ids": []},
+        "email": {"enabled": False, "allow": [], "to": "", "from": "",
+                  "smtp_host": "", "smtp_port": 587, "smtp_ssl": False,
+                  "imap_host": "", "imap_port": 993},
+        "webhook": {"enabled": False, "url": ""},
+    },
 }
 ALLOWED_TOP = ("language", "refresh_sec", "sound", "voice_volume",
                "alert_preview", "currency", "fx_rate", "mycore", "usage",
-               "evolution")
+               "evolution", "channels")
 USAGE_KEYS = ("metrics_url", "pricing_config", "log_dir")
 MYCORE_KEYS = ("base_url", "model", "context_dirs", "upstreams", "mcp")
 MYCORE_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$")
@@ -168,6 +184,16 @@ LANGS = tuple(i18n.languages()) or ("en", "zh")
 ALERT_PREVIEWS = ("off", "warn", "urgent")
 CURRENCY_SYM = {"USD": "$", "CNY": "¥", "EUR": "€", "GBP": "£", "JPY": "¥"}
 CURRENCIES = tuple(CURRENCY_SYM)
+# Channel adapter config partition (car C): per-channel allow-lists and the
+# field schema validated by validate_settings_patch (all-or-nothing).
+CHANNEL_KEYS = ("discord", "slack", "email", "webhook")
+_CHANNEL_SCHEMA = {
+    "discord": ("enabled", "allow", "channel_ids"),
+    "slack": ("enabled", "allow", "channel_ids"),
+    "email": ("enabled", "allow", "to", "from", "smtp_host", "smtp_port",
+              "smtp_ssl", "imap_host", "imap_port"),
+    "webhook": ("enabled", "url"),
+}
 
 # ---------------------------------------------------------------- helpers ----
 
@@ -593,6 +619,69 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                 clean_usage[key] = val
             if clean_usage:
                 clean["usage"] = clean_usage
+    if "channels" in patch:
+        chans = patch["channels"]
+        if not isinstance(chans, dict):
+            errors.append("channels must be an object")
+        else:
+            clean_ch: dict = {}
+            for name in chans:
+                if name not in CHANNEL_KEYS:
+                    errors.append(f"unknown channels key: {name}")
+                    continue
+                sub = chans[name]
+                if not isinstance(sub, dict):
+                    errors.append(f"channels.{name} must be an object")
+                    continue
+                clean_sub: dict = {}
+                for key in sub:
+                    if key not in _CHANNEL_SCHEMA[name]:
+                        errors.append(f"unknown channels.{name} key: {key}")
+                        continue
+                    val = sub[key]
+                    if key in ("enabled", "smtp_ssl"):
+                        if not isinstance(val, bool):
+                            errors.append(f"channels.{name}.{key} must be a boolean")
+                            continue
+                        clean_sub[key] = val
+                    elif key in ("allow", "channel_ids"):
+                        # sender/channel allow-lists: fail-closed when empty;
+                        # entries are single-line id strings, never secrets.
+                        if not isinstance(val, list):
+                            errors.append(f"channels.{name}.{key} must be a list of strings")
+                            continue
+                        if len(val) > 256:
+                            errors.append(f"channels.{name}.{key} holds at most 256 entries")
+                            continue
+                        if any(not isinstance(i, str) or len(i) > 256 or "\x00" in i
+                               or "\n" in i or "\r" in i for i in val):
+                            errors.append(f"channels.{name}.{key} entries must be "
+                                          "single-line strings of at most 256 chars")
+                            continue
+                        clean_sub[key] = list(val)
+                    elif key in ("smtp_port", "imap_port"):
+                        if isinstance(val, bool) or not isinstance(val, int) \
+                                or not 1 <= val <= 65535:
+                            errors.append(f"channels.{name}.{key} must be an integer in 1..65535")
+                            continue
+                        clean_sub[key] = val
+                    else:  # string fields: to / from / hosts / url
+                        if not isinstance(val, str) or len(val) > 512 \
+                                or "\x00" in val or "\n" in val or "\r" in val:
+                            errors.append(f"channels.{name}.{key} must be a single-line "
+                                          "string of at most 512 chars")
+                            continue
+                        if key == "url" and val:
+                            parts = urllib.parse.urlparse(val)
+                            if parts.scheme not in ("http", "https") or not parts.hostname:
+                                errors.append("channels.webhook.url must be an http(s) URL "
+                                              "(empty = off)")
+                                continue
+                        clean_sub[key] = val
+                if clean_sub:
+                    clean_ch[name] = clean_sub
+            if clean_ch:
+                clean["channels"] = clean_ch
     if "evolution" in patch:
         clean_evo, evo_errors = evolution.validate_evolution_settings(
             patch["evolution"])
@@ -1418,6 +1507,70 @@ def clear_chat_session() -> bool:
     return True
 
 
+# ------------------------------------------------------- webhook inbound ---
+# The console answers POST /api/channels/webhook synchronously: one
+# in-process turn on a webhook-OWNED session (never the console "web"
+# session), no SSE — the HTTP response body itself carries the reply.
+
+def _webhook_session_path(sender: str) -> Path:
+    """Session file for the logical key webhook:<sender|default>. ':' is not
+    a portable file-name character, so it maps to '_' on disk."""
+    key = f"webhook:{sender or 'default'}"
+    stem = re.sub(r"[^A-Za-z0-9._-]", "_", key)
+    return chat_sessions_dir() / f"{stem}.jsonl"
+
+
+def _run_webhook_turn(text: str, sender: str):
+    """Drive one turn synchronously on the webhook session and return the
+    TurnResult (reply text through res.text). Model/tool failures are an
+    honest stop, never an exception; a failed turn persists nothing so the
+    caller can retry without a poisoned session."""
+    cfg = cli.resolve_model_config()
+    path = _webhook_session_path(sender)
+    sess = Session(path)
+    history = sess.load()
+    if not history and not sess.meta():
+        sess = Session.create(path, meta={"model": cfg.model})
+        history = []
+    history = [m for m in history if m.get("role") != "system"]
+
+    stack = build_system_stack(context_dirs=resolve_context_dirs())
+    messages = stack + history
+    pre_ids = {id(m) for m in messages}
+    messages.append({"role": "user", "content": text})
+
+    res = run_turn(messages, ChatClient(cfg).chat, build_registry(),
+                   budget_chars=chat_budget())
+    if res.stop == "model_error":
+        return res  # nothing persisted: the session stays retry-clean
+    delta = [m for m in messages
+             if id(m) not in pre_ids and m.get("role") != "system"]
+    try:
+        sess.append_many(delta)
+    except OSError as e:  # noqa: BLE001 — reply stays honest, log only the type
+        sys.stderr.write(f"webhook session append failed err={type(e).__name__}\n")
+    return res
+
+
+def collect_channels() -> dict:
+    """GET /api/channels — adapter status rows, honestly degraded to an empty
+    list plus a note when the channel module is not importable (still in
+    development) or violates its contract. Never fabricates rows."""
+    try:
+        from mycore import channels as _channels
+    except Exception as e:  # noqa: BLE001 — module may not exist yet
+        sys.stderr.write(f"channels status unavailable err={type(e).__name__}\n")
+        return {"channels": [], "note": "channel module unavailable"}
+    try:
+        rows = _channels.status(load_settings(), REPO)
+    except Exception as e:  # noqa: BLE001 — status must never take the console down
+        sys.stderr.write(f"channels status failed err={type(e).__name__}\n")
+        return {"channels": [], "note": "channel status unavailable"}
+    if not isinstance(rows, list):
+        return {"channels": [], "note": "channel status unavailable"}
+    return {"channels": rows}
+
+
 # ----------------------------------------------------------------- server ----
 
 MIME = {
@@ -1484,6 +1637,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(collect_skills())
         if path == "/api/voice":
             return self._json(collect_voice())
+        if path == "/api/channels":
+            return self._json(collect_channels())
         if path.startswith("/static/i18n/"):
             return self._locale_pack(path[len("/static/i18n/"):])
         if path.startswith("/static/"):
@@ -1506,6 +1661,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_evolution()
         if path == "/api/chat":
             return self._handle_chat()
+        if path == "/api/channels/webhook":
+            return self._handle_channel_webhook()
         return self._json({"error": "not found"}, 404)
 
     # ------------------------------------------------------ evolution legs ---
@@ -1741,6 +1898,62 @@ class Handler(BaseHTTPRequestHandler):
         return self._sse("done", {"text": res.text, "stop": res.stop,
                                   "iterations": res.iterations,
                                   "tool_calls": res.tool_calls})
+
+    def _require_webhook_secret(self) -> bool:
+        """Bearer gate for the inbound webhook route: the secret lives in its
+        own secrets.env slot (CHANNEL_WEBHOOK_SECRET). Missing slot = honest
+        503 naming the slot; the value never appears in any response, log
+        line, or exception."""
+        secret = read_env_slot("CHANNEL_WEBHOOK_SECRET")
+        if not secret:
+            self._json({"error": "CHANNEL_WEBHOOK_SECRET not configured in secrets.env"}, 503)
+            return False
+        auth = self.headers.get("Authorization", "")
+        provided = auth[7:] if auth.startswith("Bearer ") else ""
+        if not provided or not hmac.compare_digest(provided.encode(),
+                                                   secret.encode()):
+            self._json({"error": "unauthorized"}, 401)
+            return False
+        return True
+
+    def _handle_channel_webhook(self) -> None:
+        """POST /api/channels/webhook — inbound webhook leg: Bearer secret,
+        then {text, sender?} -> one in-process turn -> {ok, reply}. No SSE;
+        the console 'web' session is never touched; the session key is
+        webhook:<sender|default>. Failures answer with honest, generic codes
+        — never internal detail."""
+        if not self._require_webhook_secret():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        text = doc.get("text")
+        if not isinstance(text, str) or not text.strip():
+            return self._json({"error": "validation failed",
+                               "details": ["text is required"]}, 400)
+        text = text.strip()
+        if len(text) > CHAT_MAX_CHARS:
+            return self._json({"error": "validation failed",
+                               "details": [f"text too long (max {CHAT_MAX_CHARS} chars)"]},
+                              400)
+        sender = doc.get("sender", "default")
+        if not isinstance(sender, str):
+            return self._json({"error": "validation failed",
+                               "details": ["sender must be a string"]}, 400)
+        sender = sender.strip() or "default"
+        if not re.fullmatch(r"[A-Za-z0-9._@-]{1,64}", sender):
+            return self._json({"error": "validation failed",
+                               "details": ["sender must be 1..64 chars of [A-Za-z0-9._@-]"]},
+                              400)
+        try:
+            res = _run_webhook_turn(text, sender)
+        except Exception as e:  # noqa: BLE001 — internals never reach the caller
+            sys.stderr.write(f"webhook turn failed err={type(e).__name__}\n")
+            return self._json({"error": "turn failed"}, 500)
+        if res.stop == "model_error":
+            sys.stderr.write("webhook turn stopped reason=model_error\n")
+            return self._json({"error": "turn failed"}, 500)
+        return self._json({"ok": True, "reply": res.text})
 
     def _handle_say(self) -> None:
         """Speech synthesis. No bearer required (loopback console feature),
