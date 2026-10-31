@@ -82,6 +82,7 @@ import os
 import re
 import shutil
 import sys
+import threading
 import time
 import urllib.parse
 from pathlib import Path
@@ -119,6 +120,7 @@ DENY_WARN_THROTTLE = 60.0              # seconds between WARN lines per chat
 MAX_POLL_ERRORS = 20                   # bounded backoff, then give up (tg.py parity)
 DEFAULT_POLL_TIMEOUT = 30              # long-poll seconds (0 in --once mode)
 REFLECT_CHECK_SEC = 60.0               # evolution cron evaluation cadence
+TYPING_INTERVAL_SEC = 4.0               # TG typing heartbeat (5s Telegram TTL)
 
 # Honest one-line replies. The English constants stay importable (tests and
 # tooling compare against them); live replies resolve the SAME keys through
@@ -666,6 +668,12 @@ class ChatService:
     def _rule_labels(self, rules: list[str]) -> str:
         return ", ".join(i18n.fmt(self.lang, f"rule.{r}", r) for r in rules)
 
+    def _wd(self, value: object) -> str:
+        """Weekday code -> localized name (wd.mon..wd.sun; unknown value
+        passes through untouched so an odd config still reads honestly)."""
+        raw = str(value)
+        return i18n.fmt(self.lang, "wd." + raw, raw)
+
     def _evolution_cfg(self) -> dict:
         """Effective evolution settings (fail-closed: absent/invalid = off)."""
         try:
@@ -748,7 +756,7 @@ class ChatService:
         onoff = self._t("common.on") if cfg.get("enabled") else self._t("common.off")
         lines = [self._t("cmd.evolution.head", enabled=onoff,
                          daily_at=cfg["daily_at"],
-                         weekly_day=cfg["weekly_day"],
+                         weekly_day=self._wd(cfg["weekly_day"]),
                          monthly_day=cfg["monthly_day"])]
         if summ.get("due_now"):
             lines.append(self._t("cmd.evolution.due",
@@ -794,12 +802,47 @@ class ChatService:
             self.log.write("REFLECT_ERR", f"err={type(e).__name__}")
 
     # ------------------------------------------------------------ turn ------
+    def _typing_heartbeat(self, chat_id: int):
+        """Start a best-effort `typing` indicator for one pipeline turn and
+        return the stop callable (always `finally`-stopped by _pipeline).
+
+        Contract: silent by design — dry-run sends nothing, and any failure
+        (no token, offline, rate limit) stops the loop immediately without a
+        log line: a lost heartbeat must never cost a reply. The first beat
+        fires on the daemon thread right away (the model call overlaps it),
+        then repeats every TYPING_INTERVAL_SEC until the stop callable runs.
+        """
+        if self.dry_run:
+            return lambda: None
+        stop = threading.Event()
+
+        def beat() -> None:
+            while True:
+                try:
+                    self.tg.send_chat_action(chat_id, "typing")
+                except Exception:  # noqa: BLE001 — silent stop, by design
+                    return
+                if stop.wait(TYPING_INTERVAL_SEC):
+                    return
+
+        threading.Thread(target=beat, name="typing-heartbeat",
+                         daemon=True).start()
+        return stop.set
+
     def _pipeline(self, chat_id: int, text: str) -> str:
         """Session load -> body stack -> run_turn -> persisted delta -> reply.
 
         Returns the final reply text (honest short lines on failure); the
-        caller performs the single send.
+        caller performs the single send. Commands never enter here, so the
+        typing heartbeat covers exactly the long part (model + tools).
         """
+        stop_beat = self._typing_heartbeat(chat_id)
+        try:
+            return self._pipeline_body(chat_id, text)
+        finally:
+            stop_beat()
+
+    def _pipeline_body(self, chat_id: int, text: str) -> str:
         cfg = self._model_for_chat(chat_id)
         path = self._session_path(chat_id)
         sess = Session(path)

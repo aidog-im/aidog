@@ -4,6 +4,7 @@ Surface (stdlib urllib, injectable transport for offline tests):
 
     TgClient(...).get_me()              # read-only identity probe
     TgClient(...).send_message(chat, text)
+    TgClient(...).send_chat_action(chat)  # typing heartbeat (stateless)
     TgClient(...).run_poll_loop(handler)  # getUpdates long-poll loop
 
 CONFLICT GUARD (owner system: one bot token = one getUpdates consumer):
@@ -146,6 +147,19 @@ class TgClient:
         if len(text) > 4096:
             text = text[:4090] + " …[truncated]"
         return self._call("sendMessage", {"chat_id": chat_id, "text": text})
+
+    def send_chat_action(self, chat_id: str | int, action: str = "typing") -> dict:
+        """Stateless 'typing…' indicator (safe alongside a live poller).
+
+        Best-effort by contract: the caller treats any failure as silent
+        stop — a lost heartbeat must never break or delay a reply.
+        """
+        if not chat_id:
+            raise TgError("chat_id is required")
+        if not isinstance(action, str) or not action.strip():
+            raise TgError("action is required")
+        return self._call("sendChatAction", {"chat_id": chat_id,
+                                              "action": action.strip()})
 
     def get_updates(self, offset: int | None = None, timeout: int = 30) -> list[dict]:
         """Long-poll getUpdates. Caller must have obtained the token through

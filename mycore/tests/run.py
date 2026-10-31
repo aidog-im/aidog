@@ -543,6 +543,36 @@ def test_tg() -> None:
     except TgError:
         check("tg: empty chat refused", True)
 
+    # --- send_chat_action: form-encoded, validation, honest failure ---
+    act = {}
+    def act_transport(url, payload, timeout):
+        act["payload"] = payload
+        return json.dumps({"ok": True, "result": True})
+    c_act = TgClient(token="t", transport=act_transport)
+    c_act.send_chat_action(42)
+    form2 = urllib.parse.parse_qs(act["payload"].decode())
+    check("tg: sendChatAction form-encoded with default typing",
+          form2.get("chat_id") == ["42"] and form2.get("action") == ["typing"],
+          str(form2))
+    c_act.send_chat_action("42", action="upload_photo")
+    form3 = urllib.parse.parse_qs(act["payload"].decode())
+    check("tg: sendChatAction honors a custom action",
+          form3.get("action") == ["upload_photo"], str(form3))
+    for bad in (("", "typing"), (42, "")):
+        try:
+            c_act.send_chat_action(*bad)
+            check("tg: sendChatAction validates its arguments", False, str(bad))
+        except TgError:
+            check("tg: sendChatAction validates its arguments", True)
+    api_err = TgClient(token="t",
+                       transport=_tg_json({"ok": False,
+                                           "description": "Bad Request: chat not found"}))
+    try:
+        api_err.send_chat_action(42)
+        check("tg: sendChatAction api error -> TgError", False)
+    except TgError as e:
+        check("tg: sendChatAction api error -> TgError", "chat not found" in str(e))
+
     # --- POLL GUARD (the hard one): live bot token must be refused ---
     os.environ.pop(POLL_BOT_ENV, None)
     try:
@@ -812,11 +842,13 @@ def test_watchdog() -> None:
 
 
 class FakeTgTransport:
-    """Offline Telegram transport: scripted getUpdates batches + recorded sends."""
+    """Offline Telegram transport: scripted getUpdates batches + recorded sends.
+    `actions` records sendChatAction heartbeats [(chat_id_str, action)]."""
 
     def __init__(self, updates=None):
         self.updates = list(updates or [])
         self.sends = []            # [(chat_id_str, text)] in call order
+        self.actions = []          # [(chat_id_str, action)] typing heartbeats
         self.polls = 0
 
     def __call__(self, url, payload, timeout):
@@ -827,6 +859,12 @@ class FakeTgTransport:
             self.sends.append((form.get("chat_id", [""])[0],
                                form.get("text", [""])[0]))
             return json.dumps({"ok": True, "result": {"message_id": 1}})
+        if method == "sendChatAction":
+            import urllib.parse as up
+            form = up.parse_qs(payload.decode("utf-8"))
+            self.actions.append((form.get("chat_id", [""])[0],
+                                 form.get("action", [""])[0]))
+            return json.dumps({"ok": True, "result": True})
         if method == "getUpdates":
             self.polls += 1
             return json.dumps({"ok": True, "result": self.updates})
@@ -1457,6 +1495,358 @@ def test_evolution() -> None:
               kinds.count("learn.memory") >= 1 and kinds[-1] == "learn.memory")
 
 
+def _sse_body(*frames) -> str:
+    """Build an SSE body from chunk dicts — one data line each, then [DONE]."""
+    out = []
+    for f in frames:
+        out.append("data: " + json.dumps(f) + "\n\n")
+    out.append("data: [DONE]\n\n")
+    return "".join(out)
+
+
+def _chunk(content=None, tool_calls=None, finish=None) -> dict:
+    delta: dict = {}
+    if content is not None:
+        delta["content"] = content
+    if tool_calls is not None:
+        delta["tool_calls"] = tool_calls
+    return {"id": "c1", "object": "chat.completion.chunk", "created": 1,
+            "model": "m",
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+
+
+def test_stream() -> None:
+    """Streaming path: SSE assembly into the same completion shape, on_delta
+    pacing, non-SSE fallback, error mapping — all offline (canned bodies)."""
+    from mycore.model import ChatClient, ModelConfig, ModelError
+
+    cfg = ModelConfig(base_url="http://127.0.0.1:9/v1", model="m")
+
+    def mk(body: str):
+        seen = {"payload": None, "lines": []}
+
+        def transport(url, headers, payload, timeout, on_line):
+            seen["payload"] = json.loads(payload)
+            for ln in body.splitlines(keepends=True):
+                seen["lines"].append(ln)
+                on_line(ln)
+            return body
+        return transport, seen
+
+    # --- 1) content assembly + live deltas + stream flag ---
+    body = _sse_body(_chunk(content="Hel"), _chunk(content="lo "),
+                     _chunk(content="world"), _chunk(finish="stop"))
+    tr, seen = mk(body)
+    got = []
+    doc = ChatClient(cfg, stream_transport=tr).chat(
+        [{"role": "user", "content": "x"}], on_delta=got.append)
+    check("stream: payload carries stream=true",
+          seen["payload"].get("stream") is True)
+    check("stream: lines delivered live (not one blob)", len(seen["lines"]) >= 4,
+          str(len(seen["lines"])))
+    check("stream: content assembled", first_choice_text(doc) == "Hello world",
+          repr(first_choice_text(doc)))
+    check("stream: on_delta paced per chunk", got == ["Hel", "lo ", "world"],
+          str(got))
+    check("stream: finish reason captured",
+          doc["choices"][0]["finish_reason"] == "stop")
+    check("stream: doc is chat.completion shaped",
+          doc.get("object") == "chat.completion" and doc.get("id") == "c1"
+          and doc.get("model") == "m")
+
+    # --- 2) tool call fragments merged per index (real gateway shape:
+    #     id+name complete in the first chunk, null afterwards, args split) ---
+    body = _sse_body(
+        _chunk(tool_calls=[{"index": 0, "id": "call_1",
+                            "function": {"name": "read_file", "arguments": ""}}]),
+        _chunk(tool_calls=[{"index": 0, "id": None,
+                            "function": {"name": None,
+                                         "arguments": "{\"path\""}}]),
+        _chunk(tool_calls=[{"index": 0, "id": None,
+                            "function": {"name": None,
+                                         "arguments": ": \"a.txt\"}"}}]),
+        _chunk(finish="tool_calls"))
+    tr, _ = mk(body)
+    doc = ChatClient(cfg, stream_transport=tr).chat(
+        [{"role": "user", "content": "x"}], on_delta=lambda s: None)
+    calls = tool_calls(doc)
+    check("stream: tool fragments merged by index",
+          len(calls) == 1 and calls[0]["name"] == "read_file"
+          and calls[0]["id"] == "call_1", str(calls))
+    check("stream: merged arguments parse",
+          calls[0]["arguments"] == {"path": "a.txt"}, str(calls))
+    check("stream: no content delta when tools-only",
+          first_choice_text(doc) is None)
+
+    # --- 2b) a provider that REPEATS the full name/id every chunk must not
+    #      accumulate duplicates (first-wins on id/name, concat on args) ---
+    body = _sse_body(
+        _chunk(tool_calls=[{"index": 0, "id": "call_x",
+                            "function": {"name": "grep", "arguments": "{}}"}}]),
+        _chunk(tool_calls=[{"index": 0, "id": "call_x",
+                            "function": {"name": "grep", "arguments": "{}}"}}]),
+        _chunk(finish="tool_calls"))
+    tr, _ = mk(body)
+    doc = ChatClient(cfg, stream_transport=tr).chat(
+        [{"role": "user", "content": "x"}], on_delta=lambda s: None)
+    calls = tool_calls(doc)
+    check("stream: repeated name/id stays single (first wins)",
+          len(calls) == 1 and calls[0]["name"] == "grep"
+          and calls[0]["id"] == "call_x", str(calls))
+
+    # --- 3) two parallel calls keep separate slots ---
+    body = _sse_body(
+        _chunk(tool_calls=[{"index": 0, "id": "a",
+                            "function": {"name": "one", "arguments": "{}"}}]),
+        _chunk(tool_calls=[{"index": 1, "id": "b",
+                            "function": {"name": "two", "arguments": "{}"}}]),
+        _chunk(finish="tool_calls"))
+    tr, _ = mk(body)
+    doc = ChatClient(cfg, stream_transport=tr).chat(
+        [{"role": "user", "content": "x"}], on_delta=lambda s: None)
+    calls = tool_calls(doc)
+    check("stream: parallel tool calls stay separate",
+          [c["name"] for c in calls] == ["one", "two"], str(calls))
+
+    # --- 4) non-SSE fallback: gateway ignored stream, sent plain JSON ---
+    plain = json.dumps(fake_response(text="whole text"))
+    tr, seen = mk(plain)
+    got = []
+    doc = ChatClient(cfg, stream_transport=tr).chat(
+        [{"role": "user", "content": "x"}], on_delta=got.append)
+    check("stream: non-SSE body returned as a normal doc",
+          first_choice_text(doc) == "whole text")
+    check("stream: whole text reported as a single delta",
+          got == ["whole text"], str(got))
+
+    # --- 5) garbage body -> ModelError (honest, no fake success) ---
+    tr, _ = mk("<html>gateway exploded</html>\n")
+    try:
+        ChatClient(cfg, stream_transport=tr).chat(
+            [{"role": "user", "content": "x"}], on_delta=lambda s: None)
+        check("stream: garbage body -> ModelError", False)
+    except ModelError as e:
+        check("stream: garbage body -> ModelError", "JSON" in str(e), str(e))
+
+    # --- 6) HTTP error from the stream transport surfaces as ModelError ---
+    def boom(url, headers, payload, timeout, on_line):
+        raise ModelError("HTTP 500 Internal Server Error")
+    try:
+        ChatClient(cfg, stream_transport=boom).chat(
+            [{"role": "user", "content": "x"}], on_delta=lambda s: None)
+        check("stream: transport error -> ModelError", False)
+    except ModelError as e:
+        check("stream: transport error -> ModelError", "500" in str(e))
+
+    # --- 7) no on_delta -> classic non-stream transport (zero regression) ---
+    def plain_transport(url, headers, payload, timeout):
+        return json.dumps(fake_response(text="classic"))
+    doc = ChatClient(cfg, transport=plain_transport).chat(
+        [{"role": "user", "content": "x"}])
+    check("stream: omitted on_delta uses the classic path",
+          first_choice_text(doc) == "classic")
+
+    # --- 8) streaming with tools still allowed (loop passes both) ---
+    body = _sse_body(_chunk(content="thinking"), _chunk(finish="stop"))
+    tr, seen = mk(body)
+    ChatClient(cfg, stream_transport=tr).chat([{"role": "user", "content": "x"}],
+                                              tools=[{"type": "function"}],
+                                              on_delta=lambda s: None)
+    check("stream: tools reach the payload with stream",
+          "tools" in seen["payload"] and seen["payload"]["stream"] is True)
+
+
+def test_loop_on_delta() -> None:
+    """run_turn forwards on_delta only when set (fakes that do not know about
+    streaming keep working) and the final text still comes from TurnResult."""
+    class KwChat:
+        def __init__(self, script):
+            self.script = list(script)
+            self.kw_seen = []
+
+        def chat(self, messages, tools=None, **kw):
+            self.kw_seen.append(kw)
+            return self.script.pop(0)
+
+    chat = KwChat([fake_response(text="plain answer")])
+    res = run_turn([{"role": "user", "content": "hi"}], chat.chat,
+                   build_registry())
+    check("loop: no on_delta kw when unset",
+          all("on_delta" not in k for k in chat.kw_seen), str(chat.kw_seen))
+    check("loop: result text unaffected", res.text == "plain answer")
+
+    chat = KwChat([fake_response(text="streamed answer")])
+    res = run_turn([{"role": "user", "content": "hi"}], chat.chat,
+                   build_registry(), on_delta=lambda s: None)
+    check("loop: on_delta forwarded when set",
+          all(callable(k.get("on_delta")) for k in chat.kw_seen)
+          and len(chat.kw_seen) == 1, str(chat.kw_seen))
+    check("loop: authoritative text still returned",
+          res.stop == "final" and res.text == "streamed answer")
+
+    # tool chain: second call also carries on_delta (per model call)
+    with tempfile.TemporaryDirectory() as td:
+        reg = build_registry(allowed_roots=[td])
+        chat = KwChat([
+            fake_response(calls=[("write_file", {"path": str(Path(td) / "o.txt"),
+                                                  "content": "x"})]),
+            fake_response(text="done"),
+        ])
+        res = run_turn([{"role": "user", "content": "go"}], chat.chat, reg,
+                       on_delta=lambda s: None)
+        check("loop: on_delta on every model call",
+              len(chat.kw_seen) == 2
+              and all("on_delta" in k for k in chat.kw_seen), str(chat.kw_seen))
+        check("loop: tool chain unaffected by streaming",
+              res.stop == "final" and res.text == "done")
+
+
+def test_typing() -> None:
+    """TG typing heartbeat: per-pipeline only, dry-run skips it, failures are
+    silent, and the beat stops the moment the turn ends."""
+    import os
+    import time as _t
+    from mycore import service as svc_mod
+    from mycore.service import ChatService, STATE_ENV
+    from mycore.tg import POLL_BOT_ENV
+
+    saved = {k: os.environ.get(k) for k in (STATE_ENV, POLL_BOT_ENV)}
+    old_interval = svc_mod.TYPING_INTERVAL_SEC
+    try:
+        os.environ[POLL_BOT_ENV] = "second-bot-TEST-token"
+        with tempfile.TemporaryDirectory() as td:
+            fake = FakeTgTransport()
+            ok_chat = lambda messages=None, tools=None, **kw: fake_response(text="pong")  # noqa: E731
+            svc = ChatService(Path(td), frozenset({111}), transport=fake,
+                              chat=ok_chat)
+
+            # heartbeat fires while a pipeline turn runs
+            svc_mod.TYPING_INTERVAL_SEC = 0.02
+            svc.handle_update(mk_update(1, 111, 123456789, "hello"))
+            deadline = _t.time() + 2.0
+            while _t.time() < deadline and not fake.actions:
+                _t.sleep(0.02)
+            check("typing: heartbeat sent during the pipeline turn",
+                  bool(fake.actions) and fake.actions[0] == ("123456789", "typing"),
+                  str(fake.actions[:3]))
+            check("typing: reply still delivered",
+                  fake.sends and fake.sends[-1][1] == "pong", str(fake.sends))
+            # turn over -> beats must stop (count stable across several intervals)
+            _t.sleep(0.12)
+            n_after = len(fake.actions)
+            _t.sleep(0.1)
+            check("typing: heartbeat stops when the turn ends",
+                  len(fake.actions) == n_after, f"{n_after} -> {len(fake.actions)}")
+
+            # commands never enter _pipeline -> no heartbeat for them
+            before = len(fake.actions)
+            svc.handle_update(mk_update(2, 111, 123456789, "/help"))
+            _t.sleep(0.08)
+            check("typing: commands do not trigger the heartbeat",
+                  len(fake.actions) == before, f"{before} -> {len(fake.actions)}")
+
+            # dry-run: never sends
+            fake2 = FakeTgTransport()
+            svc2 = ChatService(Path(td) / "dry", frozenset({111}),
+                               transport=fake2, chat=ok_chat, dry_run=True)
+            svc2.handle_update(mk_update(3, 111, 123456789, "hello"))
+            _t.sleep(0.08)
+            check("typing: dry-run sends no heartbeat",
+                  fake2.actions == [], str(fake2.actions))
+            check("typing: dry-run sends no reply either",
+                  fake2.sends == [], str(fake2.sends))
+
+            # transport failure -> silent stop, no exception, no log line
+            class Broken:
+                def __call__(self, url, payload, timeout):
+                    method = url.rsplit("/", 1)[-1]
+                    if method == "sendChatAction":
+                        raise RuntimeError("offline")
+                    if method == "sendMessage":
+                        return json.dumps({"ok": True, "result": {"message_id": 1}})
+                    return json.dumps({"ok": True, "result": {}})
+            svc3 = ChatService(Path(td) / "broken", frozenset({111}),
+                               transport=Broken(), chat=ok_chat)
+            try:
+                svc3.handle_update(mk_update(4, 111, 123456789, "hello"))
+                check("typing: heartbeat failure is silent (no crash)", True)
+            except Exception as e:  # noqa: BLE001
+                check("typing: heartbeat failure is silent (no crash)", False,
+                      type(e).__name__)
+            log3 = Path(td) / "broken" / "service.log"
+            check("typing: heartbeat failure writes no log line",
+                  not log3.is_file() or "sendChatAction" not in log3.read_text())
+
+            # dry-run helper returns a no-op stop
+            stop = svc2._typing_heartbeat(111)
+            check("typing: dry-run heartbeat is a no-op",
+                  callable(stop) and fake2.actions == [])
+    finally:
+        svc_mod.TYPING_INTERVAL_SEC = old_interval
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def test_wd_locale() -> None:
+    """Weekday localization ride-along: wd.mon..wd.sun exist in both packs,
+    the service resolves the configured code, and the zh templates render the
+    localized name with no raw english code leaking (B1 scratchpad item).
+    Chinese literals below are deliberate zh-patch EXPECTED values — the
+    lines carry the i18n-allow marker per tests/source_lang_check.py."""
+    from lib import i18n
+    from mycore.service import ChatService
+    import tempfile as _tf
+
+    codes = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+    for lang in ("en", "zh"):
+        missing = [c for c in codes if not i18n.get(lang, "wd." + c, "")]
+        check(f"wd: {lang} pack carries all seven wd keys",
+              not missing, str(missing))
+    check("wd: en weekday names read as English",
+          i18n.get("en", "wd.sun", "") == "Sun")
+    check("wd: zh weekday names are Chinese",
+          i18n.get("zh", "wd.sun", "") == "\u5468\u65e5"  # i18n-allow
+          and i18n.get("zh", "wd.mon", "") == "\u5468\u4e00")  # i18n-allow
+
+    with _tf.TemporaryDirectory() as td:
+        import os as _os
+        from mycore.tg import POLL_BOT_ENV
+        saved_tok = _os.environ.get(POLL_BOT_ENV)
+        _os.environ[POLL_BOT_ENV] = "second-bot-TEST-token"
+        try:
+            svc = ChatService(Path(td), frozenset({111}),
+                              transport=FakeTgTransport(),
+                              chat=lambda messages=None, tools=None, **kw:
+                              fake_response(text="x"))
+            check("wd: service resolves the configured code (en)",
+                  svc._wd("sun") == "Sun")
+            svc.lang = "zh"
+            check("wd: service resolves the configured code (zh)",
+                  svc._wd("sun") == "\u5468\u65e5")  # i18n-allow
+            check("wd: unknown code passes through honestly",
+                  svc._wd("someday") == "someday")
+        finally:
+            if saved_tok is None:
+                _os.environ.pop(POLL_BOT_ENV, None)
+            else:
+                _os.environ[POLL_BOT_ENV] = saved_tok
+        # the zh templates swallow {weekly_day} with no separating space
+        _sun = "\u5468\u65e5"  # i18n-allow (zh pack weekday value)
+        _on = "\u5f00"  # i18n-allow (zh pack on/off value)
+        head_zh = i18n.fmt("zh", "cmd.evolution.head", enabled=_on,
+                           daily_at="09:10", weekly_day=_sun, monthly_day=1)
+        check("wd: zh head renders the localized weekday, no raw code",
+              ("\u6bcf\u5468" + _sun) in head_zh  # i18n-allow
+              and "sun" not in head_zh, head_zh)
+        status_zh = i18n.fmt("zh", "evo.status", d="09:10", w=_sun, m=1)
+        check("wd: zh status renders the localized weekday, no raw code",
+              ("\u6bcf\u5468" + _sun) in status_zh  # i18n-allow
+              and "sun" not in status_zh, status_zh)
+
+
 def main() -> int:
     test_model()
     test_registry_and_tools()
@@ -1471,6 +1861,10 @@ def main() -> int:
     test_watchdog()
     test_service()
     test_evolution()
+    test_stream()
+    test_loop_on_delta()
+    test_typing()
+    test_wd_locale()
     print(f"\n{len(PASS)} pass · {len(FAIL)} fail")
     if FAIL:
         print("failed: " + ", ".join(FAIL))

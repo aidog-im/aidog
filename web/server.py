@@ -24,6 +24,10 @@ Routes:
                                    memory artifact (evolution loop console leg)
   POST /api/evolution           -> Bearer; {action:"reflect", period} generates
                                    the period skeleton (same core as /reflect)
+  POST /api/chat                -> Bearer; {text} streams an agent turn as SSE
+                                   (meta/delta/tool/done/error); {action:"clear"}
+                                   archives the console session
+  GET  /api/chat/history        -> current console session (read, loopback)
   GET  /api/voice               -> voice engine capability (edge-tts presence)
   POST /api/say                 -> synthesize speech -> audio/mpeg (cached,
                                    rate-limited, sanitized, JSON-only origin-guarded)
@@ -62,7 +66,13 @@ if str(REPO) in sys.path:
     sys.path.remove(str(REPO))
 sys.path.insert(0, str(REPO))
 from lib import i18n  # noqa: E402
-from mycore import evolution  # noqa: E402  (institutional evolution loop)
+from mycore import cli, evolution  # noqa: E402  (model config + evolution loop)
+from mycore.assembly import build_system_stack  # noqa: E402
+from mycore.loop import run_turn  # noqa: E402
+from mycore.model import ChatClient  # noqa: E402
+from mycore.service import state_dir as mycore_state_dir  # noqa: E402
+from mycore.session import Session  # noqa: E402
+from mycore.tools import build_registry  # noqa: E402
 HOST, PORT = "127.0.0.1", int(os.environ.get("AIDOG_WEB_PORT", "8790"))
 try:
     VERSION = (REPO / "VERSION").read_text(encoding="utf-8").strip()  # single source of truth
@@ -72,6 +82,10 @@ SECRETS = REPO / "secrets.env"
 SETTINGS_FILE = WEB_DIR / "settings.json"
 STATE_FILE = WEB_DIR / ".state.json"  # runtime state (gitignored): boot history
 MAX_BODY = 16384
+CHAT_MAX_CHARS = 4000                 # one console chat message (input cap)
+CHAT_HISTORY_CAP = 2000               # per-message chars returned by /history
+CHAT_SESSION_NAME = "web"             # console session file stem (numeric
+                                      # chat_ids belong to the TG service)
 _state_lock = threading.Lock()
 
 
@@ -1295,6 +1309,67 @@ def collect_version() -> dict:
         return data
 
 
+# ------------------------------------------------------------ console chat --
+# One console-owned session file, same state root as the TG service (numeric
+# file names there belong to chat_ids; "web" cannot collide).
+
+def chat_sessions_dir() -> Path:
+    return mycore_state_dir() / "sessions"
+
+
+def chat_session_path() -> Path:
+    return chat_sessions_dir() / f"{CHAT_SESSION_NAME}.jsonl"
+
+
+def chat_history(limit: int = 200) -> dict:
+    """Read-only session view for GET /api/chat/history: user/assistant turns
+    only (system constitution and tool payloads never leave the server),
+    content capped at CHAT_HISTORY_CAP. Loopback read, no bearer needed."""
+    sess = Session(chat_session_path())
+    out = []
+    for m in sess.load()[-limit:]:
+        role = m.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        content = m.get("content")
+        if not isinstance(content, str):
+            continue
+        out.append({"role": role, "content": content[:CHAT_HISTORY_CAP]})
+    return {"messages": out, "count": len(out)}
+
+
+def chat_budget() -> int | None:
+    """Compaction budget for a console turn: settings mycore.budget when it is
+    a positive int (bool excluded), else the cli default — same rule as the
+    TG service, so both channels compact at the same threshold."""
+    raw = (load_settings().get("mycore") or {}).get("budget")
+    if isinstance(raw, bool):
+        raw = None
+    if isinstance(raw, int):
+        return raw if raw > 0 else None
+    if isinstance(raw, str) and raw.isascii() and raw.isdigit():
+        return int(raw) if int(raw) > 0 else None
+    return cli.DEFAULT_BUDGET_CHARS
+
+
+def clear_chat_session() -> bool:
+    """Archive the console session (POST /api/chat {action:'clear'}).
+    Returns True when something was rotated."""
+    src = chat_session_path()
+    if not src.is_file():
+        return False
+    arch = chat_sessions_dir() / "archive"
+    arch.mkdir(parents=True, exist_ok=True)
+    stamp = int(time.time())
+    dst = arch / f"{CHAT_SESSION_NAME}.{stamp}.jsonl"
+    n = 0
+    while dst.exists():
+        n += 1
+        dst = arch / f"{CHAT_SESSION_NAME}.{stamp}.{n}.jsonl"
+    shutil.move(str(src), str(dst))
+    return True
+
+
 # ----------------------------------------------------------------- server ----
 
 MIME = {
@@ -1353,6 +1428,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(collect_events())
         if path == "/api/evolution":
             return self._json(evolution.status_summary())
+        if path == "/api/chat/history":
+            return self._json(chat_history())
         if path == "/api/version":
             return self._json(collect_version())
         if path == "/api/skills":
@@ -1379,6 +1456,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_learn()
         if path == "/api/evolution":
             return self._handle_evolution()
+        if path == "/api/chat":
+            return self._handle_chat()
         return self._json({"error": "not found"}, 404)
 
     # ------------------------------------------------------ evolution legs ---
@@ -1503,6 +1582,117 @@ class Handler(BaseHTTPRequestHandler):
                                                      or {}).values()),
                                      "commits": (res.facts.get("git") or {}) \
                                          .get("count")}})
+
+    # ---------------------------------------------------------- console chat -
+    def _sse_start(self) -> None:
+        """Switch the response into an SSE stream (HTTP/1.0 handler: no
+        Content-Length, so the browser reader runs until close_connection).
+        Called only after validation has passed — 401/400 stay plain JSON."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+
+    def _sse(self, event: str, data: dict) -> bool:
+        """Write one SSE frame. False = the client went away (stop the turn
+        observer cleanly; the model call itself still finishes server-side)."""
+        frame = (f"event: {event}\n"
+                 f"data: {json.dumps(data, ensure_ascii=False)}\n\n")
+        try:
+            self.wfile.write(frame.encode("utf-8"))
+            self.wfile.flush()
+            return True
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            return False
+
+    def _handle_chat(self) -> None:
+        """POST /api/chat — one streamed agent turn (same loop/stack/session
+        contract as the TG pipeline), or {action:'clear'} to archive.
+
+        Events: meta {model} · delta {text} · tool {name, ok} ·
+                done {text, stop, iterations, tool_calls} · error {error}.
+        `done` always carries the authoritative final text — deltas are only
+        a live preview the browser replaces wholesale.
+        """
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        if doc.get("action") == "clear":
+            return self._json({"ok": True, "archived": clear_chat_session()})
+        text = doc.get("text")
+        if not isinstance(text, str) or not text.strip():
+            return self._json({"error": "validation failed",
+                               "details": ["text is required"]}, 400)
+        text = text.strip()
+        if len(text) > CHAT_MAX_CHARS:
+            return self._json({"error": "validation failed",
+                               "details": [f"text too long (max {CHAT_MAX_CHARS} chars)"]},
+                              400)
+
+        self._sse_start()
+        try:
+            ok = self._run_chat_turn(text)
+        except Exception as e:  # noqa: BLE001 — never leak internals to the stream
+            sys.stderr.write(f"chat turn failed err={type(e).__name__}\n")
+            self._sse("error", {"error": "internal"})
+            return
+        if not ok:
+            return
+
+    def _run_chat_turn(self, text: str) -> bool:
+        """Drive one turn over the console session and stream its events.
+        Returns False when the client disconnected (observers must stop)."""
+        cfg = cli.resolve_model_config()
+        path = chat_session_path()
+        sess = Session(path)
+        history = sess.load()
+        if not history and not sess.meta():
+            sess = Session.create(path, meta={"model": cfg.model})
+            history = []
+        history = [m for m in history if m.get("role") != "system"]
+
+        stack = build_system_stack()
+        messages = stack + history
+        pre_ids = {id(m) for m in messages}
+        messages.append({"role": "user", "content": text})
+
+        alive = [True]
+        if not self._sse("meta", {"model": cfg.model}):
+            return False
+
+        def on_event(kind: str, data: dict) -> None:
+            # Names only — tool ARGUMENTS may carry machine paths, never sent.
+            if kind == "tool_call":
+                alive[0] = self._sse("tool", {"name": data.get("name", "?"),
+                                              "ok": None})
+            elif kind == "tool_result":
+                alive[0] = self._sse("tool", {"name": data.get("name", "?"),
+                                              "ok": bool(data.get("ok"))})
+
+        def on_delta(piece: str) -> None:
+            if alive[0]:
+                alive[0] = self._sse("delta", {"text": piece})
+
+        chat_fn = ChatClient(cfg).chat
+        res = run_turn(messages, chat_fn, build_registry(),
+                       on_event=on_event if alive[0] else None,
+                       budget_chars=chat_budget(), on_delta=on_delta)
+
+        delta = [m for m in messages
+                 if id(m) not in pre_ids and m.get("role") != "system"]
+        try:
+            sess.append_many(delta)
+        except OSError as e:  # noqa: BLE001 — stream stays honest, log only
+            sys.stderr.write(f"chat session append failed err={type(e).__name__}\n")
+        if not alive[0]:
+            return False
+        return self._sse("done", {"text": res.text, "stop": res.stop,
+                                  "iterations": res.iterations,
+                                  "tool_calls": res.tool_calls})
 
     def _handle_say(self) -> None:
         """Speech synthesis. No bearer required (loopback console feature),

@@ -39,7 +39,8 @@ def _tool_result_message(call_id: str, name: str, result: str) -> dict:
 def run_turn(messages: list[dict], chat: ChatFn, registry: ToolRegistry,
              max_iters: int = DEFAULT_MAX_ITERS,
              on_event: Callable[[str, dict], None] | None = None,
-             budget_chars: int | None = None) -> TurnResult:
+             budget_chars: int | None = None,
+             on_delta: Callable[[str], None] | None = None) -> TurnResult:
     """Drive one user turn to completion. Mutates `messages` in place (the
     caller owns session state); never raises for model/tool failures.
 
@@ -48,6 +49,10 @@ def run_turn(messages: list[dict], chat: ChatFn, registry: ToolRegistry,
     logging/UI (kinds: model_call, tool_call, tool_result, compact, stop).
     `budget_chars`, when set, compacts `messages` in place before every model
     call (system constitution and newest turns survive — compact.py contract).
+    `on_delta(text)`, when set, is forwarded to chat() as a live text preview
+    per model call — it is attached ONLY when set, so a chat callable that
+    does not know about streaming keeps working unchanged (and the final
+    authoritative text always comes back through TurnResult).
     """
     emit = on_event or (lambda kind, data: None)
     tool_log: list[dict] = []
@@ -71,8 +76,11 @@ def run_turn(messages: list[dict], chat: ChatFn, registry: ToolRegistry,
                     emit("compact", {"folded": folded, "from": before,
                                      "to": len(messages)})
         emit("model_call", {"iteration": it})
+        chat_kw: dict = {"messages": messages, "tools": tools}
+        if on_delta:
+            chat_kw["on_delta"] = on_delta
         try:
-            doc = chat(messages=messages, tools=tools)
+            doc = chat(**chat_kw)
         except Exception as e:  # noqa: BLE001 — contract: honest stop, no raise
             note = (f"[mycore: model call failed ({type(e).__name__}); "
                     f"turn stopped after {it - 1} iteration(s)]")

@@ -223,6 +223,24 @@
     </section>
   </main>
 
+  <!-- console chat: one streamed agent turn over the same loop/session
+       contract as the TG channel (SSE preview, authoritative done text) -->
+  <section class="card chat">
+    <h2><span data-i18n="sec.chat">CHAT</span>
+        <span class="chat-badge" id="chatBadge" data-i18n="chat.idle">idle</span></h2>
+    <div class="chat-log" id="chatLog">
+      <div class="chat-empty" id="chatEmpty" data-i18n="chat.empty">no messages yet</div>
+    </div>
+    <div class="chat-form">
+      <input id="chatInput" class="chat-input" maxlength="4000" autocomplete="off"
+             data-i18n-ph="chat.ph" placeholder="ask the assistant…">
+      <button class="btn primary" id="chatSend" data-i18n="chat.send">SEND</button>
+      <button class="btn" id="chatClear" data-i18n="chat.clear">CLEAR</button>
+      <span class="chat-msg" id="chatMsg" role="status"></span>
+    </div>
+    <div class="chat-meta" id="chatMeta"></div>
+  </section>
+
   <!-- skill armory (armor-gallery analog: real SKILL.md records) -->
   <section class="card gallery">
     <h2><span data-i18n="sec.gallery">SKILL ARMORY</span><span class="gal-count" id="galCount"></span></h2>

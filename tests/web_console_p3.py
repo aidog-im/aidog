@@ -79,6 +79,49 @@ def post_raw(path: str, doc, ctype: str = "application/json",
         return 0, "", str(e).encode()
 
 
+def post_sse(path: str, doc, token: str | None,
+             timeout: int = 90) -> tuple[int, str, list[tuple[str, dict]]]:
+    """POST expecting an SSE stream: returns (status, content-type, events).
+    Used by the /api/chat live-model check — a non-200 answer still returns
+    its parsed JSON error body as a zero-event result."""
+    data = json.dumps(doc).encode()
+    req = urllib.request.Request(BASE + path, data=data, method="POST")
+    req.add_header("Content-Type", "application/json")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    events: list[tuple[str, dict]] = []
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            ct = r.headers.get("Content-Type", "")
+            status = r.status
+            buf = b""
+            while True:
+                chunk = r.read(4096)
+                if not chunk:
+                    break
+                buf += chunk
+            text = buf.decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers.get("Content-Type", ""), []
+    except Exception as e:  # noqa: BLE001
+        return 0, "", [("error", {"error": type(e).__name__})]
+    if not ct.startswith("text/event-stream"):
+        return status, ct, []
+    for frame in text.split("\n\n"):
+        ev, data_line = "message", ""
+        for ln in frame.split("\n"):
+            if ln.startswith("event:"):
+                ev = ln[6:].strip()
+            elif ln.startswith("data:"):
+                data_line += ln[5:].strip()
+        if data_line:
+            try:
+                events.append((ev, json.loads(data_line)))
+            except ValueError:
+                continue
+    return status, ct, events
+
+
 def main() -> int:
     tok_m = re.search(r"(?m)^WEB_TOKEN=(\S+)$", SECRETS.read_text()) if SECRETS.exists() else None
     token = tok_m.group(1) if tok_m else None
@@ -217,6 +260,61 @@ def main() -> int:
         print("INFO  /api/say: voice engine not installed — 503 as designed")
     else:
         check("POST /api/say synth -> mp3", False, f"got {s} ct={ct} body={body[:80]!r}")
+
+    # --- console chat (B1): gate first, then shape, then a live model turn ---
+    s, body = post("/api/chat", {"text": "hi"}, None)
+    check("POST /api/chat no token -> 401", s == 401, f"got {s}")
+    s, hist = get("/api/chat/history")
+    check("GET /api/chat/history shape",
+          s == 200 and isinstance(hist, dict)
+          and isinstance(hist.get("messages"), list)
+          and isinstance(hist.get("count"), int)
+          and all(m.get("role") in ("user", "assistant")
+                  and isinstance(m.get("content"), str)
+                  for m in hist.get("messages", [])),
+          f"got {s} {str(hist)[:120]}")
+    if token:
+        s, body = post("/api/chat", {"text": "   "}, token)
+        check("POST /api/chat blank text -> 400", s == 400, f"got {s} {body}")
+        s, body = post("/api/chat", {"text": "x" * 4001}, token)
+        check("POST /api/chat overlong text -> 400", s == 400, f"got {s} {body}")
+        s, body = post("/api/chat", {"action": "nope"}, token)
+        check("POST /api/chat unknown action -> 400",
+              s == 400 and isinstance(body, dict) and "details" in body,
+              f"got {s} {body}")
+        # live model over SSE: >=1 delta + an authoritative done frame.
+        # A red line here with the gateway up is a REAL signal, not flake.
+        s, ct, evs = post_sse("/api/chat",
+                              {"text": "Reply with exactly: pong"}, token)
+        kinds = [e for e, _ in evs]
+        done = next((d for e, d in evs if e == "done"), None)
+        check("POST /api/chat live model -> SSE stream",
+              s == 200 and ct.startswith("text/event-stream")
+              and kinds and kinds[0] == "meta", f"got {s} ct={ct} evs={kinds[:6]}")
+        check("POST /api/chat live model -> delta + done",
+              "delta" in kinds and "done" in kinds
+              and isinstance(done, dict)
+              and isinstance(done.get("text"), str)
+              and done.get("stop") in ("final", "max_iters", "model_error"),
+              f"kinds={kinds} done={str(done)[:120]}")
+        if isinstance(done, dict):
+            check("POST /api/chat done carries turn stats",
+                  isinstance(done.get("iterations"), int)
+                  and isinstance(done.get("tool_calls"), int),
+                  str({k: done.get(k) for k in ("iterations", "tool_calls")}))
+        # history grew by the live turn; then archive it (idempotent clear)
+        s, hist = get("/api/chat/history")
+        roles = [m["role"] for m in hist.get("messages", [])]
+        check("POST /api/chat turn persisted to the session",
+              s == 200 and roles.count("user") >= 1
+              and roles.count("assistant") >= 1, str(roles[-4:]))
+        s, body = post("/api/chat", {"action": "clear"}, token)
+        check("POST /api/chat clear archives the session",
+              s == 200 and isinstance(body, dict) and body.get("ok") is True
+              and isinstance(body.get("archived"), bool), f"got {s} {body}")
+        s, hist = get("/api/chat/history")
+        check("POST /api/chat clear empties history",
+              s == 200 and hist.get("count") == 0, str(hist)[:120])
 
     # --- auth gate ---
     s, body = post("/api/settings", {"sound": True}, None)

@@ -51,6 +51,7 @@ async function loadLang(lang) {
   });
   applyStaticText();
   renderStatus(); renderUsage(); renderVersion(); renderVoice();
+  chatBadge(chatBusy);            // badge label follows the active language
   refreshEventTexts();
 }
 
@@ -599,7 +600,7 @@ function renderEvolution() {
   badge.className = "evo-badge " + (evoData.enabled ? "on" : "off");
   let line = t("evo.status", "cron daily {d} · weekly {w} · monthly day {m}")
     .replace("{d}", escapeHtml(sc.daily_at || "-"))
-    .replace("{w}", escapeHtml(sc.weekly_day || "-"))
+    .replace("{w}", escapeHtml(t("wd." + sc.weekly_day, sc.weekly_day || "-")))
     .replace("{m}", escapeHtml(String(sc.monthly_day === undefined ? "-" : sc.monthly_day)));
   if ((evoData.due_now || []).length) {
     line += " · " + t("evo.due", "due now: {p}").replace("{p}",
@@ -662,6 +663,163 @@ async function evoReflect() {
   const fb = body.created ? "draft → {p}" : "already drafted → {p}";
   evoMsg("ok", t(key, fb).replace("{p}", body.path));
   refreshEvolution();
+}
+
+/* --------------------------------------------------------------- chat ---- */
+let chatBusy = false;
+
+function chatNote(kind, text) {
+  const el = document.getElementById("chatMsg");
+  el.className = "chat-msg " + kind;
+  el.textContent = text;
+}
+
+function chatBadge(live) {
+  const el = document.getElementById("chatBadge");
+  el.textContent = live ? t("chat.live", "streaming") : t("chat.idle", "idle");
+  el.className = "chat-badge" + (live ? " live" : "");
+}
+
+function chatBubble(role, text) {
+  document.getElementById("chatEmpty")?.remove();
+  const row = document.createElement("div");
+  row.className = "chat-row " + role;
+  const b = document.createElement("div");
+  b.className = "chat-bubble";
+  b.textContent = text;
+  row.appendChild(b);
+  const log = document.getElementById("chatLog");
+  log.appendChild(row);
+  log.scrollTop = log.scrollHeight;
+  return b;
+}
+
+function chatToolLine(name) {   // tool activity as its own line above the live bubble
+  const log = document.getElementById("chatLog");
+  const el = document.createElement("div");
+  el.className = "chat-tools-row";
+  el.textContent = "⚙ " + name;
+  log.insertBefore(el, log.lastElementChild);
+  log.scrollTop = log.scrollHeight;
+}
+
+async function loadChatHistory() {
+  try {
+    const h = await fetch("/api/chat/history").then(r => r.json());
+    const msgs = (h.messages || []).slice(-40);
+    if (!msgs.length) return;
+    document.getElementById("chatEmpty")?.remove();
+    for (const m of msgs) chatBubble(m.role, m.content);
+  } catch (e) { /* empty state stays */ }
+}
+
+async function chatSend() {
+  const input = document.getElementById("chatInput");
+  const text = input.value.trim();
+  if (!text || chatBusy) return;
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) { chatNote("err", t("chat.needToken", "access token required")); return; }
+  chatNote("", "");
+  input.value = "";
+  chatBusy = true;
+  input.disabled = true;
+  chatBadge(true);
+  chatBubble("user", text);
+  const bubble = chatBubble("assistant", "");
+  bubble.classList.add("pending");
+  let acc = "";
+  let meta = null;
+  const handle = (ev, data) => {
+    if (ev === "delta") {
+      acc += data.text || "";
+      bubble.textContent = acc;
+      const log = document.getElementById("chatLog");
+      log.scrollTop = log.scrollHeight;
+    } else if (ev === "tool") {
+      chatToolLine(data.name || "?");
+    } else if (ev === "done") {
+      meta = data;
+    } else if (ev === "error") {
+      chatNote("err", t("chat.err", "stream failed — retry"));
+    }
+  };
+  try {
+    const res = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify({ text }) });
+    if (!res.ok) {                       // 401/400 answered before the stream
+      const body = await res.json().catch(() => ({}));
+      chatNote("err", res.status === 401
+        ? t("chat.badToken", "401 · unauthorized")
+        : ((body.details || [body.error || "error"])[0] + ""));
+      bubble.remove();
+      return;
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n\n")) >= 0) {
+        const frame = buf.slice(0, i); buf = buf.slice(i + 2);
+        let ev = "message", data = "";
+        for (const ln of frame.split("\n")) {
+          if (ln.startsWith("event:")) ev = ln.slice(6).trim();
+          else if (ln.startsWith("data:")) data += ln.slice(5).trim();
+        }
+        try { handle(ev, JSON.parse(data)); } catch (e) { /* skip frame */ }
+      }
+    }
+    if (meta && typeof meta.text === "string") {
+      bubble.textContent = meta.text;          // authoritative replace
+      document.getElementById("chatMeta").textContent =
+        t("chat.meta", "{i} iterations · {t} tool calls")
+          .replace("{i}", meta.iterations).replace("{t}", meta.tool_calls);
+      if (!meta.text.trim()) bubble.textContent = t("chat.noOutput", "(no output)");
+    } else if (!acc) {
+      bubble.textContent = t("chat.noOutput", "(no output)");
+    }
+  } catch (e) {
+    chatNote("err", t("chat.err", "stream failed — retry"));
+    if (!acc) bubble.remove();
+  } finally {
+    bubble.classList.remove("pending");
+    chatBusy = false;
+    input.disabled = false;
+    input.focus();
+    chatBadge(false);
+  }
+}
+
+async function chatClear() {
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) { chatNote("err", t("chat.needToken", "access token required")); return; }
+  try {
+    const res = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify({ action: "clear" }) });
+    if (res.status === 401) {
+      chatNote("err", t("chat.badToken", "401 · unauthorized")); return;
+    }
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !body.ok) {
+      chatNote("err", t("chat.err", "stream failed — retry")); return;
+    }
+    document.getElementById("chatLog").innerHTML =
+      `<div class="chat-empty" id="chatEmpty">${escapeHtml(t("chat.empty", "no messages yet"))}</div>`;
+    document.getElementById("chatMeta").textContent = "";
+    chatNote("ok", body.archived ? t("chat.cleared", "session archived")
+                                 : t("chat.empty", "no messages yet"));
+  } catch (e) {
+    chatNote("err", t("chat.err", "stream failed — retry"));
+  }
 }
 
 /* ------------------------------------------------------------ tool strip -- */
@@ -871,6 +1029,11 @@ if (voiceVolEl) voiceVolEl.addEventListener("input", e => {
 const voiceOrbEl = document.getElementById("voiceOrb");
 if (voiceOrbEl) voiceOrbEl.addEventListener("click", () => armVoice());
 document.getElementById("saveBtn").addEventListener("click", saveSettings);
+document.getElementById("chatSend").addEventListener("click", chatSend);
+document.getElementById("chatClear").addEventListener("click", chatClear);
+document.getElementById("chatInput").addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); chatSend(); }
+});
 document.getElementById("evoLearnBtn").addEventListener("click", evoLearn);
 document.getElementById("evoReflectBtn").addEventListener("click", evoReflect);
 document.getElementById("evoKind").addEventListener("change", e => {
@@ -888,12 +1051,13 @@ document.getElementById("alertSelect").addEventListener("change", e => {
   if (statusData) applyAlert(statusData.advisory);
 });
 
-const startLang = localStorage.getItem(LANG_KEY) || QS_LANG || "en";
+const startLang = QS_LANG || localStorage.getItem(LANG_KEY) || "en";
 runBoot();
 loadLang(startLang);
 loadSettings().then(() => { scheduleRefresh(); renderVoice(); });
 refreshStatus(); refreshUsage(); refreshEvents(); refreshVersion(); refreshSkills();
 refreshEvolution();
+loadChatHistory();   // console session restored at boot (read-only route)
 refreshVoiceCap();   // engine status visible before the first orb tap (#4)
 setInterval(tickClock, 1000); tickClock();
 setInterval(refreshUsage, 60000);

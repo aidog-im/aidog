@@ -5,8 +5,15 @@
   "use strict";
 
   var LANG_KEY = "aidog.site.lang";
-  var lang = null;
-  try { lang = localStorage.getItem(LANG_KEY); } catch (e) { /* private mode */ }
+  var qsLang = null;        // ?lang=en|zh — one-off shareable override
+  try {
+    var m = location.search.match(/[?&]lang=(en|zh)\b/);
+    if (m) qsLang = m[1];
+  } catch (e) { /* ignore */ }
+  var lang = qsLang;
+  if (!lang) {
+    try { lang = localStorage.getItem(LANG_KEY); } catch (e) { /* private mode */ }
+  }
   if (lang !== "en" && lang !== "zh") lang = "en";
 
   var dicts = {};           // cache: lang -> {key: value}
@@ -45,6 +52,13 @@
   var langBtn = document.getElementById("langBtn");
   if (langBtn) langBtn.addEventListener("click", function () {
     setLang(lang === "en" ? "zh" : "en");
+    // keep the URL shareable: sync ?lang= on an explicit toggle only
+    // (a plain visit must never rewrite the address bar)
+    try {
+      var url = new URL(location.href);
+      url.searchParams.set("lang", lang);
+      history.replaceState(null, "", url.pathname + url.search + url.hash);
+    } catch (e) { /* file:// or ancient browser: state only */ }
   });
   setLang(lang); // en by default; applies JSON over the inline English defaults
 
