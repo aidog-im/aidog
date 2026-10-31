@@ -22,6 +22,11 @@
 #
 # Usage:
 #   bash deploy/install.sh     # from a clone of the product repository
+#   bash deploy/install.sh --check
+#                               # REPORT ONLY: same status logic below, zero
+#                               # writes (no provisioning, no CLI install, no
+#                               # boot, no logs), same 0/2/1 semantics as
+#                               # `aidog setup --check`
 #   aidog setup                # interactive wizard (fill slots, then boot +
 #                              # verify); --check status, --yes = this script
 #
@@ -33,6 +38,13 @@ cd "$REPO" || exit 1
 
 WEB_PORT="${AIDOG_WEB_PORT:-8790}"
 PENDING=0
+
+# --check: report-only mode (T-3 delivery gap). Only this flag is parsed;
+# every other argv (notably --yes) keeps the exact pre-existing behavior.
+CHECK_ONLY=0
+for arg in "$@"; do
+  [ "$arg" = "--check" ] && CHECK_ONLY=1
+done
 
 say()  { printf '[install] %s\n' "$*"; }
 step() { printf '\n[install] == %s\n' "$*"; }
@@ -65,7 +77,11 @@ elif [ -n "$code" ] && [ "$code" != "000" ]; then
 fi
 
 # ----------------------------------------------------------- provision ----
-step "machine-local files (created only when missing)"
+if [ "$CHECK_ONLY" = 1 ]; then
+  step "machine-local files (report only — --check never writes)"
+else
+  step "machine-local files (created only when missing)"
+fi
 # Copies a template to a machine-local (gitignored) path if absent.
 provision() {
   local dst="$1" src="$2"
@@ -77,14 +93,27 @@ provision() {
     cp "$src" "$dst" && note "created: $dst"
   fi
 }
-provision secrets.env                secrets.env.example
-provision deploy/watchdog.local      deploy/watchdog.local.example
-provision deploy/watchdog.mycore.local deploy/watchdog.mycore.example.json
-provision web/settings.json          web/settings.example.json
+if [ "$CHECK_ONLY" = 1 ]; then
+  # report only: never cp/chmod — an absent machine-local file is pending.
+  for dst in secrets.env deploy/watchdog.local deploy/watchdog.mycore.local \
+             web/settings.json; do
+    if [ -e "$dst" ]; then
+      note "present: $dst"
+    else
+      note "absent: $dst (--check never creates it; run without --check)"
+      PENDING=1
+    fi
+  done
+else
+  provision secrets.env                secrets.env.example
+  provision deploy/watchdog.local      deploy/watchdog.local.example
+  provision deploy/watchdog.mycore.local deploy/watchdog.mycore.example.json
+  provision web/settings.json          web/settings.example.json
+fi
 # deploy/memory_sources.local is deliberately NOT created: its template ships
 # placeholder paths (/path/to/...) which would break the memory chain — the
 # chain falls back to its documented defaults when the file is absent.
-if [ -f secrets.env ]; then
+if [ "$CHECK_ONLY" = 0 ] && [ -f secrets.env ]; then
   chmod 600 secrets.env 2>/dev/null || true   # 9p/CIFS mounts reject chmod (harmless there)
 fi
 # credentials whose value a human must supply (names only — never values).
@@ -118,15 +147,29 @@ fi
 
 # ----------------------------------------------------------------- cli ----
 step "CLI"
-if bash deploy/install_cli.sh; then
+if [ "$CHECK_ONLY" = 1 ]; then
+  # report only: never installs (no writes), and a PATH miss is NOT pending —
+  # a fresh shell may simply need its PATH refreshed after a real install.
+  if command -v aidog >/dev/null 2>&1; then
+    note "aidog command installed ($(command -v aidog))"
+  else
+    note "aidog command not on PATH (--check never installs: bash deploy/install_cli.sh)"
+  fi
+elif bash deploy/install_cli.sh; then
   note "aidog command installed ($(command -v aidog 2>/dev/null || echo 'path refreshed — open a new shell'))"
 else
   echo "[install] FAIL: CLI install failed" >&2; exit 1
 fi
 
 # ----------------------------------------------------------------- boot ----
-step "boot runtime (console + chat service + watchdog)"
-if ! bash deploy/boot_services.sh start; then
+if [ "$CHECK_ONLY" = 1 ]; then
+  step "boot runtime (report only — --check never starts anything)"
+else
+  step "boot runtime (console + chat service + watchdog)"
+fi
+if [ "$CHECK_ONLY" = 1 ]; then
+  note "--check: boot skipped (report only — nothing is started or written)"
+elif ! bash deploy/boot_services.sh start; then
   echo "[install] FAIL: boot_services start failed — see its output above" >&2
   exit 1
 fi
@@ -137,7 +180,12 @@ step "verify"
 if [ "$(curl -s -o /dev/null -m 3 -w '%{http_code}' "http://127.0.0.1:$WEB_PORT/api/health" || true)" = "200" ]; then
   note "web console http://127.0.0.1:$WEB_PORT/api/health -> ok"
 else
-  note "FAIL: web console not healthy"; PENDING=1
+  if [ "$CHECK_ONLY" = 1 ]; then
+    note "web console not running (--check does not boot; bash deploy/boot_services.sh start)"
+  else
+    note "FAIL: web console not healthy"
+  fi
+  PENDING=1
 fi
 # 2) chat service readiness (rc: 0 ready / 3 no allowlist / 4 no token / 2 wiring)
 bash deploy/run_service.sh --check; rc=$?
@@ -171,23 +219,38 @@ fi
 # 4) doctor — run bare, capture the rc directly (never through a pipe).
 # The watchdog persists supervision state at the end of its first cycle;
 # wait briefly so a fresh install's doctor run does not race that write.
-for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-  [ -f deploy/watchdog.mycore.local.state.json ] && break
-  sleep 1
-done
-mkdir -p data
-python3 deploy/aidog_doctor.py > data/install_doctor.log 2>&1; doctor_rc=$?
-note "doctor exit=$doctor_rc — full report: data/install_doctor.log"
-tail -n 1 data/install_doctor.log 2>/dev/null | sed 's/^/[install]   /'
+# --check never waits (no boot was run) and never writes the log file.
+if [ "$CHECK_ONLY" = 0 ]; then
+  for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    [ -f deploy/watchdog.mycore.local.state.json ] && break
+    sleep 1
+  done
+fi
+if [ "$CHECK_ONLY" = 1 ]; then
+  doctor_out="$(python3 deploy/aidog_doctor.py 2>&1)"; doctor_rc=$?
+  note "doctor exit=$doctor_rc (--check: full report not written to disk)"
+  printf '%s\n' "$doctor_out" | tail -n 1 | sed 's/^/[install]   /'
+else
+  mkdir -p data
+  python3 deploy/aidog_doctor.py > data/install_doctor.log 2>&1; doctor_rc=$?
+  note "doctor exit=$doctor_rc — full report: data/install_doctor.log"
+  tail -n 1 data/install_doctor.log 2>/dev/null | sed 's/^/[install]   /'
+fi
 
 # ----------------------------------------------------------------- done ----
 step "result"
 if [ "$doctor_rc" -eq 0 ] && [ "$PENDING" -eq 0 ]; then
   say "READY — everything provisioned and green."
   say "chat with your bot via Telegram (see docs/installation.md), console: http://127.0.0.1:$WEB_PORT"
+  [ "$CHECK_ONLY" = 1 ] && say "--check: report only — nothing was written, installed or booted."
   exit 0
 else
-  say "INSTALLED — pending items above (fail-closed by design, nothing broken)."
-  say "fill the listed slots in secrets.env / settings, then re-run:  aidog setup"
+  if [ "$CHECK_ONLY" = 1 ]; then
+    say "PENDING — items above are missing/incomplete (fail-closed; --check wrote nothing)."
+    say "fill the listed slots in secrets.env / settings, then run:  aidog setup"
+  else
+    say "INSTALLED — pending items above (fail-closed by design, nothing broken)."
+    say "fill the listed slots in secrets.env / settings, then re-run:  aidog setup"
+  fi
   exit 2
 fi

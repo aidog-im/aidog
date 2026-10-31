@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/aidog-im/aidog/releases"><img src="https://img.shields.io/github/v/release/aidog-im/aidog?display_name=tag&sort=semver&style=flat-square&label=release" alt="latest release"></a>
+  <a href="https://github.com/aidog-im/aidog/releases"><img src="https://img.shields.io/badge/release-0.5.42-blue?style=flat-square" alt="release 0.5.42"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
   <img src="https://img.shields.io/badge/core_tests-1180%2F1180-brightgreen?style=flat-square" alt="core tests 1180/1180">
   <img src="https://img.shields.io/badge/console_smoke-234%2F234-brightgreen?style=flat-square" alt="console smoke 234/234">
@@ -29,6 +29,9 @@
   <a href="#quality-gates">Quality Gates</a> ·
   <a href="#documentation">Documentation</a> ·
   <a href="#roadmap">Roadmap</a> ·
+  <a href="#versioning--updates">Versioning</a> ·
+  <a href="#security-posture-honest">Security</a> ·
+  <a href="#license--pricing-owner-decree">License</a> ·
   <a href="README_cn.md">简体中文</a>
 </p>
 
@@ -60,9 +63,18 @@ skills with a deterministic pre-router, natural-language scheduling,
 subagents, MCP, and an institutional self-evolution loop (`/learn`,
 `/reflect`, lint-gated writes) whose maturity grows with use.
 
-Everything is **free by decree**: no subscription, no telemetry, no paid
-feature gate. You bring a model key (or use the zero-key trial path) and the
-whole product activates.
+**Web3, gated by a human.** Since v0.5.38 nine venues live in one catalog
+behind six `exchange_*` tools — public market data needs no credential,
+account and order tools are slot-gated (no slot → tool does not register).
+Every order runs `prepare` (dry-run plan) → the owner approves it in the
+console → `execute(plan_id)`; caps default to `0`, market orders never
+auto-approve, and withdrawals / on-chain transfers do not exist in the
+code at all.
+
+Everything is **free by decree**: no subscription, no paid feature gate,
+and **no telemetry in the product runtime** — the only counting anywhere is
+the marketing site's public visit counter, documented as such. You bring a
+model key (or use the zero-key trial path) and the whole product activates.
 
 ## Highlights
 
@@ -75,14 +87,16 @@ whole product activates.
 | ⏰ | **Natural-language cron** | `/cron ship the report tomorrow 9am` → parsed, validated, scheduled — fail-closed until you enable it |
 | 🤝 | **Subagents & execute_code** | ≤3 isolated parallel delegates with fresh context; ≤8-step folded code runs with checkpointed writes |
 | 🔌 | **MCP client** | stdio + HTTP servers, tool allow/deny filtering, credential slots, progress streaming |
-| 📡 | **9-route gateway** | Telegram (live) + Discord / Slack / Email / Webhook / DingTalk / Feishu / WeChat / WhatsApp / Signal adapters with per-route honest status |
+| 🔗 | **Web3 exchange, approval gate** | **9 venues** in one catalog behind **six `exchange_*` tools** — market data keyless, account/order tools slot-gated (no slot → tool not registered); `prepare` (dry-run plan) → owner approves in the console → `execute(plan_id)` — caps default `0`, market orders **never** auto-approve, withdrawals & on-chain transfers **absent by construction** |
+| 📡 | **Channel gateway** | **9 adapter routes + live Telegram** — Discord / Slack / Email / Webhook / DingTalk / Feishu / WeChat / WhatsApp / Signal adapters with per-route honest status |
 | 🔑 | **Zero-key onboarding** | Start with a trial model or bring your own key; secrets live in `secrets.env` (0600) and are **never echoed** — slot names only |
 | 💬 | **Streaming everywhere** | Provider SSE streaming, Telegram typing heartbeat, console chat cards with streamed replies |
-| 🖥️ | **Loopback web console** | Status · Settings · Usage & cost · Events · Voice panels — bound to `127.0.0.1` by default, token-gated writes |
+| ⚡ | **Local & portable** | stdlib-only core (voice/image extras lazy-load), service bound to local loopback, SSE streaming throughout, `execute_code` folds multi-step runs into one round trip |
+| 🖥️ | **Loopback web console** | Seven views — Overview · Chat · Skills · Exchange · Evolution · Stream · Settings (Usage & cost and Voice are cards): activation checklist with fix deep-links, credential slot editor (32 slots — names + lengths only, values never rendered), cron list with delete, capability grid, channel forms with send test, hooks editor, evolution schedule, Web3 caps — bound to `127.0.0.1`, token-gated writes |
 | 🖼️ | **Media built in** | Local STT voice sessions with fuzzy wake phrases, TTS announcements, BYOK image generation, Telegram photo send |
 | 🖥️ | **Desktop HUD shell** | Electron frameless shell: transparency slider, always-on-top, tray — Linux packaging verified (Win/macOS not built yet, honestly) |
 | 👥 | **Multi-profile isolation** | `AIDOG_PROFILE` selects fully isolated profiles (settings / secrets / state / body) — 63/63 isolation gate + 18-leg real-machine E2E |
-| 🩺 | **Self-healing ops** | `aidog doctor` health checks, restart watchdog, one-command upgrades with a dirty-tree guard |
+| 🩺 | **Self-healing ops** | `aidog doctor` health checks + a one-click **Run doctor** button in the console, restart watchdog, one-command upgrades with a dirty-tree guard, plus in-console **restart / update check / update apply** controls |
 | 🆓 | **Permanently free** | Owner decree: zero paid touchpoints in product, docs, or packages — introducing one is treated as a defect |
 
 ## Architecture
@@ -96,7 +110,8 @@ whole product activates.
 ┌──────────────────────────────▼────────────────────────────────────┐
 │  Kernel layer — mycore (self-developed, replaceable, zero upstream)│
 │   loop · tools · memory · compact · scheduler · subagents · mcp    │
-│   checkpoint · modeltier · channels(9) · stt/imagegen · browser     │
+│   checkpoint · modeltier · channels(9) · exchanges                 │
+│   stt/imagegen · browser                                           │
 └──────────────────────────────┬────────────────────────────────────┘
                                │
 ┌──────────────────────────────▼────────────────────────────────────┐
@@ -114,6 +129,10 @@ Three-layer separation is the whole point: **swap the core, never swap
 "me". The kernel is replaceable, the body layer and business assets are ours.
 
 ## Quick Start
+
+> 🔒 **Private repo:** `git clone` needs a PAT or SSH key with repo access —
+> beware a machine-wide `credential.helper` hijacking GitHub auth. See
+> [`docs/installation.md`](docs/installation.md).
 
 ```bash
 git clone https://github.com/aidog-im/aidog.git aidog && cd aidog  # private repo today
@@ -158,10 +177,11 @@ bash deploy/run_service.sh --check   # readiness rc=0
 python3 deploy/aidog_update.py check # version channel: up to date
 ```
 
-Walk the console panels (Status → Settings round-trip → Usage → Events →
-chat card), send a Telegram `/help`, and confirm you never see a raw secret
-anywhere. The complete checklist — including a fresh-machine install path —
-lives in **[`docs/manual_verification.md`](docs/manual_verification.md)**.
+Walk the console views (Overview → Settings round-trip → chat card →
+Stream → Exchange → Evolution), send a Telegram `/help`, and confirm you
+never see a raw secret anywhere. The complete checklist — including a
+fresh-machine install path — lives in
+**[`docs/manual_verification.md`](docs/manual_verification.md)**.
 
 ## Quality Gates
 
@@ -180,6 +200,9 @@ Every release is cut only after these run green on a clean tree:
 | Publish gate (deny-by-default manifest) | **READY** |
 | Real-machine E2E | profiles **18/18** · channels **8/8** · domestic channels **44/44** · pipeline **35/35** · web3 read-only **33/33** · web3 approval **61/61** · frontend coverage **62/62** · frontend UI **33/33** · activation **81/81** · activation UI **50/50** · settings matrix **57/57** + UI **17/17** |
 
+Catalog scope: **25 registered tools** · **9 exchange venues** · **12
+real-machine E2E legs** — all green.
+
 Locale packs: `en` (default) + `zh`, **536 keys** each, parity lint in CI;
 the marketing site ships its own **216-key** bilingual pack.
 
@@ -196,16 +219,27 @@ the marketing site ships its own **216-key** bilingual pack.
 - **[aidog.im](https://aidog.im)** — product site (bilingual, PWA,
   AI-readable `llms.txt`)
 
+**All 31 at a glance** (grouped, one line per group):
+
+- **Agent loop & tools** — [`acp`](docs/features/acp.md) (ACP v1 stdio server) · [`openai_api_server`](docs/features/openai_api_server.md) (OpenAI-compatible `/v1` gateway) · [`terminal_backends`](docs/features/terminal_backends.md) (7-backend `run_bash` matrix) · [`execute_code`](docs/features/execute_code.md) · [`subagents`](docs/features/subagents.md) · [`mcp`](docs/features/mcp.md) · [`tool_toggles`](docs/features/tool_toggles.md) · [`browser_automation`](docs/features/browser_automation.md) · [`model_failover`](docs/features/model_failover.md)
+- **Knowledge & memory** — [`memory_and_routing`](docs/features/memory_and_routing.md) · [`checkpoints`](docs/features/checkpoints.md) · [`context_files`](docs/features/context_files.md) (project instruction files) · [`evolution_loop`](docs/features/evolution_loop.md) · [`connectors`](docs/features/connectors.md) (read-only Linear/Notion search)
+- **Channels & media** — [`channels`](docs/features/channels.md) · [`channels_domestic`](docs/features/channels_domestic.md) · [`console_chat`](docs/features/console_chat.md) · [`voice_session`](docs/features/voice_session.md) · [`voice_announcements`](docs/features/voice_announcements.md) · [`tts_engines`](docs/features/tts_engines.md) · [`image_generation`](docs/features/image_generation.md)
+- **Ops & console** — [`setup_wizard`](docs/features/setup_wizard.md) · [`frontend_coverage`](docs/features/frontend_coverage.md) · [`capabilities`](docs/features/capabilities.md) · [`desktop_client`](docs/features/desktop_client.md) · [`profiles`](docs/features/profiles.md) · [`site_visibility`](docs/features/site_visibility.md) · [`zero_key_onboarding`](docs/features/zero_key_onboarding.md) · [`natural_language_cron`](docs/features/natural_language_cron.md) · [`event_hooks`](docs/features/event_hooks.md)
+- **Web3** — [`exchanges`](docs/features/exchanges.md) (nine venues, orders behind a human approval gate)
+
 Design history and third-party research notes stay in the private tree by
 policy; they are not exported.
 
 ## Roadmap
 
-- **Now** — parity hardening and polish under owner acceptance; every
-  capability ships with tests and an honest boundary note.
-- **Next** — a **Web3 agent-control substrate** (payments-first HTTP
-  exploration, on-chain agent identity), researched and staged — execution
-  starts only on the owner's explicit go order.
+- **Now** — Web3 phase-2 is live: **W1 + W2 shipped in v0.5.38** (nine-venue
+  catalog, `prepare` → owner approval → `execute`); parity hardening and
+  polish continue under owner acceptance — every capability ships with tests
+  and an honest boundary note.
+- **Next** — the remaining Web3 stage (identity & payments: ERC-8004 on-chain
+  agent identity, x402 read-only paid calls, official MCP opt-in mounts),
+  researched and staged — execution starts only on the owner's explicit go
+  order.
 
 ## Versioning & Updates
 

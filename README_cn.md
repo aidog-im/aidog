@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/aidog-im/aidog/releases"><img src="https://img.shields.io/github/v/release/aidog-im/aidog?display_name=tag&sort=semver&style=flat-square&label=release" alt="latest release"></a>
+  <a href="https://github.com/aidog-im/aidog/releases"><img src="https://img.shields.io/badge/release-0.5.42-blue?style=flat-square" alt="release 0.5.42"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
   <img src="https://img.shields.io/badge/core_tests-1180%2F1180-brightgreen?style=flat-square" alt="核心测试 1180/1180">
   <img src="https://img.shields.io/badge/console_smoke-234%2F234-brightgreen?style=flat-square" alt="控制台冒烟 234/234">
@@ -27,6 +27,9 @@
   <a href="#质量闸">质量闸</a> ·
   <a href="#文档">文档</a> ·
   <a href="#路线图">路线图</a> ·
+  <a href="#版本与升级">版本</a> ·
+  <a href="#安全姿态如实">安全</a> ·
+  <a href="#许可与定价所有者法令">许可</a> ·
   <a href="README.md">English</a>
 </p>
 
@@ -35,8 +38,8 @@
 
 ## 关于
 
-I'm AiDog 是一个**跑在你自己机器上的个人具身 AI 伙伴**。它围绕三个大多数
-助手都省略的东西构建：
+I'm AiDog 是一个**跑在你自己机器上的个人具身 AI 伙伴**。它构建在三个
+被大多数助手忽略的信条之上：
 
 - **宪法即人格**：`SOUL.md` 位于每一轮回复上下文的最顶端。红线、语气、
   操作原则不是事后补的提示词——它们在**每一轮**都被强制执行。
@@ -52,28 +55,37 @@ I'm AiDog 是一个**跑在你自己机器上的个人具身 AI 伙伴**。它�
 子代理、MCP，以及制度化的自进化闭环（`/learn`、`/reflect`、lint 把关写入）
 ——成熟度随使用积累。
 
-**免费是宪法条款**：无订阅、无遥测、绝无付费功能门。你带上一个模型密钥
+**Web3，人在闸上。** 自 v0.5.38 起，9 家场所一表打尽，挂在六个
+`exchange_*` 工具之下——公开行情无需任何凭据，账户与下单工具槽位门控
+（槽未配置 → 工具根本不注册）。每笔订单都走 `prepare`（干跑存计划）→
+所有者在控制台批准 → `execute(plan_id)`；帽默认 `0`、市价单永不自动
+批准，提现与链上转账在代码层面根本不存在。
+
+**免费是宪法条款**：无订阅、绝无付费功能门、**产品运行时零遥测**——全站
+唯一的计数是官网公开的访问计数（已如实注明）。你带上一个模型密钥
 （或走零密钥试用路径），整个产品即刻激活。
 
 ## 核心能力
 
 |  | 能力 | 提供什么 |
 |---|---|---|
-| 🧬 | **自研核心** | `mycore`：诚实停止原因的 FC 循环、fail-closed 服务、看门狗、doctor 体检——28 模块、1180 测试、零上游 |
+| 🧬 | **自研核心** | `mycore`：诚实停止原因的 FC 循环、fail-closed（默认拒绝）服务、看门狗、doctor 体检——28 模块、1180 测试、零上游 |
 | 🎭 | **宪法人格** | `SOUL.md` 在系统栈最顶端；红线与语气每轮生效，而非抽样自人设提示词 |
 | 🧠 | **策展记忆** | 有界 Markdown 预算 + 归档分层 + 数字记忆体协议；`memory` 套件 58/58 |
 | 🧩 | **技能 + 确定性路由** | `SKILL.md` frontmatter（业界标准字段），路由预筛先选 TOP3 **再**加载正文——30/30 |
 | ⏰ | **自然语言定时** | `/cron 明早九点发周报` → 解析、校验、调度——默认 fail-closed 待启用 |
 | 🤝 | **子代理与 execute_code** | ≤3 个隔离上下文并行委派；≤8 步折叠代码执行，写前打检查点 |
 | 🔌 | **MCP 客户端** | stdio + HTTP 服务器、工具 allow/deny 过滤、凭据槽、进度流式透传 |
-| 📡 | **9 路渠道网关** | Telegram（实接）+ Discord / Slack / Email / Webhook / 钉钉 / 飞书 / 微信 / WhatsApp / Signal 适配器，逐路诚实状态 |
-| 🔑 | **零密钥 onboarding** | 试用模型起手或自带密钥；密钥只住 `secrets.env`（0600）且**绝不回显**——只报槽名 |
+| 🔗 | **Web3 交易所·人工审批闸** | 9 家场所一表、六个 `exchange_*` 工具——行情免凭据，账户/下单工具槽位门控（槽未配置 → 工具不注册）；`prepare`（干跑存计划）→ 所有者在控制台批准 → `execute(plan_id)`——帽默认 `0`、市价单**永不**自动批准，提现与链上转账**代码级不存在** |
+| 📡 | **渠道网关** | **9 路适配器路由 + 实接 Telegram**——Discord / Slack / Email / Webhook / 钉钉 / 飞书 / 微信 / WhatsApp / Signal 适配器，逐路诚实状态 |
+| 🔑 | **零密钥上手** | 试用模型起手或自带密钥；密钥只住 `secrets.env`（0600）且**绝不回显**——只报槽名 |
 | 💬 | **全链路流式** | 上游 SSE 流式、Telegram typing 心跳、控制台流式聊天卡片 |
-| 🖥️ | **回环 Web 控制台** | 状态 · 设置 · 用量成本 · 事件 · 语音 五面板——默认绑 `127.0.0.1`，写操作需令牌 |
+| ⚡ | **纯本地·可移植** | 核心仅用标准库（语音/图像为懒加载可选件），服务绑本地回环，SSE 流式贯穿全程，`execute_code` 把多步执行折叠成一轮往返 |
+| 🖥️ | **回环 Web 控制台** | 七个视图——总览 · 聊天 · 技能 · 交易所 · 自进化 · 实时流 · 设置（用量与语音是卡片）：带修复深链的激活清单、凭据槽编辑器（32 槽——只显槽名与长度，绝不渲染值）、可删除的 cron 列表、能力总览网格、渠道表单带发信测试、钩子编辑器、自进化排程、Web3 帽——默认绑 `127.0.0.1`，写操作需令牌 |
 | 🖼️ | **媒体内建** | 本地 STT 语音会话 + 模糊唤醒、TTS 播报、BYOK 图像生成、Telegram 发图 |
 | 🖥️ | **桌面 HUD 壳** | Electron 无边框壳：透明度滑杆、置顶、托盘——Linux 打包已实证（Win/macOS 暂未构建，如实） |
 | 👥 | **多 profile 全隔离** | `AIDOG_PROFILE` 选择完全隔离的档案（设置/密钥/状态/身体层）——隔离闸 63/63 + 真机 E2E 18 腿 |
-| 🩺 | **自愈运维** | `aidog doctor` 体检、重启看门狗、带脏树守卫的一键升级 |
+| 🩺 | **自愈运维** | `aidog doctor` 体检 + 控制台一键 **Run doctor** 按钮、重启看门狗、带脏树守卫的一键升级，另有控制台内**重启 / 检查更新 / 应用更新**控件 |
 | 🆓 | **永久免费** | 所有者法令：产品/文档/打包零付费触点——出现任何收费即视为缺陷 |
 
 ## 架构
@@ -87,7 +99,8 @@ I'm AiDog 是一个**跑在你自己机器上的个人具身 AI 伙伴**。它�
 ┌──────────────────────────────▼────────────────────────────────────┐
 │  内核层 — mycore（自研、可替换、零上游）                             │
 │   loop · tools · memory · compact · scheduler · subagents · mcp    │
-│   checkpoint · modeltier · channels(9) · stt/imagegen · browser     │
+│   checkpoint · modeltier · channels(9) · exchanges                 │
+│   stt/imagegen · browser                                           │
 └──────────────────────────────┬────────────────────────────────────┘
                                │
 ┌──────────────────────────────▼────────────────────────────────────┐
@@ -105,6 +118,10 @@ I'm AiDog 是一个**跑在你自己机器上的个人具身 AI 伙伴**。它�
 业务资产归我们所有。
 
 ## 快速开始
+
+> 🔒 **私有仓库：** `git clone` 需要带仓库权限的 PAT 或 SSH 密钥——注意
+> 机器级 `credential.helper` 可能劫持 GitHub 认证，详见
+> [`docs/installation.md`](docs/installation.md)。
 
 ```bash
 git clone https://github.com/aidog-im/aidog.git aidog && cd aidog  # 当前为私仓
@@ -145,9 +162,9 @@ bash deploy/run_service.sh --check   # 就绪 rc=0
 python3 deploy/aidog_update.py check # 版本通道：up to date
 ```
 
-逐个走控制台面板（状态 → 设置写读回环 → 用量 → 事件 → 聊天卡片），给
-Telegram 发一条 `/help`，并确认任何地方都看不到密钥原文。完整清单（含
-全新机器安装路径）见
+逐个走控制台视图（总览 → 设置写读回环 → 聊天卡片 → 实时流 → 交易所 →
+自进化），给 Telegram 发一条 `/help`，并确认任何地方都看不到密钥原文。
+完整清单（含全新机器安装路径）见
 **[`docs/manual_verification.md`](docs/manual_verification.md)**。
 
 ## 质量闸
@@ -167,26 +184,40 @@ Telegram 发一条 `/help`，并确认任何地方都看不到密钥原文。完
 | 发布闸（deny-by-default 清单） | **READY** |
 | 真机 E2E | profiles **18/18** · channels **8/8** · 国内渠道 **44/44** · 管线 **35/35** · web3 只读 **33/33** · web3 审批 **61/61** · 前端覆盖 **62/62** · 前端 UI **33/33** · 激活 **81/81** · 激活 UI **50/50** · 设置矩阵 **57/57** + UI **17/17** |
 
+目录规模：**25 个注册工具** · **9 家交易所场所** · **12 腿真机
+E2E**——全部全绿。
+
 语言包：`en`（默认）+ `zh` 各 **536 键**，parity lint 把关；官网另有
 **216 键**双语站包。
 
 ## 文档
 
 - [`docs/installation.md`](docs/installation.md) — 安装、槽位、向导
-- [`docs/features/`](docs/features/) — **31 份能力文档**，一件一档
+- [`docs/features/`](docs/features/) — **31 份能力文档**，一项能力一档
   （渠道、记忆、定时、子代理、MCP、语音、桌面、profile、工具开关……），
   每份都写明诚实边界
 - [`docs/manual_verification.md`](docs/manual_verification.md) — 人工验收清单
 - [`docs/security_checklist.md`](docs/security_checklist.md) — 安全审查清单
 - **[aidog.im](https://aidog.im)** — 产品官网（双语、PWA、AI 可读 `llms.txt`）
 
+**31 份一览**（分五组，每组一行）：
+
+- **代理循环与工具** — [`acp`](docs/features/acp.md)（ACP v1 stdio 服务器）· [`openai_api_server`](docs/features/openai_api_server.md)（OpenAI 兼容 `/v1` 网关）· [`terminal_backends`](docs/features/terminal_backends.md)（7 后端 `run_bash` 矩阵）· [`execute_code`](docs/features/execute_code.md) · [`subagents`](docs/features/subagents.md) · [`mcp`](docs/features/mcp.md) · [`tool_toggles`](docs/features/tool_toggles.md) · [`browser_automation`](docs/features/browser_automation.md) · [`model_failover`](docs/features/model_failover.md)
+- **知识与记忆** — [`memory_and_routing`](docs/features/memory_and_routing.md) · [`checkpoints`](docs/features/checkpoints.md) · [`context_files`](docs/features/context_files.md)（项目指令文件）· [`evolution_loop`](docs/features/evolution_loop.md) · [`connectors`](docs/features/connectors.md)（只读 Linear/Notion 搜索）
+- **渠道与媒体** — [`channels`](docs/features/channels.md) · [`channels_domestic`](docs/features/channels_domestic.md) · [`console_chat`](docs/features/console_chat.md) · [`voice_session`](docs/features/voice_session.md) · [`voice_announcements`](docs/features/voice_announcements.md) · [`tts_engines`](docs/features/tts_engines.md) · [`image_generation`](docs/features/image_generation.md)
+- **运维与控制台** — [`setup_wizard`](docs/features/setup_wizard.md) · [`frontend_coverage`](docs/features/frontend_coverage.md) · [`capabilities`](docs/features/capabilities.md) · [`desktop_client`](docs/features/desktop_client.md) · [`profiles`](docs/features/profiles.md) · [`site_visibility`](docs/features/site_visibility.md) · [`zero_key_onboarding`](docs/features/zero_key_onboarding.md) · [`natural_language_cron`](docs/features/natural_language_cron.md) · [`event_hooks`](docs/features/event_hooks.md)
+- **Web3** — [`exchanges`](docs/features/exchanges.md)（9 家场所，下单过人工审批闸）
+
 设计史与第三方调研笔记按政策留在私仓内，不随导出。
 
 ## 路线图
 
-- **当前**——所有者验收下的复刻收尾与打磨；每个能力都带测试与诚实边界。
-- **下一步**——**Web3 操控底座**（支付优先的 HTTP 探索、链上 agent 身份），
-  已调研预置——只等所有者明确启动令才执行。
+- **当前**——Web3 二期已上线：**W1 + W2 随 v0.5.38 交付**（9 家场所
+  目录、`prepare` → 所有者审批 → `execute`）；同时在所有者验收下做一致性
+  加固与打磨——每个能力都带测试与诚实边界。
+- **下一步**——Web3 剩余阶段（身份与支付：ERC-8004 链上 agent 身份、
+  x402 只读付费调用、官方 MCP opt-in 挂载），已调研预置——仍只在所有者
+  明确启动令后执行。
 
 ## 版本与升级
 
@@ -207,7 +238,7 @@ Telegram 发一条 `/help`，并确认任何地方都看不到密钥原文。完
 
 ## 语言 / 国际化
 
-- 源码、注释、Markdown 文档：**英文**（国际路线）；本文件是完整中文镜像。
+- 源码、注释、Markdown 文档：**英文**（国际路线）；本文件是完整中文镜像，英文原文见 [`README.md`](README.md)。
 - UI 字符串：`overlay/locales/` 语言包——默认 **`en`**，可切 **`zh`**，
   加语言 = 加包、零代码改动。
 

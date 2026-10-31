@@ -6430,6 +6430,16 @@ def test_imagegen() -> None:
     env_keys = ("AIDOG_IMAGE_URL", "IMAGE_API_KEY", "MODEL_API_KEY")
     saved_env = {k: os.environ.get(k) for k in env_keys}
     saved_settings = imagegen._settings
+    # T-2 (delivery acceptance): imagegen resolves its credential slot with
+    # its OWN module reader (process env -> <repo>/secrets.env), i.e. NOT the
+    # mycore.model._slot_key seam pinned suite-wide at module import above.
+    # On a host whose MODEL_API_KEY slot is filled (provisioned model key, or
+    # a clone acceptance run with a fake key) the two "remote w/o key" legs
+    # below would see a key and fail. Pin the file side out for THIS leg only
+    # (env stays real — the SENTINEL legs drive it); the suite-wide
+    # _SLOT_KEY_REAL mechanism above is untouched.
+    saved_slot = imagegen._slot
+    imagegen._slot = lambda name: os.environ.get(name, "").strip()
     mock = None
     created: list[Path] = []
     try:
@@ -6583,6 +6593,7 @@ def test_imagegen() -> None:
             check("imagegen: url reply leg downloads the image", False, str(e))
     finally:
         imagegen._settings = saved_settings
+        imagegen._slot = saved_slot          # T-2: restore the real reader
         for k, v in saved_env.items():
             if v is None:
                 os.environ.pop(k, None)
