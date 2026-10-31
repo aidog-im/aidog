@@ -129,7 +129,7 @@ implementations before coding — response shapes are never guessed)
 | scheduler origin | real `mycore.scheduler` CLI subprocess | `route:target` accepted and stored as a string origin; malformed form rejected rc=2 |
 
 E2E ran **before** release notes were finalized:
-`tmp/e2e_channels_dom.py` — **44 checks, rc=0, ALL VERIFIED** (settings +
+`tmp/e2e_channels_dom.py` — **46 checks, rc=0, ALL VERIFIED** (isolated profile +
 secrets snapshotted and restored byte-for-byte; tmp/ is gitignored).
 External connectivity against the real DingTalk/Feishu/WeChat services is
 **pending credentials** and is not claimed anywhere in the product surface.
@@ -144,7 +144,7 @@ External connectivity against the real DingTalk/Feishu/WeChat services is
   check counts are unchanged).
 - `tests/web_console_p3.py` — **87/87** (Phase C's 77 + 10: endpoint gates,
   new-partition validation, round-trip).
-- E2E: `tmp/e2e_channels_dom.py` (44 checks, byte-for-byte restore).
+- E2E: `tmp/e2e_channels_dom.py` (46 checks, isolated profile, production byte-identity guard).
 - **Console coverage (frontend car, 0.5.39)**: the domestic routes join the
   Settings `#chanList` form and the `#chanTest*` send test; their
   `CHANNEL_DINGTALK_*` / `CHANNEL_FEISHU_*` / `CHANNEL_WECHAT_*` slots are

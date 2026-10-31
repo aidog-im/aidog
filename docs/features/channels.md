@@ -157,7 +157,7 @@ G car (v0.5.32) added `test_channels_wa_signal` — current run.py total
 - `tests/web_console_p3.py` — 13 channel-side checks (status endpoint,
   settings partition validation, webhook gates, settings restore, plus the
   §9 whatsapp/signal validation legs).
-- E2E script: `tmp/e2e_channels.py` (8 checks, restores settings/secrets
+- E2E script: `tmp/e2e_channels.py` (12 checks, isolated profile with production byte-identity guard
   byte-for-byte; tmp/ is gitignored).
 - **Console coverage (frontend car, 0.5.39)**: Settings now carries the
   9-route form `#chanList` (toggle + fields per route) and the send test

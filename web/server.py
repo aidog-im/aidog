@@ -2364,19 +2364,35 @@ def _run_webhook_turn(text: str, sender: str):
 def collect_channels() -> dict:
     """GET /api/channels — adapter status rows, honestly degraded to an empty
     list plus a note when the channel module is not importable (still in
-    development) or violates its contract. Never fabricates rows."""
+    development) or violates its contract. Never fabricates rows.
+    Every row additionally carries `inbound_health` —
+    {healthy: true|false|null, last_ok_age_sec, consec_fails, cursor} — the
+    E3 poll-health view (null = never polled / unreadable = honest unknown,
+    never a guessed false). The field is OMITTED entirely when the health
+    read fails (shape-hide: the console shows nothing rather than a lie);
+    existing row fields are never altered."""
     try:
         from mycore import channels as _channels
     except Exception as e:  # noqa: BLE001 — module may not exist yet
         sys.stderr.write(f"channels status unavailable err={type(e).__name__}\n")
         return {"channels": [], "note": "channel module unavailable"}
     try:
-        rows = _channels.status(load_settings(), REPO)
+        settings = load_settings()
+        rows = _channels.status(settings, REPO)
     except Exception as e:  # noqa: BLE001 — status must never take the console down
         sys.stderr.write(f"channels status failed err={type(e).__name__}\n")
         return {"channels": [], "note": "channel status unavailable"}
     if not isinstance(rows, list):
         return {"channels": [], "note": "channel status unavailable"}
+    try:
+        health = _channels.inbound_health_map(settings, REPO)
+    except Exception:  # noqa: BLE001 — honest absence, rows stay untouched
+        health = {}
+    if isinstance(health, dict):
+        for row in rows:
+            view = health.get(row.get("name")) if isinstance(row, dict) else None
+            if isinstance(view, dict):
+                row["inbound_health"] = view
     return {"channels": rows}
 
 

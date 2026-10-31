@@ -2625,6 +2625,13 @@ function renderChannels() {
     head.appendChild(nm);
     head.appendChild(chip);
     blk.appendChild(head);
+    /* Lane N (E3): inbound poll-health note — hidden until paintChanChips
+       sees an object `inbound_health` (shape-hide when absent). */
+    const note = document.createElement("div");
+    note.className = "stat-note chan-inbound";
+    note.dataset.chanInbound = route;
+    note.hidden = true;
+    blk.appendChild(note);
     CHAN_SCHEMA[route].forEach(([key, kind]) =>
       blk.appendChild(chanField(key, kind, sub[key])));
     list.appendChild(blk);
@@ -2647,6 +2654,59 @@ function paintChanChips() {
       (row.configured ? t("chan.st.configured", "configured")
                       : t("chan.st.unconfigured", "not configured"));
     chip.title = row.note ? String(row.note) : "";   // server note, verbatim
+  });
+  paintInboundNotes();
+}
+
+/* Lane N (E3): channel-row inbound poll-health note. Shape-hide discipline —
+   a row without an object `inbound_health` (old backend / health read
+   failed) and an outbound-only route (inbound:false) show nothing: honest
+   absence beats a guessed status. States come from the server verbatim:
+   healthy+cursor (green), healthy without cursor (amber, says both),
+   consecutive failures (red, exact count), never polled (neutral gray). */
+function inboundAgeText(sec) {
+  const n = Math.round(Number(sec));
+  if (!Number.isFinite(n) || n < 0) return null;
+  return n < 60 ? n + "s"
+    : n < 3600 ? Math.round(n / 60) + "m"
+    : Math.round(n / 3600) + "h";
+}
+
+function paintInboundNotes() {
+  document.querySelectorAll("#chanList [data-chan-inbound]").forEach(note => {
+    const route = note.dataset.chanInbound;
+    const row = chanStatusRows.find(r => r && String(r.name) === route);
+    const h = (row && typeof row.inbound_health === "object"
+               && row.inbound_health !== null) ? row.inbound_health : null;
+    note.classList.remove("in-ok", "in-bad", "in-warn", "in-unknown");
+    if (!h || !row || row.inbound === false) {
+      note.hidden = true; note.textContent = ""; return;
+    }
+    const healthy = h.healthy;
+    const nRaw = Number(h.consec_fails);
+    const fails = Number.isFinite(nRaw) && nRaw > 0 ? Math.trunc(nRaw) : 0;
+    const age = inboundAgeText(h.last_ok_age_sec);
+    let text, cls;
+    if (healthy === false) {
+      text = t("chan.inbound.fail", "inbound: {n} consecutive failures")
+        .replace("{n}", String(fails));
+      cls = "in-bad";
+    } else if (healthy === true && age !== null && h.cursor) {
+      text = t("chan.inbound.ok", "inbound: healthy \u00b7 {age} ago")
+        .replace("{age}", age);
+      cls = "in-ok";
+    } else if (healthy === true && age !== null) {
+      text = t("chan.inbound.nocursor",
+               "inbound: healthy \u00b7 {age} ago \u00b7 no cursor yet")
+        .replace("{age}", age);
+      cls = "in-warn";
+    } else {
+      text = t("chan.inbound.never", "inbound: not polled yet");
+      cls = "in-unknown";
+    }
+    note.hidden = false;
+    note.classList.add(cls);
+    note.textContent = text;
   });
 }
 

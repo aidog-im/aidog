@@ -54,6 +54,16 @@ Cursor state: <state>/channels/<route>.cursor (JSON). The state root comes
 from settings["state_dir"], else env AIDOG_MC_STATE, else
 <repo>/data/mycore_service — the same convention as mycore.service.state_dir().
 
+Health state: <state>/channels/<route>.health (JSON, same directory and
+naming as the cursor) — {last_ok_ts, last_fail_ts, consec_fails} in epoch
+seconds, written atomically (temp + os.replace) on every attempted poll:
+a success stamps last_ok_ts and clears consec_fails, a failure stamps
+last_fail_ts and increments it. A missing file means "never polled" (honest
+unknown), corrupt JSON reads back as unknown, and a failed health write
+costs one sanitized CHANNEL_HEALTH_FAIL line — it never breaks the
+never-raise poll contract. Only timestamps and counters live in the file:
+no credential, no message body, no sender.
+
 Inbound allowlisting is the SERVICE layer's job (fail-closed there); the
 adapters only report what arrived. First poll on a fresh cursor delivers the
 current recent batch (no replay guard); every later poll is strictly
@@ -366,6 +376,95 @@ class Channel:
             # Path/type only — an OSError message can embed file contents.
             self._log("CURSOR_FAIL", f"type={type(e).__name__}")
 
+    # ------------------------------------------------------------- health ---
+    def _health_path(self) -> Path:
+        return self.state / "channels" / f"{self.name}.health"
+
+    def _load_health(self) -> dict | None:
+        """Last poll health record, or None when there is none (never
+        polled) or it cannot be trusted — corrupt JSON is honest unknown,
+        never a guessed value."""
+        try:
+            raw = self._health_path().read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        if not raw:
+            return None
+        try:
+            doc = json.loads(raw)
+        except ValueError:
+            return None
+        return doc if isinstance(doc, dict) else None
+
+    def _record_health(self, ok: bool) -> None:
+        """Persist one poll outcome into the health sidecar (atomic
+        temp + os.replace, cursor naming convention). Success stamps
+        last_ok_ts and clears consec_fails; failure stamps last_fail_ts and
+        increments it. Never raises: a write failure (bad path, full disk,
+        a directory squatting on the file) costs one sanitized
+        HEALTH_FAIL line so the poll contract stays crash-free."""
+        try:
+            path = self._health_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            doc = self._load_health()
+            if not isinstance(doc, dict):
+                doc = {"last_ok_ts": None, "last_fail_ts": None,
+                       "consec_fails": 0}
+            now = time.time()
+            if ok:
+                doc["last_ok_ts"] = now
+                doc["consec_fails"] = 0
+            else:
+                doc["last_fail_ts"] = now
+                prev = doc.get("consec_fails")
+                doc["consec_fails"] = (prev + 1 if isinstance(prev, int)
+                                       and not isinstance(prev, bool) else 1)
+            doc.setdefault("last_ok_ts", None)
+            doc.setdefault("last_fail_ts", None)
+            tmp = path.parent / f"{path.name}.tmp"
+            tmp.write_text(json.dumps(doc), encoding="utf-8")
+            os.replace(tmp, path)
+        except Exception as e:  # noqa: BLE001 — health must never break poll
+            self._log("HEALTH_FAIL", f"type={type(e).__name__}")
+
+    def inbound_health(self) -> dict:
+        """Honest inbound-poll health view for API rows:
+        {healthy, last_ok_age_sec, consec_fails, cursor}.
+          healthy       None = never polled / unreadable (honest unknown,
+                        never a guessed False), True = the last recorded
+                        poll succeeded (consec_fails 0), False = the last
+                        recorded poll failed (consec_fails > 0);
+          last_ok_age_sec  int seconds since the last success, None when no
+                        success is recorded;
+          consec_fails  recorded consecutive failures (0 = none recorded);
+          cursor        the route cursor file exists (a live cursor is the
+                        proof an incremental receive pipeline has run).
+        Timestamps and counters only — never a credential or message body."""
+        try:
+            cursor_set = self._cursor_path().exists()
+        except OSError:
+            cursor_set = False
+        out = {"healthy": None, "last_ok_age_sec": None,
+               "consec_fails": 0, "cursor": bool(cursor_set)}
+        doc = self._load_health()
+        if not isinstance(doc, dict):
+            return out
+        fails = doc.get("consec_fails")
+        if not (isinstance(fails, int) and not isinstance(fails, bool)
+                and fails >= 0):
+            return out                  # malformed record = honest unknown
+        out["consec_fails"] = fails
+        last_ok = doc.get("last_ok_ts")
+        ok_valid = (isinstance(last_ok, (int, float))
+                    and not isinstance(last_ok, bool) and last_ok > 0)
+        if ok_valid:
+            out["last_ok_age_sec"] = max(0, int(time.time() - last_ok))
+        if fails > 0:
+            out["healthy"] = False       # last recorded poll failed
+        elif ok_valid:
+            out["healthy"] = True        # consec_fails 0 + a success on record
+        return out
+
     # ------------------------------------------------------------ surface ---
     def send(self, target: str, text: str) -> bool:
         """Outbound. Returns True on accepted delivery, False on an honest
@@ -404,13 +503,17 @@ class Channel:
         if not ok:
             return []
         try:
-            return self._poll()
+            batch = self._poll()
         except ChannelError as e:
             self._log("POLL_FAIL", str(e))
+            self._record_health(False)
             return []
         except Exception as e:          # noqa: BLE001 — sanitize unknowns too
             self._log("POLL_FAIL", f"unexpected: {type(e).__name__}")
+            self._record_health(False)
             return []
+        self._record_health(True)
+        return batch
 
     def _send(self, target: str, text: str) -> None:
         raise ChannelError("send not implemented")
@@ -1251,3 +1354,15 @@ def status(settings, repo) -> list[dict]:
                      "note": note,
                      "inbound": bool(chan.inbound)})
     return rows
+
+
+def inbound_health_map(settings, repo) -> dict[str, dict]:
+    """Per-route inbound health view for GET /api/channels: route name ->
+    Channel.inbound_health(). Fail-soft by contract: any load problem
+    yields {} so the API omits the field entirely (the console hides the
+    note) instead of guessing a status."""
+    try:
+        chans = load_channels(repo, settings, transport=None)
+        return {name: chan.inbound_health() for name, chan in chans.items()}
+    except Exception:  # noqa: BLE001 — honest absence beats a fabricated row
+        return {}

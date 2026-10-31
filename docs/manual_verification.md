@@ -15,9 +15,9 @@ processes — they do **not** simulate a fresh GitHub download. Covered:
 | Script | Legs | Proves |
 |---|---|---|
 | `tmp/e2e_car_f.py` | 18 | profile isolation on a live console (byte-identical default layer) |
-| `tmp/e2e_channels.py` | 8 | webhook/Email wire-level outbound + inbound, bearer gates |
-| `tmp/e2e_channels_dom.py` | 44 | DingTalk/Feishu/WeChat request shapes, HMAC, polling |
-| `tmp/e2e_car4a.py` | 35 | OpenAI-compatible API, hooks, MCP, capability catalog |
+| `tmp/e2e_channels.py` | 12 | webhook/Email wire-level outbound + inbound, bearer gates |
+| `tmp/e2e_channels_dom.py` | 46 | DingTalk/Feishu/WeChat request shapes, HMAC, polling |
+| `tmp/e2e_car4a.py` | 39 | OpenAI-compatible API, hooks, MCP, capability catalog |
 
 Suite gates (run on a clean tree before every release): see the **Quality
 Gates** table in the root README. This document is the **human layer on

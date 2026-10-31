@@ -311,6 +311,12 @@ body {
   text-transform: uppercase; }
 .stat-grid .v { color: var(--text); }
 .stat-note { margin-top: 12px; font-size: 13px; color: var(--muted); }
+/* Lane N (E3): channel inbound poll-health note states */
+#chanList .chan-inbound { margin-top: 4px; }
+#chanList .chan-inbound.in-ok { color: var(--ok); }
+#chanList .chan-inbound.in-bad { color: var(--red); }
+#chanList .chan-inbound.in-warn { color: var(--amber); }
+#chanList .chan-inbound.in-unknown { color: var(--muted); }
 .live-dot { width: 8px; height: 8px; background: var(--ok);
   border-radius: 0 50% 50% 50%; transform: rotate(45deg); margin-left: 12px;
   box-shadow: 0 0 8px rgba(10, 143, 97, .5); }

@@ -4392,6 +4392,270 @@ def test_channels() -> None:
         shutil.rmtree(state, True)
 
 
+def test_channels_inbound_health() -> None:
+    """E3 inbound poll-health sidecar (cleanup car, Lane N): atomic health
+    writes (success stamps last_ok_ts and clears consec_fails, failure
+    stamps last_fail_ts and increments it), honest unknowns (missing or
+    corrupt file -> healthy null), the never-raise contract when the health
+    write itself fails, gate skips recording nothing, plus the API row
+    `inbound_health` shape + three states through a HERMETIC child process
+    (own profile dir + state dir; the parent's web module stays
+    unimported so later legs keep their own profile resolution, and no
+    production path is read or written). Zero credential echo throughout."""
+    import contextlib
+    import io
+    import subprocess
+    import textwrap
+    import time
+    from mycore import channels
+
+    tok = "CH-H-CHANNEL-DISCORD-TOKEN-SENTINEL"
+    api_sentinel = "CH-H-API-SECRETS-SENTINEL"
+    saved = {k: os.environ.get(k)
+             for k in ("CHANNEL_DISCORD_TOKEN", "AIDOG_MC_STATE",
+                       "AIDOG_PROFILES_DIR", "AIDOG_PROFILE")}
+    repo = Path(tempfile.mkdtemp(prefix="chan_health_repo_"))
+    state = Path(tempfile.mkdtemp(prefix="chan_health_state_"))
+
+    class Tr:
+        """Scripted transport: str replies or Exceptions, call-counted."""
+
+        def __init__(self, replies):
+            self.replies = list(replies)
+            self.calls = 0
+
+        def __call__(self, url, payload, headers, timeout):
+            self.calls += 1
+            if not self.replies:
+                raise AssertionError("scripted reply missing")
+            item = self.replies.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+    try:
+        os.environ["CHANNEL_DISCORD_TOKEN"] = tok
+        settings = {"state_dir": str(state), "channels": {
+            "discord": {"enabled": True, "allow": [], "channel_ids": ["C1"]}}}
+        hp = state / "channels" / "discord.health"
+        cp = state / "channels" / "discord.cursor"
+
+        # --- missing file = never polled (honest unknown, not a guess) ----
+        tr = Tr([json.dumps([]),
+                 json.dumps([{"id": "101", "author": {"id": "u1"},
+                              "content": "alpha"}])])
+        ch = channels.load_channels(repo, settings, transport=tr)["discord"]
+        v = ch.inbound_health()
+        check("health: missing file -> healthy null / age null / cursor false",
+              v == {"healthy": None, "last_ok_age_sec": None,
+                    "consec_fails": 0, "cursor": False}, str(v))
+
+        # --- poll success path: stamps last_ok_ts, consec_fails 0 --------
+        got1 = ch.poll()
+        raw = hp.read_text(encoding="utf-8")
+        doc = json.loads(raw)
+        v = ch.inbound_health()
+        check("health: poll success writes last_ok_ts, consec_fails 0",
+              got1 == [] and isinstance(doc.get("last_ok_ts"), float)
+              and doc.get("consec_fails") == 0
+              and doc.get("last_fail_ts") is None and tok not in raw,
+              json.dumps(doc))
+        check("health: success without new msgs -> healthy true, cursor false",
+              v["healthy"] is True and isinstance(v["last_ok_age_sec"], int)
+              and v["consec_fails"] == 0 and v["cursor"] is False, str(v))
+
+        # --- second poll delivers -> cursor file appears ------------------
+        got2 = ch.poll()
+        v = ch.inbound_health()
+        check("health: success with messages -> cursor true, still healthy",
+              bool(got2) and cp.is_file() and v["healthy"] is True
+              and v["cursor"] is True, str(v))
+
+        # --- failure path: consecutive failures accumulate ----------------
+        trB = Tr([RuntimeError("boom"), RuntimeError("boom again")])
+        chB = channels.load_channels(repo, settings, transport=trB)["discord"]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            chB.poll()
+            chB.poll()
+        doc = json.loads(hp.read_text(encoding="utf-8"))
+        v = chB.inbound_health()
+        check("health: failures stamp last_fail_ts, increment consec_fails",
+              isinstance(doc.get("last_fail_ts"), float)
+              and doc.get("consec_fails") == 2
+              and isinstance(doc.get("last_ok_ts"), float), json.dumps(doc))
+        check("health: failed poll -> healthy false, last-success age kept",
+              v["healthy"] is False and v["consec_fails"] == 2
+              and isinstance(v["last_ok_age_sec"], int) and v["cursor"] is True
+              and "CHANNEL_POLL_FAIL" in buf.getvalue()
+              and "CHANNEL_HEALTH_FAIL" not in buf.getvalue()
+              and tok not in buf.getvalue(), str(v))
+
+        # --- next success clears the streak, keeps the fail stamp ----------
+        trC = Tr([json.dumps([])])
+        chC = channels.load_channels(repo, settings, transport=trC)["discord"]
+        with contextlib.redirect_stderr(io.StringIO()):
+            got = chC.poll()
+        doc = json.loads(hp.read_text(encoding="utf-8"))
+        v = chC.inbound_health()
+        check("health: success resets consec_fails to 0, keeps last_fail_ts",
+              got == [] and doc.get("consec_fails") == 0
+              and isinstance(doc.get("last_fail_ts"), float)
+              and v["healthy"] is True and v["consec_fails"] == 0,
+              json.dumps(doc))
+
+        # --- corrupt JSON = honest unknown, never a crash -----------------
+        hp.write_text("{corrupt json", encoding="utf-8")
+        v = chC.inbound_health()
+        check("health: corrupt file -> healthy null (unknown), no exception",
+              v["healthy"] is None and v["last_ok_age_sec"] is None
+              and v["consec_fails"] == 0 and v["cursor"] is True, str(v))
+
+        # --- write failure (a directory squats on the file) ---------------
+        hp.unlink()
+        hp.mkdir()
+        trD = Tr([json.dumps([])])
+        chD = channels.load_channels(repo, settings, transport=trD)["discord"]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            got = chD.poll()
+        check("health: write failure -> one HEALTH_FAIL line, poll still []",
+              got == [] and "CHANNEL_HEALTH_FAIL" in buf.getvalue()
+              and "unexpected" not in buf.getvalue().lower()
+              and tok not in buf.getvalue(),
+              buf.getvalue().strip().splitlines()[-1:] and
+              buf.getvalue().strip().splitlines()[-1] or "")
+        hp.rmdir()
+
+        # --- gate skips (disabled route) record NOTHING --------------------
+        off = {"state_dir": str(state), "channels": {
+            "discord": {"enabled": False, "allow": [], "channel_ids": ["C1"]}}}
+        chOff = channels.load_channels(repo, off, transport=Tr([]))["discord"]
+        got = chOff.poll()
+        check("health: disabled-route gate skip is not an attempt (no file)",
+              got == [] and not hp.exists(), str(hp.exists()))
+
+        # --- per-route view shape over every route -------------------------
+        hmap = channels.inbound_health_map(settings, repo)
+        shape = {"healthy", "last_ok_age_sec", "consec_fails", "cursor"}
+        check("health: map covers every route with the exact view shape",
+              set(hmap) == set(channels.CHANNELS)
+              and all(set(vv) == shape for vv in hmap.values()),
+              str(sorted(hmap)))
+
+        # --- API row shape + three states: hermetic child process ---------
+        # web.server resolves SETTINGS_FILE/SECRETS at import, so this check
+        # runs in a child pinned to its own profile + state dir; the parent
+        # process never imports web.server (later legs own that seam).
+        root = Path(tempfile.mkdtemp(prefix="chan_health_prof_"))
+        prof = root / "apir"
+        st2 = Path(tempfile.mkdtemp(prefix="chan_health_state2_"))
+        prof.mkdir(parents=True)
+        (prof / "secrets.env").write_text(f"WEB_TOKEN={api_sentinel}\n",
+                                          encoding="utf-8")
+        (prof / "settings.json").write_text("{}", encoding="utf-8")
+        now = time.time()
+        chdir = st2 / "channels"
+        chdir.mkdir(parents=True)
+        (chdir / "discord.cursor").write_text("{}", encoding="utf-8")
+        (chdir / "discord.health").write_text(json.dumps(
+            {"last_ok_ts": now - 12, "last_fail_ts": None,
+             "consec_fails": 0}), encoding="utf-8")
+        (chdir / "slack.health").write_text(json.dumps(
+            {"last_ok_ts": now - 300, "last_fail_ts": now - 5,
+             "consec_fails": 3}), encoding="utf-8")
+        (chdir / "webhook.health").write_text("{corrupt", encoding="utf-8")
+        # email: deliberately NO health file = never polled
+        script = textwrap.dedent("""\
+            import json
+            from mycore import channels
+            import web.server as ws
+            out = []
+            def ck(name, ok, detail=""):
+                out.append([name, bool(ok), str(detail)[:200]])
+            doc = ws.collect_channels()
+            rows = doc.get("channels") if isinstance(doc, dict) else None
+            ck("rows is a full route list",
+               isinstance(rows, list) and len(rows) == len(channels.CHANNELS),
+               str(type(rows).__name__))
+            rows = rows if isinstance(rows, list) else []
+            old = {"name", "enabled", "configured", "note", "inbound"}
+            ck("legacy row fields intact", all(old <= set(r) for r in rows),
+               str(sorted(set(rows[0])) if rows else "no rows"))
+            ck("every row carries inbound_health",
+               all(isinstance(r.get("inbound_health"), dict) for r in rows),
+               str(sum(1 for r in rows
+                       if isinstance(r.get("inbound_health"), dict))))
+            shape = {"healthy", "last_ok_age_sec", "consec_fails", "cursor"}
+            ck("inbound_health exact key set",
+               all(set(r["inbound_health"]) == shape for r in rows), "")
+            by = {r["name"]: r["inbound_health"] for r in rows}
+            good = by.get("discord", {})
+            ck("state healthy (discord, cursor set)",
+               good.get("healthy") is True and good.get("cursor") is True
+               and good.get("consec_fails") == 0
+               and isinstance(good.get("last_ok_age_sec"), int)
+               and 10 <= good.get("last_ok_age_sec", -1) <= 300,
+               json.dumps(good))
+            bad = by.get("slack", {})
+            ck("state failing (slack, 3 consecutive, cursor false)",
+               bad.get("healthy") is False and bad.get("consec_fails") == 3
+               and bad.get("cursor") is False
+               and isinstance(bad.get("last_ok_age_sec"), int)
+               and 290 <= bad.get("last_ok_age_sec", -1) <= 600,
+               json.dumps(bad))
+            unk = by.get("email", {})
+            ck("state unknown (email, never polled)",
+               unk.get("healthy") is None
+               and unk.get("last_ok_age_sec") is None
+               and unk.get("consec_fails") == 0
+               and unk.get("cursor") is False, json.dumps(unk))
+            cor = by.get("webhook", {})
+            ck("corrupt health file reads back as unknown",
+               cor.get("healthy") is None
+               and cor.get("last_ok_age_sec") is None, json.dumps(cor))
+            flags = {r["name"]: r.get("inbound") for r in rows}
+            ck("inbound bool flags preserved (regression)",
+               flags.get("discord") is True and flags.get("wechat") is False,
+               json.dumps(flags))
+            ck("no credential text serializes into the payload",
+               "SENTINEL" not in json.dumps(doc), "")
+            print(json.dumps(out))
+        """)
+        sp = Path(tempfile.mkdtemp(prefix="chan_health_sp_")) / "api_check.py"
+        sp.write_text(script, encoding="utf-8")
+        env = dict(os.environ)
+        env.update({"AIDOG_PROFILES_DIR": str(root), "AIDOG_PROFILE": "apir",
+                    "AIDOG_MC_STATE": str(st2), "PYTHONPATH": str(REPO)})
+        proc = subprocess.run([sys.executable, str(sp)], cwd=str(REPO),
+                              env=env, capture_output=True, text=True,
+                              timeout=180)
+        api_rows = None
+        try:
+            lines = [ln for ln in proc.stdout.splitlines() if ln.strip()]
+            api_rows = json.loads(lines[-1]) if lines else None
+        except (ValueError, IndexError):
+            api_rows = None
+        if not isinstance(api_rows, list):
+            check("api inbound: child produced a result list", False,
+                  f"rc={proc.returncode} out={proc.stdout[-160:]} "
+                  f"err={proc.stderr[-200:]}")
+        else:
+            for nm, ok, detail in api_rows:
+                check(f"api inbound: {nm}", ok, detail)
+        shutil.rmtree(root, True)
+        shutil.rmtree(st2, True)
+        shutil.rmtree(sp.parent, True)
+    finally:
+        for key, val in saved.items():
+            if val is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = val
+        shutil.rmtree(repo, True)
+        shutil.rmtree(state, True)
+
+
 def test_channels_service() -> None:
     """C car service leg: channel poll -> allowlist fail-closed -> the same
     command/pipeline path -> same-route reply; str session keys (jsonl +
@@ -10920,6 +11184,7 @@ def main() -> int:
     test_execute_code()
     test_mcp()
     test_channels()
+    test_channels_inbound_health()
     test_channels_service()
     test_channels_domestic()
     test_channels_wa_signal()
