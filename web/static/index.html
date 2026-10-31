@@ -65,6 +65,9 @@
 
   <aside class="sidebar">
     <nav class="nav" aria-label="Console views">
+      <!-- group headings (0.5.56 stage 2): NEVER carry .nav-item — the nav
+           parity legs count .nav-item and take the first .nav-label from it. -->
+      <div class="nav-group" data-i18n="nav.group.work">Work</div>
       <button class="nav-item is-active" type="button" data-view="overview" aria-current="page">
         <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"
           stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
@@ -83,6 +86,7 @@
         <span class="nav-label" data-i18n="view.chat.title">Chat</span>
         <span class="nav-drop" aria-hidden="true"></span>
       </button>
+      <div class="nav-group" data-i18n="nav.group.browse">Browse</div>
       <button class="nav-item" type="button" data-view="skills">
         <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"
           stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
@@ -128,6 +132,7 @@
         <span class="nav-label" data-i18n="view.community.title">Community</span>
         <span class="nav-drop" aria-hidden="true"></span>
       </button>
+      <div class="nav-group" data-i18n="nav.group.system">System</div>
       <button class="nav-item" type="button" data-view="settings">
         <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"
           stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
@@ -163,7 +168,7 @@
              probe states — never a value); a build without that endpoint
              keeps the whole card hidden, an honest absence beats a guess. -->
         <div class="card span-3" id="actCard" hidden>
-          <h2><span data-i18n="sec.activate">ACTIVATION</span>
+          <h2><span data-i18n="sec.activate">Activation</span>
               <span class="chat-badge" id="actBadge">–</span></h2>
           <div class="stat-note" id="actStart" hidden></div>
           <div id="actList"></div>
@@ -176,7 +181,7 @@
                state and the restart action (confirm -> POST restart -> poll) -->
           <div style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--line);">
             <div class="ctl-row token-row" style="margin-bottom:6px;">
-              <label data-i18n="act.bot">BOT & SERVICE</label>
+              <label data-i18n="act.bot">Bot & Service</label>
               <span class="stat-note" id="actBotState" style="margin-top:0;"></span>
             </div>
             <div class="ctl-actions">
@@ -211,7 +216,7 @@
         </div>
 
         <div class="card span-2">
-          <h2><span data-i18n="sec.usage">Usage &amp; cost</span>
+          <h2><span data-i18n="sec.usage">Usage &amp; Cost</span>
               <span class="live-dot" id="usageLive" hidden></span></h2>
           <div class="metric">
             <div class="metric-val" id="costVal">–</div>
@@ -229,7 +234,7 @@
         </div>
 
         <div class="card span-1">
-          <h2 data-i18n="sec.memory">MEMORY CORE</h2>
+          <h2 data-i18n="sec.memory">Memory Core</h2>
           <div class="bar-block">
             <label data-i18n="memory.curated">Curated memory</label>
             <div class="bar"><div class="bar-fill" id="memBar"></div></div>
@@ -457,7 +462,7 @@
         </div>
       </div>
       <section class="card gallery">
-        <h2><span data-i18n="sec.gallery">SKILL ARMORY</span><span class="gal-count" id="galCount"></span></h2>
+        <h2><span data-i18n="sec.gallery">Skill Armory</span><span class="gal-count" id="galCount"></span></h2>
         <div class="gal-grid" id="galGrid"></div>
       </section>
     </section>
@@ -480,7 +485,7 @@
       </div>
       <div class="ov-grid">
         <section class="card span-3">
-          <h2><span data-i18n="sec.exchange">EXCHANGE</span>
+          <h2><span data-i18n="sec.exchange">Exchange</span>
               <span class="chat-badge" data-i18n="ex.badge">approval-gated</span></h2>
           <p class="auth-lead" data-i18n="ex.lead">Market reads are keyless. Orders exist only as plans: this panel is where you approve or reject them — the model's execute step receives a plan id and can never approve its own plan. Withdrawals and on-chain transfers do not exist in this product at all.</p>
           <ul class="reason-list" id="exDisclosure">
@@ -723,9 +728,32 @@
           <p class="view-sub" data-i18n="view.settings.sub">Console, usage, model and access</p>
         </div>
       </div>
+      <!-- restyle car (0.5.56): group chips + search filter over the cards
+           below. PURE FILTER — the default state (All, empty search) renders
+           every card exactly as before, so no existing contract changes.
+           The Access card is data-setgroup="always" and is never filtered:
+           #saveBtn / #tokenInput must stay reachable for saving and for the
+           test legs that wait on them. -->
+      <div class="set-tools" id="setTools">
+        <div class="set-chips" role="tablist" aria-label="settings groups">
+          <button class="set-chip is-active" type="button" data-setfilter="all"
+                  data-i18n="set.grp.all">All</button>
+          <button class="set-chip" type="button" data-setfilter="general"
+                  data-i18n="set.grp.general">General</button>
+          <button class="set-chip" type="button" data-setfilter="model"
+                  data-i18n="set.group.model">Model</button>
+          <button class="set-chip" type="button" data-setfilter="services"
+                  data-i18n="set.grp.services">Services</button>
+          <button class="set-chip" type="button" data-setfilter="creds"
+                  data-i18n="set.grp.creds">Credentials & channels</button>
+        </div>
+        <input type="search" id="setSearch" class="set-search" autocomplete="off"
+               spellcheck="false" data-i18n-ph="set.searchPh"
+               placeholder="search settings" aria-label="search settings">
+      </div>
       <div class="set-grid">
-        <div class="card">
-          <h2 data-i18n="sec.console">CONSOLE</h2>
+        <div class="card" data-setgroup="general">
+          <h2 data-i18n="sec.console">Console</h2>
           <div class="ctl-row">
             <label data-i18n="ctl.sound">UI sound</label>
             <button class="toggle" id="soundToggle" aria-pressed="false"><span></span></button>
@@ -749,6 +777,19 @@
               <option>5</option><option>10</option><option>30</option><option>60</option>
             </select>
           </div>
+          <!-- restyle car (0.5.56): Exchange nav visibility — tri-state
+               localStorage exNav: "" (=auto: the nav item appears once an
+               exchange API key slot is configured) / show / hide. The deep
+               link ?view=exchange still opens the view either way. -->
+          <div class="ctl-row">
+            <label data-i18n="ctl.exnav">Exchange panel</label>
+            <select id="exNavSel" aria-label="exchange panel visibility">
+              <option value="" data-i18n="exnav.auto">auto (show when configured)</option>
+              <option value="show" data-i18n="exnav.show">always show</option>
+              <option value="hide" data-i18n="exnav.hide">hide</option>
+            </select>
+          </div>
+          <div class="stat-note" data-i18n="exnav.hint">auto shows the nav item once an exchange API key is configured; stored in this browser</div>
           <!-- Wave 5 (X11): profile management — the `aidog profile` CLI's
                console leg. The catalog (GET /api/profiles) is read-only
                presence/counts: a slot value never renders, and the active
@@ -776,8 +817,8 @@
           </div>
         </div>
 
-        <div class="card">
-          <h2 data-i18n="sec.usage">Usage &amp; cost</h2>
+        <div class="card" data-setgroup="general">
+          <h2 data-i18n="sec.usage">Usage &amp; Cost</h2>
           <div class="ctl-row">
             <label data-i18n="ctl.currency">Currency</label>
             <select id="curSelect">
@@ -814,7 +855,7 @@
                     placeholder='{"my-model": {"in": 5, "out": 30}, "default": {"in": 1, "out": 2}}'></textarea>
         </div>
 
-        <div class="card">
+        <div class="card" data-setgroup="model">
           <h2 data-i18n="set.group.model">Model</h2>
           <div class="ctl-row">
             <label data-i18n="ctl.mycModel">Kernel model</label>
@@ -928,7 +969,7 @@
           <div class="stat-note" id="envOverrideChip" hidden></div>
         </div>
 
-        <div class="card">
+        <div class="card" data-setgroup="model">
           <h2 data-i18n="sec.media">Media</h2>
           <div class="ctl-row">
             <label data-i18n="ctl.sttModel">Speech-to-text model</label>
@@ -976,8 +1017,8 @@
              presence-only credential mechanism as Credentials (never a value)
              — plus the setup probes' bot/service chips and the shared restart
              action. Credentials card + #credList stay untouched. -->
-        <div class="card" id="tgCard">
-          <h2 data-i18n="act.bot">BOT & SERVICE</h2>
+        <div class="card" data-setgroup="services" id="tgCard">
+          <h2 data-i18n="act.bot">Bot & Service</h2>
           <div class="stat-note" id="tgBotState" hidden></div>
           <div id="tgCredList" hidden></div>
           <!-- onboarding (0.5.48 car 5): "how do I switch bots" folded the
@@ -1007,8 +1048,8 @@
              and shows the honest `idle` line when nothing is active. The
              goal textarea is plain user input — echoed back, escaped, and
              never a credential. -->
-        <div class="card" id="missionCard">
-          <h2 data-i18n="mission.sec">MISSIONS</h2>
+        <div class="card" data-setgroup="services" id="missionCard">
+          <h2 data-i18n="mission.sec">Missions</h2>
           <div class="ctl-row token-row">
             <label data-i18n="mission.goalLabel">Ultimate goal</label>
           </div>
@@ -1114,14 +1155,14 @@
              mission can draw on — every row deep-links to the EXISTING
              control (tools_off grid, channel switches, exchange panel,
              credential slots, skill armory). No second switchboard, ever. -->
-        <div class="card" id="orchCard">
-          <h2 data-i18n="orch.sec">ORCHESTRATION</h2>
+        <div class="card" data-setgroup="services" id="orchCard">
+          <h2 data-i18n="orch.sec">Orchestration</h2>
           <div id="orchList"></div>
           <div class="stat-note" data-i18n="orch.hint">read-only summary — each row deep-links to its existing control (no second switchboard)</div>
         </div>
 
-        <div class="card">
-          <h2 data-i18n="sec.creds">CREDENTIALS</h2>
+        <div class="card" data-setgroup="creds">
+          <h2 data-i18n="sec.creds">Credentials</h2>
           <div class="stat-note" id="credTokenHint" hidden></div>
           <!-- 0.5.54: one button checks every slot (shape rules everywhere,
                live probes where the provider can prove usability). -->
@@ -1133,8 +1174,8 @@
           <div id="credList"></div>
         </div>
 
-        <div class="card">
-          <h2 data-i18n="sec.channels">CHANNELS</h2>
+        <div class="card" data-setgroup="creds">
+          <h2 data-i18n="sec.channels">Channels</h2>
           <div id="chanList"></div>
           <div class="ctl-row token-row" style="margin-top:14px">
             <label data-i18n="chan.testGo">SEND TEST</label>
@@ -1169,8 +1210,8 @@
           <div class="ctl-actions"><span class="save-state" id="chanMsg" role="status"></span></div>
         </div>
 
-        <div class="card">
-          <h2 data-i18n="sec.hooks">EVENT HOOKS</h2>
+        <div class="card" data-setgroup="creds">
+          <h2 data-i18n="sec.hooks">Event Hooks</h2>
           <div id="hookList"></div>
           <div class="stat-note" data-i18n="hook.hint">argv[0] must exist at save time; hook output is never echoed</div>
           <div class="ctl-actions">
@@ -1183,7 +1224,7 @@
              can match it against the file) and why the page never rewrites
              it. Copy lives in the packs (onb.*); the label stays plain
              language and carries the internal name as a hover title only. -->
-        <div class="card" id="accessCard">
+        <div class="card" data-setgroup="always" id="accessCard">
           <h2 data-i18n="set.group.access">Access</h2>
           <div class="stat-note" data-i18n="onb.accessHint">The access token is WEB_TOKEN — the unlock password for this console, written into secrets.env when you installed. Paste it once below and this browser remembers it; after that saving settings, approvals and service restarts all work. It cannot be changed from this page: to rotate it, edit WEB_TOKEN in secrets.env, then paste the new value here.</div>
           <div class="ctl-row token-row">

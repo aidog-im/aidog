@@ -49,12 +49,30 @@
     "WenQuanYi Micro Hei", sans-serif;
   --mono: Consolas, "Cascadia Mono", "SF Mono", Menlo, monospace,
     "Noto Sans Mono CJK SC", "WenQuanYi Micro Hei";
+
+  /* stage 3 (0.5.56 site advanced pass): motion + tech-layer tokens.
+     ONE easing/timing system for the whole page instead of per-rule values,
+     plus the coordinate-grid / glass colors. Graphics only — body copy keeps
+     --ink / --muted so every text pair stays WCAG AA. */
+  --ease-out: cubic-bezier(.16, .84, .44, 1);
+  --t-fast: .18s;
+  --t-base: .42s;
+  --grid-line: rgba(165, 183, 202, .34);
+  --glass: rgba(252, 252, 250, .86);
+  --glass-edge: rgba(165, 183, 202, .5);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html { scroll-behavior: smooth; }
 body {
-  background: var(--paper);
+  /* stage 3: ambient mesh glow painted UNDER the paper. These are background
+     layers only — the computed background-color stays #fcfcfa (site gate
+     contract) and no text ever sits on the glow, so contrast is untouched. */
+  background:
+    radial-gradient(1100px 620px at 82% -6%, rgba(40, 146, 255, .10), transparent 62%),
+    radial-gradient(880px 540px at 4% 30%, rgba(112, 228, 253, .11), transparent 60%),
+    radial-gradient(1000px 640px at 55% 106%, rgba(233, 134, 103, .07), transparent 58%),
+    var(--paper);
   color: var(--text);
   font-family: var(--font);
   font-size: 16px;
@@ -169,6 +187,20 @@ h1, h2, h3, h4, .serif {
   justify-content: center; align-items: center;
   padding: 120px clamp(16px, 5vw, 48px) 0;
   overflow: hidden;
+}
+/* stage 3: coordinate grid under the hero art. Masked to a soft oval so it
+   never reaches the page edge, pointer-events none, and it paints BELOW the
+   droplet canvas and the copy (.hero-inner / .fact-strip are z-index 2). */
+.hero::before {
+  content: ""; position: absolute; inset: 0; z-index: 0;
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 46px 46px;
+  background-position: center center;
+  -webkit-mask-image: radial-gradient(78% 62% at 50% 44%, #000 18%, transparent 76%);
+  mask-image: radial-gradient(78% 62% at 50% 44%, #000 18%, transparent 76%);
+  pointer-events: none;
 }
 .hero-drops { position: absolute; inset: 0; width: 100%; height: 100%;
   pointer-events: none; }
@@ -940,4 +972,120 @@ html[lang="zh-Hans"] .cert-eyebrow, html[lang="zh-Hans"] .hero-kicker {
   .pulse-dot, .fact-strip-track, .orb-drop, .led, .orb-core, .chart-icon {
     animation: none !important;
   }
+}
+
+/* ================================================================ *
+ *  Stage 3 (0.5.56) — site advanced pass                           *
+ *  Tech layer + bento rhythm + micro-interaction tokens +          *
+ *  scroll-driven motion. Pure addition: no section, no copy and no *
+ *  nav-anchor change, so every standing site gate keeps its shape.  *
+ * ================================================================ */
+
+/* --- micro-interaction system: one easing/timing pair, applied once --- */
+.btn, .feature, .step, .pnode, .trust-card, .nav-link, .copy-btn,
+.mcard, .mock-nav-item, .arch-band {
+  transition: transform var(--t-base) var(--ease-out),
+              border-color var(--t-base) var(--ease-out),
+              box-shadow var(--t-base) var(--ease-out),
+              color var(--t-fast) var(--ease-out),
+              background-color var(--t-fast) var(--ease-out);
+}
+
+/* keyboard users get the same affordance mouse users get on hover */
+:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 3px;
+}
+
+/* --- capabilities: bento rhythm (same 12 cards, same order, same copy) ---
+   6-column track so rows can mix wide and narrow tiles:
+   [1 wide][2] · [3][4][5] · [6][7 wide] · [8][9][10] · [11][12] */
+.feature-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.feature-grid .feature { grid-column: span 2; }
+.feature-grid .feature:nth-child(1),
+.feature-grid .feature:nth-child(7) { grid-column: span 4; }
+.feature-grid .feature:nth-child(2) { grid-column: span 2; }
+.feature-grid .feature:nth-child(11),
+.feature-grid .feature:nth-child(12) { grid-column: span 3; }
+/* responsive overrides live HERE, after the base rules, so they win the
+   cascade — the earlier 1020/640 blocks are intentionally re-stated */
+@media (max-width: 1020px) {
+  .feature-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .feature-grid .feature,
+  .feature-grid .feature:nth-child(n) { grid-column: span 1; }
+}
+@media (max-width: 640px) {
+  .feature-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* --- site mock now mirrors the console shell: segmented sidebar --- */
+.mock-nav-group {
+  display: block; padding: 9px 0 2px;
+  font-family: var(--mono); font-size: 9.5px; letter-spacing: .16em;
+  text-transform: uppercase; color: var(--muted);
+}
+.mock-nav-item { min-width: 0; }
+@media (max-width: 640px) {
+  /* the mock sidebar goes horizontal here, exactly like the console */
+  .mock-nav-group { display: none; }
+}
+
+/* --- scroll-driven micro-motion: progressive enhancement only -------
+   The JS .reveal/.in mechanism stays the base layer, so a browser without
+   animation-timeline renders exactly the page it renders today. Geometry is
+   untouched (no translateX on containers) so no overflow can appear. */
+@keyframes idx-drift { from { transform: translateY(9px); } to { transform: none; } }
+@keyframes band-glow { from { opacity: .34; } to { opacity: .64; } }
+@keyframes halo-tilt { from { transform: rotate(-5deg); } to { transform: rotate(5deg); } }
+@keyframes nav-settle {
+  from { box-shadow: 0 0 0 rgba(0, 22, 51, 0); }
+  to   { box-shadow: 0 12px 30px rgba(0, 22, 51, .07); }
+}
+
+/* sticky nav: micro-glass. It already carried a backdrop blur — stage 3
+   deepens it and lets the scroll position drive the resting shadow. */
+.nav {
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(14px) saturate(1.45);
+  backdrop-filter: blur(14px) saturate(1.45);
+}
+
+@supports (animation-timeline: view()) {
+  @media (prefers-reduced-motion: no-preference) {
+    .section-index {
+      animation-name: idx-drift;
+      animation-timing-function: linear;
+      animation-fill-mode: both;
+      animation-timeline: view();
+      animation-range: entry 60% cover 28%;
+    }
+    .engrave-rule {
+      animation-name: band-glow;
+      animation-timing-function: linear;
+      animation-fill-mode: both;
+      animation-timeline: view();
+      animation-range: entry 0% exit 100%;
+    }
+    .halo {
+      animation-name: halo-tilt;
+      animation-timing-function: linear;
+      animation-fill-mode: both;
+      animation-timeline: view();
+      animation-range: entry 0% exit 100%;
+    }
+    .nav {
+      animation-name: nav-settle;
+      animation-timing-function: linear;
+      animation-fill-mode: both;
+      animation-timeline: scroll(root);
+      animation-range: 0 96px;
+    }
+  }
+}
+
+/* stage 3 motion joins the existing reduced-motion wall */
+@media (prefers-reduced-motion: reduce) {
+  .section-index, .engrave-rule, .halo, .nav { animation: none !important; }
+  .btn, .feature, .step, .pnode, .trust-card, .nav-link, .copy-btn,
+  .mcard, .mock-nav-item, .arch-band { transition: none; }
 }

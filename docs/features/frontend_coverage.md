@@ -263,5 +263,5 @@ the restart handler logs a tmux session name and a return code only.
   `PW_PATH=<playwright node path> node tmp/e2e_settings_matrix_ui.js`.
 - Standing gates (after the community car): `mycore/tests/run.py` **1686** ·
   `tests/web_console_p3.py` **310** · `tests/source_lang_check.py` **0/70**
-  (locale packs **883/883**). The 0.5.39 baseline of this page was
+  (locale packs **899/899**). The 0.5.39 baseline of this page was
   1168 · 197 · 480/480.

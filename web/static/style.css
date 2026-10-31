@@ -137,7 +137,7 @@ body {
 .brand-text { display: flex; flex-direction: column; min-width: 0; }
 .brand h1 { font-size: 17px; letter-spacing: .26em; font-weight: 700;
   color: var(--navy); line-height: 1.2; }
-.brand .sub { color: var(--muted); font-size: 10.5px; letter-spacing: .16em;
+.brand .sub { color: var(--muted); font-size: 11px; letter-spacing: .16em;
   text-transform: uppercase; }
 /* product mark in the header — round, hairline-ringed so it reads on white */
 .brand-logo { width: 32px; height: 32px; border-radius: 50%; object-fit: cover;
@@ -155,7 +155,8 @@ body {
 .clock { font-family: var(--mono); font-size: 17px; color: var(--blue-ink);
   letter-spacing: .08em; font-weight: 600; font-variant-numeric: tabular-nums; }
 .btn { background: #fff; border: 1px solid var(--line); color: var(--text);
-  font: inherit; font-size: 12.5px; padding: 5px 14px; cursor: pointer;
+  font: inherit; font-size: 12.5px; padding: 5px 14px; min-height: 32px;
+  cursor: pointer;
   letter-spacing: .1em; transition: all .15s; border-radius: 999px; white-space: nowrap; }
 .btn:hover { border-color: var(--blue-dim); color: var(--blue-ink);
   box-shadow: var(--glow); }
@@ -220,6 +221,16 @@ body {
   box-shadow: 0 2px 5px rgba(40, 146, 255, .45);
 }
 .nav-item.is-active .nav-drop { opacity: 1; }
+
+/* sidebar group headings (0.5.56 stage 2) — three segments, the 8 items and
+   their order untouched. These must NEVER gain .nav-item: the nav parity
+   legs count .nav-item and read the FIRST .nav-label (still Overview). */
+.nav-group {
+  font-size: 11px; font-weight: 700; letter-spacing: .16em;
+  text-transform: uppercase; color: var(--muted);
+  padding: 13px 0 3px 13px; user-select: none;
+}
+.nav-group:first-child { padding-top: 0; }
 
 /* rail vitals (clocks / uptime / heartbeat / today) */
 .tool-strip { display: flex; gap: 6px; flex-wrap: wrap;
@@ -286,7 +297,7 @@ body {
   box-shadow: 0 0 8px rgba(230, 57, 84, .45); }
 .mini.unknown .m-dot { background: var(--amber);
   box-shadow: 0 0 8px rgba(194, 116, 10, .45); }
-.mini .m-name { font-size: 10.5px; letter-spacing: .12em; color: var(--muted);
+.mini .m-name { font-size: 11px; letter-spacing: .12em; color: var(--muted);
   text-transform: uppercase; }
 .mini .m-state { font-size: 14px; margin-top: 4px; font-weight: 600; }
 .mini.up .m-state { color: var(--ok); }
@@ -307,7 +318,7 @@ body {
 .stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
   gap: 10px 14px; font-family: var(--mono); font-size: 13px;
   font-variant-numeric: tabular-nums; }
-.stat-grid .k { color: var(--muted); font-size: 10.5px; letter-spacing: .1em;
+.stat-grid .k { color: var(--muted); font-size: 11px; letter-spacing: .1em;
   text-transform: uppercase; }
 .stat-grid .v { color: var(--text); }
 .stat-note { margin-top: 12px; font-size: 13px; color: var(--muted); }
@@ -391,7 +402,7 @@ body {
 /* --------------------------------------------------------------- chat ----- */
 .chat-log { margin-top: 12px; max-height: min(56vh, 540px); overflow-y: auto;
   display: flex; flex-direction: column; gap: 8px; padding-right: 4px; }
-.chat-badge { font-family: var(--mono); font-size: 10.5px;
+.chat-badge { font-family: var(--mono); font-size: 11px;
   letter-spacing: .14em; margin-left: 8px; padding: 1px 7px;
   border: 1px solid var(--line); color: var(--muted); border-radius: 999px;
   text-transform: lowercase; }
@@ -411,7 +422,7 @@ body {
   background: var(--bg2); }
 .chat-bubble.pending::after { content: "▍"; color: var(--blue);
   animation: blink .9s steps(2) infinite; }
-.chat-tools-row { font-family: var(--mono); font-size: 10.5px;
+.chat-tools-row { font-family: var(--mono); font-size: 11px;
   letter-spacing: .08em; color: var(--violet); padding-left: 4px;
   opacity: 0; animation: rise .25s ease forwards; }
 .chat-form { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap;
@@ -426,7 +437,7 @@ body {
   color: var(--muted); min-width: 0; overflow-wrap: anywhere; }
 .chat-msg.err { color: var(--red); }
 .chat-msg.ok { color: var(--ok); }
-.chat-meta { font-family: var(--mono); font-size: 10.5px;
+.chat-meta { font-family: var(--mono); font-size: 11px;
   color: var(--muted); letter-spacing: .06em; margin-top: 8px; min-height: 13px; }
 
 /* ------------------------------------------------------------- armory ----- */
@@ -447,7 +458,7 @@ body {
   display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
   overflow: hidden; }
 .gal-card.open .gal-desc { -webkit-line-clamp: 12; color: var(--text); }
-.gal-tag { position: absolute; top: 9px; right: 11px; font-size: 10.5px;
+.gal-tag { position: absolute; top: 9px; right: 11px; font-size: 11px;
   letter-spacing: .16em; padding: 1px 6px; border: 1px solid;
   border-radius: 999px; background: #fff; }
 .gal-tag.body { color: var(--blue-ink); border-color: var(--blue-dim); }
@@ -458,7 +469,7 @@ body {
 .evo-cols { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 18px; align-items: start; }
 .evo-left { min-width: 0; }
-.evo-badge { font-family: var(--mono); font-size: 10.5px;
+.evo-badge { font-family: var(--mono); font-size: 11px;
   letter-spacing: .14em; margin-left: 12px; padding: 1px 7px;
   border: 1px solid var(--line); color: var(--muted); border-radius: 999px;
   text-transform: lowercase; }
@@ -518,7 +529,7 @@ body {
 .ctl-row input[type=number] {
   background: #fff; border: 1px solid var(--line); color: var(--text);
   font: inherit; font-size: 13px; padding: 6px 9px; min-width: 104px;
-  border-radius: 6px; }
+  min-height: 32px; border-radius: 6px; }
 .ctl-row select:focus, .ctl-row input:focus { outline: none;
   border-color: var(--blue); box-shadow: var(--glow); }
 .ctl-row textarea { background: #fff; border: 1px solid var(--line);
@@ -713,6 +724,9 @@ footer .foot-docs:hover, footer .foot-docs:focus { text-decoration: underline; }
     padding: 8px 12px; overflow: visible; }
   .nav { flex: 1 1 auto; flex-direction: row; gap: 4px; min-width: 0;
     overflow-x: auto; padding-bottom: 2px; }
+  /* the sidebar turns into one horizontal scroll strip here — group headings
+     would slice it, so they step out */
+  .nav-group { display: none; }
   .nav-item { width: auto; padding: 7px 11px; }
   .nav-item::before { left: 8px; right: 8px; top: auto; bottom: 2px;
     width: auto; height: 2px; border-radius: 2px 2px 0 0; }
@@ -725,7 +739,7 @@ footer .foot-docs:hover, footer .foot-docs:focus { text-decoration: underline; }
 @media (max-width: 760px) {
   .topbar { gap: 10px; padding: 11px 14px; }
   .brand h1 { font-size: 15px; letter-spacing: .18em; }
-  .brand .sub { font-size: 10.5px; letter-spacing: .1em; }
+  .brand .sub { font-size: 11px; letter-spacing: .1em; }
   .brand-logo { width: 26px; height: 26px; }
   .head-status { order: 3; width: 100%; }
   .clock { font-size: 15px; }
@@ -787,11 +801,11 @@ body { background: var(--paper); }
   letter-spacing: .16em; color: var(--ink);
 }
 .brand .sub {
-  font-family: var(--mono); font-size: 10.5px; letter-spacing: .18em;
+  font-family: var(--mono); font-size: 11px; letter-spacing: .18em;
   color: var(--muted);
 }
 .chip {
-  font-family: var(--mono); font-size: 10.5px; letter-spacing: .14em;
+  font-family: var(--mono); font-size: 11px; letter-spacing: .14em;
   text-transform: uppercase; border-radius: 0; border-color: var(--rule);
   background: #fff;
 }
@@ -824,7 +838,7 @@ body { background: var(--paper); }
   backdrop-filter: none; -webkit-backdrop-filter: none;
 }
 .nav-item {
-  font-family: var(--mono); font-size: 12px; letter-spacing: .13em;
+  font-family: var(--mono); font-size: 13px; letter-spacing: .13em;
   text-transform: uppercase; border-radius: 0; color: var(--muted);
   font-weight: 400;
 }
@@ -839,7 +853,7 @@ body { background: var(--paper); }
 }
 .tool-strip { border-top: 1px solid var(--line); }
 .tool {
-  font-family: var(--mono); font-size: 10.5px; text-transform: uppercase;
+  font-family: var(--mono); font-size: 11px; text-transform: uppercase;
   letter-spacing: .1em; border: 1px solid var(--rule); border-radius: 0;
   background: #fff; color: var(--muted);
 }
@@ -851,7 +865,7 @@ body { background: var(--paper); }
   color: var(--ink);
 }
 .view-sub {
-  font-family: var(--mono); font-size: 10.5px; letter-spacing: .13em;
+  font-family: var(--mono); font-size: 11px; letter-spacing: .13em;
   text-transform: uppercase; color: var(--muted);
 }
 
@@ -981,7 +995,7 @@ footer { border-top: 1px solid var(--ink); font-family: var(--mono); }
  *  + four guilloche medallions + ledger-style readout).           *
  * =============================================================== */
 .auth-stamp {
-  order: 2; font-family: var(--mono); font-size: 10.5px;
+  order: 2; font-family: var(--mono); font-size: 11px;
   letter-spacing: .16em; text-transform: uppercase;
   border: 1px solid var(--coral); color: #a84a30;
   padding: 2px 8px; white-space: nowrap; font-weight: 400;
@@ -1014,14 +1028,14 @@ footer { border-top: 1px solid var(--ink); font-family: var(--mono); }
 }
 .sealbtn .cap b { font-family: var(--serif); font-weight: 400; font-size: 19px; }
 .sealbtn .cap span {
-  font-family: var(--mono); font-size: 10.5px; letter-spacing: .15em;
+  font-family: var(--mono); font-size: 11px; letter-spacing: .15em;
   color: var(--muted); text-transform: uppercase;
 }
 .sealbtn.holding .cap b { color: var(--coral); }
 .sealbtn.sealed { color: var(--coral); }
 .sealbtn:focus-visible { outline: 2px solid var(--blue); outline-offset: 4px; }
 .auth-hint {
-  font-family: var(--mono); font-size: 10.5px; letter-spacing: .12em;
+  font-family: var(--mono); font-size: 11px; letter-spacing: .12em;
   color: var(--muted); text-transform: uppercase; margin-top: 12px;
   min-height: 28px; line-height: 1.6;
 }
@@ -1032,7 +1046,7 @@ footer { border-top: 1px solid var(--ink); font-family: var(--mono); }
 }
 .auth-result.show { display: block; }
 .auth-result b {
-  display: block; font-family: var(--mono); font-size: 10.5px;
+  display: block; font-family: var(--mono); font-size: 11px;
   letter-spacing: .14em; color: var(--blue-ink); text-transform: uppercase;
   margin-bottom: 6px;
 }
@@ -1053,7 +1067,7 @@ footer { border-top: 1px solid var(--ink); font-family: var(--mono); }
   color: var(--ink); display: block; overflow-wrap: anywhere;
 }
 .med .d {
-  font-family: var(--mono); font-size: 10.5px; letter-spacing: .13em;
+  font-family: var(--mono); font-size: 11px; letter-spacing: .13em;
   color: var(--muted); text-transform: uppercase; display: block; margin-top: 5px;
 }
 .readout {
@@ -1062,7 +1076,7 @@ footer { border-top: 1px solid var(--ink); font-family: var(--mono); }
   line-height: 1.62; color: var(--text); min-height: 96px;
 }
 .readout .lbl {
-  font-family: var(--mono); font-size: 10.5px; letter-spacing: .15em;
+  font-family: var(--mono); font-size: 11px; letter-spacing: .15em;
   color: var(--blue-ink); text-transform: uppercase; display: block;
   margin-bottom: 7px;
 }
@@ -1137,7 +1151,7 @@ footer { border-top: 1px solid var(--ink); font-family: var(--mono); }
 .test-out .test-note { margin-top: 0; }
 .mt-box { margin-top: 10px; padding-top: 8px;
   border-top: 1px dashed var(--line); }
-.mt-head { font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em;
+.mt-head { font-family: var(--mono); font-size: 11px; letter-spacing: .1em;
   text-transform: uppercase; color: var(--muted); }
 .mt-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 5px;
   font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
@@ -1145,7 +1159,7 @@ footer { border-top: 1px solid var(--ink); font-family: var(--mono); }
 .mt-row .mt-state.ok { color: var(--ok); }
 .mt-row .mt-state.bad { color: var(--red); }
 .mt-row .mt-state.unknown { color: var(--muted); }
-.mt-row .mt-primary { color: var(--amber); font-size: 10.5px;
+.mt-row .mt-primary { color: var(--amber); font-size: 11px;
   letter-spacing: .08em; align-self: center; }
 .chan-webhook { margin-top: 6px; font-family: var(--mono); font-size: 11.5px;
   overflow-wrap: anywhere; }
@@ -1208,13 +1222,13 @@ a.comm-title:hover { text-decoration: underline; }
 .ep-row .ep-line input[type="text"] { flex: 1 1 auto; min-width: 0;
   font-family: var(--mono); font-size: 12px; }
 .ep-row .ep-line input.ep-model { flex: 0 1 190px; }
-.ep-row .ep-badge { flex: 0 0 auto; font-size: 10px; letter-spacing: .08em;
+.ep-row .ep-badge { flex: 0 0 auto; font-size: 11px; letter-spacing: .08em;
   font-weight: 700; color: var(--muted); border: 1px solid var(--line);
   border-radius: 4px; padding: 2px 5px; }
 .ep-row .ep-del { flex: 0 0 auto; padding: 3px 8px; font-size: 12px; }
 .ep-keys { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; }
 .ep-key { display: inline-flex; align-items: center; gap: 4px; font-family: var(--mono);
-  font-size: 10.5px; border: 1px solid var(--line); border-radius: 10px;
+  font-size: 11px; border: 1px solid var(--line); border-radius: 10px;
   padding: 2px 7px; background: #fff; color: var(--muted); cursor: pointer; }
 .ep-key .dot { width: 7px; height: 7px; border-radius: 50%;
   background: var(--line); display: inline-block; }
@@ -1236,3 +1250,101 @@ a.comm-title:hover { text-decoration: underline; }
   padding: 2px 7px; border-radius: 10px; border: 1px solid var(--line); }
 .ep-src.env { color: var(--blue-ink); border-color: #bcd7f5; }
 .ep-src.invalid { color: var(--red); border-color: #f3c2c2; }
+
+/* =============================================================== *
+ *  Restyle car (0.5.56) — settings filter + exchange nav toggle  *
+ *  + credential state dots. Appended AFTER the Draft E layer so  *
+ *  these rules win the cascade without touching any earlier      *
+ *  selector. Pure addition: no id / API / locale-key change.     *
+ * =============================================================== */
+
+/* --- settings group chips + search ------------------------------- */
+.set-tools {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin: 2px 0 14px;
+}
+.set-chips { display: flex; gap: 7px; flex-wrap: wrap; }
+.set-chip {
+  font-family: var(--mono); font-size: 11px; letter-spacing: .12em;
+  text-transform: uppercase; padding: 7px 13px; min-height: 32px;
+  background: #fff; border: 1px solid var(--rule); border-radius: 0;
+  color: var(--muted); cursor: pointer; transition: all .15s;
+}
+.set-chip:hover { border-color: var(--ink); color: var(--ink); }
+.set-chip.is-active {
+  background: var(--ink); border-color: var(--ink); color: #fff;
+}
+.set-search {
+  flex: 1 1 200px; min-width: 170px; max-width: 320px; min-height: 32px;
+  background: #fff; border: 1px solid var(--rule); border-radius: 0;
+  font-family: var(--mono); font-size: 12.5px; color: var(--ink);
+  padding: 6px 10px;
+}
+.set-search:focus { outline: none; border-color: var(--blue-deep); }
+.set-search::-webkit-search-cancel-button { cursor: pointer; }
+
+/* filter states — applied by setApplyFilter(); default (no input, All)
+   adds neither class, so the untouched page renders exactly as before */
+.card.is-filtered { display: none; }
+.card .is-filtered { display: none; }
+
+/* --- exchange nav visibility (localStorage exNav) ----------------- */
+/* .nav-item[hidden] loses to the display:flex in the base rule, so the
+   toggle rides a class with an explicit !important */
+.nav-item.is-hidden { display: none !important; }
+
+/* --- credential slot state dots ---------------------------------- */
+/* ::before never enters textContent, so every status-string contract
+   (slot name / N chars / empty) is untouched */
+[data-slot][data-set="1"] .cred-status::before {
+  content: "\25CF"; color: var(--ok); margin-right: 5px;
+  font-size: 11px; vertical-align: 1px;
+}
+[data-slot][data-set="0"] .cred-status::before {
+  content: "\25CB"; color: var(--muted); margin-right: 5px;
+  font-size: 11px; vertical-align: 1px;
+}
+/* an unset slot has nothing to clear — the button says so by STATE, not by
+   fading into sub-AA contrast: dashed edge + recessed fill carry "off"
+   while the label keeps its readable ink (disabled controls are WCAG-
+   exempt anyway, but a legible disabled label is simply better). */
+.btn.cred-clear:disabled {
+  color: var(--muted); background: #f2f5f9; border-style: dashed;
+  border-color: var(--rule); cursor: not-allowed;
+}
+
+/* =============================================================== *
+ *  Stage 2 (0.5.56) — sidebar segments + credential EDIT mode     *
+ *  Pure addition, appended after the stage-1 block.               *
+ * =============================================================== */
+
+/* --- credential row edit state machine --------------------------- *
+   data-editing="1" = editing (input + SET + CLEAR + CANCEL),
+   data-editing="0" = read  (EDIT). Controls are toggled with display, never
+   removed: the TG card asserts input/SET/CLEAR by SELECTOR EXISTENCE, and an
+   empty slot always opens in the editing state so a Playwright fill() lands
+   on a visible box. The VERIFY button moved into the row's `...` menu —
+   it lives inside .cred-menu, so hiding the menu never touches .cred-vstat
+   (which shares the .cred-verify class). */
+.cred-more-wrap { position: relative; display: inline-flex; flex: none; }
+.btn.cred-more { padding: 5px 11px; min-width: 34px; letter-spacing: 0;
+  font-size: 14px; line-height: 1; }
+.cred-menu {
+  position: absolute; right: 0; top: calc(100% + 5px); z-index: 40;
+  min-width: 150px; padding: 6px; background: var(--panel);
+  border: 1px solid var(--line-solid); box-shadow: var(--shadow);
+}
+.cred-menu[hidden] { display: none; }
+.cred-menu .btn { display: flex; width: 100%; justify-content: center; }
+
+[data-slot]:not([data-editing="1"]) .cred-input,
+[data-slot]:not([data-editing="1"]) .cred-set,
+[data-slot]:not([data-editing="1"]) .cred-clear,
+[data-slot]:not([data-editing="1"]) .cred-cancel,
+[data-slot][data-editing="1"] .cred-edit { display: none; }
+/* read state: the `...` menu + EDIT pin to the right as one group (the
+   presence-only row keeps its own inline auto margin on the status line, so
+   it opts out of this rule) */
+[data-slot]:not([data-editing="1"]):not(.cred-presence) .cred-more-wrap {
+  margin-left: auto;
+}

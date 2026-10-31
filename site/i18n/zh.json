@@ -255,5 +255,10 @@
   "cert.freeBody": "没有付费档、没有使用费、没有功能门槛。一只狗，一个主人——不是一个渐渐需要你花钱的平台。",
   "footer.taglineA": "不是一个平台。",
   "footer.taglineB": "一只认识你的狗。",
-  "footer.fine": "为一个人而长 · 为任何人而造"
+  "footer.fine": "为一个人而长 · 为任何人而造",
+  "console.grpWork": "工作",
+  "console.grpBrowse": "浏览",
+  "console.grpSystem": "系统",
+  "console.vExchange": "交易所",
+  "console.vCommunity": "社区"
 }

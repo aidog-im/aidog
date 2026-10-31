@@ -255,5 +255,10 @@
   "cert.freeBody": "No paid tier, no usage fee, no feature gate. One dog, one owner — not a platform that grows to need your money.",
   "footer.taglineA": "Not a platform.",
   "footer.taglineB": "A dog that knows you.",
-  "footer.fine": "Grown for one · built for anyone"
+  "footer.fine": "Grown for one · built for anyone",
+  "console.grpWork": "Work",
+  "console.grpBrowse": "Browse",
+  "console.grpSystem": "System",
+  "console.vExchange": "Exchange",
+  "console.vCommunity": "Community"
 }

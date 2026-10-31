@@ -192,7 +192,7 @@ resume 后 gaps 原样保留；`degraded` 态分片照常执行。
 **（4）预算固化**：settings 四键 + start `budget{...}` 覆盖（§4）；解析
 值冻结进任务记录，之后改 settings 不再影响已启任务。
 
-**（5）看板 + 编排视图（控制台，Lane I）**：MISSIONS 卡的 recent/active 行
+**（5）看板 + 编排视图（控制台，Lane I）**：Missions 卡的 recent/active 行
 可点开详情区（里程碑分组、子任务五态符号、方法穷举 details、事件尾窗、
 预算占用与警示、状态徽章含 degraded）；missionCard 新增预算三输入
 （start 时只提交填写项，留空 = 取 settings）；新增只读 `#orchCard` 编排卡
@@ -246,7 +246,7 @@ silent，重启即重报），恢复进度/进入终态即静默；registry 读�
 detail 以字段名开头；三约束注入**计划片与执行片** prompt（`Owner constraints`
 段，F2 展示不等待），detail/row 回显、缺省 null。
 
-**（6）控制台（Lane K2）**：MISSIONS 卡新增可折叠约束区（datetime-local →
+**（6）控制台（Lane K2）**：Missions 卡新增可折叠约束区（datetime-local →
 ISO8601 传参、redlines textarea ≤500 实时计数、deliverable ≤200，只传填写
 项，不挤爆主表单）；详情区显示三约束（deadline 相对时间 + 过期红字、
 redlines/deliverable 文本块）与 **APPROVALS 区**（`paused_approve` 待批红

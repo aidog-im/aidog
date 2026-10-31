@@ -94,7 +94,7 @@ model key (or use the zero-key trial path) and the whole product activates.
 | 🔑 | **Zero-key onboarding** | Start with a trial model or bring your own key; secrets live in `secrets.env` (0600) and are **never echoed** — slot names only |
 | 💬 | **Streaming everywhere** | Provider SSE streaming, Telegram typing heartbeat, console chat cards with streamed replies |
 | ⚡ | **Local & portable** | stdlib-only core (voice/image extras lazy-load), service bound to local loopback, SSE streaming throughout, `execute_code` folds multi-step runs into one round trip |
-| 🖥️ | **Loopback web console** | Seven views — Overview · Chat · Skills · Exchange · Evolution · Stream · Settings (Usage & cost and Voice are cards): activation checklist with fix deep-links, credential slot editor (32 slots — names + lengths only, values never rendered), cron list with delete, capability grid, channel forms with send test, hooks editor, evolution schedule, Web3 caps — bound to `127.0.0.1`, token-gated writes |
+| 🖥️ | **Loopback web console** | Seven views — Overview · Chat · Skills · Exchange · Evolution · Stream · Settings (Usage & Cost and Voice are cards): activation checklist with fix deep-links, credential slot editor (32 slots — names + lengths only, values never rendered), cron list with delete, capability grid, channel forms with send test, hooks editor, evolution schedule, Web3 caps — bound to `127.0.0.1`, token-gated writes |
 | 🖼️ | **Media built in** | Local STT voice sessions with fuzzy wake phrases, TTS announcements, BYOK image generation, Telegram photo send |
 | 🖥️ | **Desktop HUD shell** | Electron frameless shell: transparency slider, always-on-top, tray — Linux packaging verified (Win/macOS not built yet, honestly) |
 | 👥 | **Multi-profile isolation** | `AIDOG_PROFILE` selects fully isolated profiles (settings / secrets / state / body) — 63/63 isolation gate + 18-leg real-machine E2E |
@@ -205,8 +205,8 @@ Every release is cut only after these run green on a clean tree:
 Catalog scope: **26 registered tools** · **9 exchange venues** · **18
 real-machine E2E legs** — all green.
 
-Locale packs: `en` (default) + `zh`, **883 keys** each, parity lint in CI;
-the marketing site ships its own **257-key** bilingual pack.
+Locale packs: `en` (default) + `zh`, **899 keys** each, parity lint in CI;
+the marketing site ships its own **262-key** bilingual pack.
 
 ## Documentation
 

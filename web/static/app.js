@@ -273,6 +273,7 @@ async function refreshCaps() {
   renderEnvOverride();
   renderCapGrid();             // B2: Overview system card rides along too
   renderOrch();                // Lane I: orchestration summary repaints too
+  applyExNav();                // 0.5.56: auto mode follows the fresh catalog
 }
 
 function mediaLangRefresh() {
@@ -3066,6 +3067,15 @@ function credRow(slot, writable, labelKey) {
     label.textContent = dict[slotKey] !== undefined ? dict[slotKey] : name;
   }
   if (name) label.title = name;    // hover: the exact secrets.env slot name
+  // 0.5.56 restyle: the row carries its own set/empty state for the CSS dot
+  // (::before only — it never enters textContent, so every status-string
+  // contract above is untouched).
+  wrap.dataset.set = slot && slot.set ? "1" : "0";
+  wrap.dataset.writable = writable ? "1" : "0";
+  // stage 2 (0.5.56): edit-mode state machine. An EMPTY slot always opens in
+  // the editing state (the box a Playwright fill() lands on must be visible);
+  // a set slot opens in the read state and only EDIT reveals the controls.
+  wrap.dataset.editing = !slot || !slot.set ? "1" : "0";
   row.appendChild(label);
   const st = document.createElement("div");
   st.className = "cred-status stat-note";
@@ -3073,23 +3083,45 @@ function credRow(slot, writable, labelKey) {
   // 0.5.54: one VERIFY button per row (shape check everywhere, real remote
   // probe for the four slots that have one) + its own result line. The
   // result renders the server's reason word + expectation — never a value.
-  const mk = (cls, key, fb) => {
+  const mk = (cls, key, fb, gated) => {
     const b = document.createElement("button");
     b.type = "button";
     b.className = "btn " + cls;
     b.dataset.i18n = key;
     b.textContent = t(key, fb);
-    if (!writable) b.disabled = true;
+    // EDIT / CANCEL only move the row's own state — they never write, so they
+    // stay clickable on a read-only console (gated === false).
+    if (gated !== false && !writable) b.disabled = true;
     return b;
   };
+  // stage 2: the row's `...` menu. VERIFY lives inside it, so hiding the menu
+  // can never touch .cred-vstat (that line shares the .cred-verify class).
+  const moreWrap = document.createElement("div");
+  moreWrap.className = "cred-more-wrap";
+  const moreBtn = document.createElement("button");
+  moreBtn.type = "button";
+  moreBtn.className = "btn cred-more";
+  moreBtn.dataset.i18nT = "cred.more";
+  moreBtn.title = t("cred.more", "more actions");
+  moreBtn.setAttribute("aria-label", t("cred.more", "more actions"));
+  moreBtn.setAttribute("aria-haspopup", "true");
+  moreBtn.setAttribute("aria-expanded", "false");
+  moreBtn.textContent = "\u22ef";                       // horizontal ellipsis
+  const menu = document.createElement("div");
+  menu.className = "cred-menu";
+  menu.hidden = true;
+  menu.appendChild(mk("cred-verify", "cred.verify", "VERIFY"));
+  moreWrap.appendChild(moreBtn);
+  moreWrap.appendChild(menu);
   const vst = document.createElement("div");
   vst.className = "cred-vstat cred-verify stat-note";
   vst.hidden = true;
   if (name === "WEB_TOKEN") {
     // presence-only: the console never rewrites its own gate
+    wrap.classList.add("cred-presence");   // opts out of the read-state auto margin
     st.style.marginLeft = "auto";
     row.appendChild(st);
-    row.appendChild(mk("cred-verify", "cred.verify", "VERIFY"));
+    row.appendChild(moreWrap);
     wrap.appendChild(row);
     wrap.appendChild(vst);
     const note = document.createElement("div");
@@ -3110,8 +3142,14 @@ function credRow(slot, writable, labelKey) {
   if (!writable) input.disabled = true;
   row.appendChild(input);
   row.appendChild(mk("cred-set", "cred.set", "SET"));
-  row.appendChild(mk("cred-clear", "cred.clear", "CLEAR"));
-  row.appendChild(mk("cred-verify", "cred.verify", "VERIFY"));
+  const clearBtn = mk("cred-clear", "cred.clear", "CLEAR");
+  // an unset slot has nothing to clear — the button states it (SET success
+  // re-enables it below; CLEAR success disables it again).
+  if (!slot || !slot.set) clearBtn.disabled = true;
+  row.appendChild(clearBtn);
+  row.appendChild(moreWrap);
+  row.appendChild(mk("cred-edit", "cred.edit", "EDIT", false));
+  row.appendChild(mk("cred-cancel", "cred.cancel", "CANCEL", false));
   wrap.appendChild(row);
   wrap.appendChild(st);
   wrap.appendChild(vst);
@@ -3255,9 +3293,11 @@ async function credWrite(name, value, wrap, input) {
       (st.dataset.restartHint === "1"
         ? " · " + t("cred.restartHint", "restart the chat service to apply")
         : "");
+    syncCredSetState(wrap, slot.set === true);
     // the same slot may be rendered twice (Credentials + Telegram card):
     // keep every row for this name in sync with the fresh server truth
     document.querySelectorAll(`[data-slot="${name}"]`).forEach(w => {
+      syncCredSetState(w, slot.set === true);
       if (w === wrap) return;
       const st2 = w.querySelector(".cred-status");
       if (!st2 || st2.dataset.errDetail) return;
@@ -3277,10 +3317,29 @@ async function credWrite(name, value, wrap, input) {
 
 function wireCredList() {
   const handler = e => {
-    const btn = e.target.closest(".cred-set, .cred-clear, .cred-verify");
-    if (!btn) return;
     const wrap = e.target.closest("[data-slot]");
     if (!wrap) return;
+    // `...` menu: toggle this row's own menu only
+    if (e.target.closest(".cred-more")) {
+      const more = wrap.querySelector(".cred-more");
+      setCredMenu(wrap, more && more.getAttribute("aria-expanded") !== "true");
+      return;
+    }
+    // stage 2: EDIT opens the row, CANCEL folds it back to the read state
+    const toggle = e.target.closest(".cred-edit, .cred-cancel");
+    if (toggle) {
+      const open = toggle.classList.contains("cred-edit");
+      wrap.dataset.editing = open ? "1" : "0";
+      setCredMenu(wrap, false);
+      if (open) {
+        const box = wrap.querySelector(".cred-input");
+        if (box && !box.disabled) box.focus();
+      }
+      return;
+    }
+    const btn = e.target.closest(".cred-set, .cred-clear, .cred-verify");
+    if (!btn) return;
+    setCredMenu(wrap, false);          // an action closes the menu
     const name = wrap.dataset.slot;
     const input = wrap.querySelector(".cred-input");
     const clear = btn.classList.contains("cred-clear");
@@ -3308,6 +3367,30 @@ function wireCredList() {
   });
   const all = document.getElementById("credVerifyAll");
   if (all) all.addEventListener("click", () => credVerify(null, null));
+  // menus are transient: any click outside a row's menu folds it, Escape folds
+  // them all (bound once — wireCredList runs a single time at boot)
+  document.addEventListener("click", e => {
+    if (e.target && e.target.closest && e.target.closest(".cred-more-wrap")) return;
+    document.querySelectorAll(".cred-menu").forEach(m => {
+      if (!m.hidden) setCredMenu(m.closest("[data-slot]"), false);
+    });
+  });
+  document.addEventListener("keydown", e => {
+    if (e.key !== "Escape") return;
+    document.querySelectorAll(".cred-menu").forEach(m => {
+      if (!m.hidden) setCredMenu(m.closest("[data-slot]"), false);
+    });
+  });
+}
+
+/* open/close one credential row's `...` menu (aria-expanded stays truthful) */
+function setCredMenu(wrap, open) {
+  if (!wrap) return;
+  const menu = wrap.querySelector(".cred-menu");
+  const more = wrap.querySelector(".cred-more");
+  if (!menu || !more) return;
+  menu.hidden = !open;
+  more.setAttribute("aria-expanded", open ? "true" : "false");
 }
 
 /* ------------------------------------------------ slot verification (0.5.54) --
@@ -4012,6 +4095,10 @@ function repaintSaveState() {
 function settingsRelang() {
   paintCredHint();
   repaintCredStatuses();   // "set / empty / {n} chars" follows the language too
+  // stage 2: the `...` button carries a glyph, so its accessible name is set
+  // here instead of through a data-i18n text node
+  document.querySelectorAll(".cred-more").forEach(b =>
+    b.setAttribute("aria-label", t("cred.more", "more actions")));
   repaintSaveState();      // activation car: saved row + restart hint follow
   renderEndpoints();       // v0.5.55: manager rows rebuilt with pack strings
   paintChanChips();
@@ -7169,6 +7256,144 @@ document.getElementById("alertSelect").addEventListener("change", e => {
   if (statusData) applyAlert(statusData.advisory);
 });
 
+
+/* ------------------------------------------- restyle car (0.5.56) ------
+   Three additions, all fail-soft and all pack-driven:
+     1. syncCredSetState  — the credential row's set/empty state dot and the
+        CLEAR button's disabled state (an unset slot has nothing to clear);
+     2. setApplyFilter    — Settings group chips + search. PURE FILTER: the
+        default state (All + empty search) adds no class and hides nothing,
+        so the untouched page is byte-for-byte the page tests already know.
+        The Access card is data-setgroup="always" and is never group-filtered
+        (#saveBtn / #tokenInput must stay reachable);
+     3. exNav             — Exchange nav visibility, tri-state localStorage
+        `exNav`: "" (=auto) / "show" / "hide". auto = the nav item shows once
+        ANY key-auth venue reports configured=true (chain/public venues are
+        always configured, so they must NOT count). Hiding rides a class
+        (.nav-item[hidden] would lose to the base rule's display:flex). A
+        deep link ?view=exchange always lands, whatever the state — only a
+        visible -> hidden FLIP moves a user sitting on the Exchange view back
+        to Overview; a state that never changed never moves them. */
+
+function syncCredSetState(w, isSet) {
+  if (!w || !w.dataset) return;
+  w.dataset.set = isSet ? "1" : "0";
+  // stage 2: SET folds the row back to its read state, CLEAR re-opens it —
+  // an empty slot is always in the editing state
+  w.dataset.editing = isSet ? "0" : "1";
+  const cb = w.querySelector(".cred-clear");
+  if (cb) cb.disabled = w.dataset.writable === "1" ? !isSet : true;
+}
+
+/* --- 1. Settings group chips + search ------------------------------- */
+let setGroup = "all";
+
+function setApplyFilter() {
+  const grid = document.querySelector("#view-settings .set-grid");
+  const searchEl = document.getElementById("setSearch");
+  if (!grid || !searchEl) return;
+  const q = (searchEl.value || "").trim().toLowerCase();
+  grid.querySelectorAll(":scope > .card").forEach(card => {
+    const g = card.dataset.setgroup || "general";
+    const groupOk = g === "always" || setGroup === "all" || g === setGroup;
+    // reset any child-level marks from the previous pass first
+    card.querySelectorAll(".is-filtered").forEach(el =>
+      el.classList.remove("is-filtered"));
+    let show = groupOk;
+    if (groupOk && q) {
+      const h2 = card.querySelector("h2");
+      const title = ((h2 && h2.textContent) || "").toLowerCase();
+      if (title.includes(q)) {
+        show = true;                    // title hit: the whole card stays
+      } else {
+        let hits = 0;
+        [...card.children].forEach(ch => {
+          if (ch.tagName === "H2") return;
+          let hay = (ch.textContent || "").toLowerCase();
+          ch.querySelectorAll("input, textarea, select").forEach(f => {
+            if (f.placeholder) hay += " " + f.placeholder.toLowerCase();
+          });
+          if (hay.includes(q)) { hits += 1; return; }
+          ch.classList.add("is-filtered");
+        });
+        show = hits > 0;                // nothing matched: the card goes too
+      }
+    }
+    if (!show) card.querySelectorAll(".is-filtered").forEach(el =>
+      el.classList.remove("is-filtered"));
+    card.classList.toggle("is-filtered", !show);
+  });
+}
+
+function wireSettingsFilter() {
+  const searchEl = document.getElementById("setSearch");
+  if (searchEl && !searchEl.dataset.wired) {
+    searchEl.dataset.wired = "1";
+    searchEl.addEventListener("input", setApplyFilter);
+  }
+  document.querySelectorAll(".set-chip").forEach(btn => {
+    if (btn.dataset.wired) return;
+    btn.dataset.wired = "1";
+    btn.addEventListener("click", () => {
+      setGroup = btn.dataset.setfilter || "all";
+      document.querySelectorAll(".set-chip").forEach(b =>
+        b.classList.toggle("is-active", b === btn));
+      setApplyFilter();
+    });
+  });
+}
+
+/* --- 2. Exchange nav visibility (localStorage exNav) ----------------- */
+const EXNAV_KEY = "exNav";
+
+function exNavMode() {
+  try {
+    const v = localStorage.getItem(EXNAV_KEY) || "";
+    return (v === "show" || v === "hide") ? v : "";
+  } catch (e) { return ""; }
+}
+
+function exNavVisible() {
+  const mode = exNavMode();
+  if (mode === "show") return true;
+  if (mode === "hide") return false;
+  return exRows().some(v => v && v.auth === "key" && v.configured === true);
+}
+
+let exNavWasVisible = null;   // last painted state; null = first paint
+
+function applyExNav() {
+  const item = document.querySelector('.nav-item[data-view="exchange"]');
+  const next = exNavVisible();
+  if (item) item.classList.toggle("is-hidden", !next);
+  const sel = document.getElementById("exNavSel");
+  if (sel && sel.value !== exNavMode()) sel.value = exNavMode();
+  // Only a visible -> hidden FLIP walks off the Exchange view: a deep link
+  // ?view=exchange (first paint, whatever the state) always lands, and an
+  // auto state that never changes never moves the user.
+  if (exNavWasVisible === true && !next && currentView === "exchange") {
+    setView("overview", true);
+  }
+  exNavWasVisible = next;
+}
+
+function wireExNav() {
+  wireSettingsFilter();
+  applyExNav();       // paint the rule now: auto must not flash the item
+  const sel = document.getElementById("exNavSel");
+  if (sel && !sel.dataset.wired) {
+    sel.dataset.wired = "1";
+    sel.addEventListener("change", () => {
+      const v = (sel.value === "show" || sel.value === "hide") ? sel.value : "";
+      try {
+        if (v) localStorage.setItem(EXNAV_KEY, v);
+        else localStorage.removeItem(EXNAV_KEY);
+      } catch (e) { /* private mode: the choice simply does not persist */ }
+      applyExNav();            // the flip rule above owns any walk-off
+    });
+  }
+}
+
 const startLang = QS_LANG || localStorage.getItem(LANG_KEY) || "en";
 runBoot();
 setView(currentView, false);      // deep link applied before the first paint
@@ -7186,6 +7411,7 @@ loadChatHistory();   // console session restored at boot (read-only route)
 refreshVoiceCap();   // engine status visible before the first orb tap (#4)
 refreshCaps();       // media face: stt/image presence for the chat cards
 renderExchange();    // exchange panel paints its honest fallback at once
+wireExNav();         // 0.5.56: group chips + search + exchange nav toggle
 setInterval(tickClock, 1000); tickClock();
 setInterval(tickModeltier, 1000);   // X6 cooling countdown (hidden = no-op)
 setInterval(refreshUsage, 60000);
