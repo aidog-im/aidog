@@ -1,6 +1,6 @@
 {
-  "version": "0.5.14",
+  "version": "0.5.15",
   "date": "2026-10-19",
   "channel": "private",
-  "notes": "Gate remediation + i18n-clean site label + gate-pipe pitfall. (1) De-brand fix: the 0.5.13 release notes referenced the upstream kernel by real name — purged from this shipped manifest (third-party real names live only in the deny-classified internal research vault); the v0.5.13 GitHub Release body was sanitized in place the same day. (2) Site language-toggle label moved into the site locale packs (key i18n.toggle, ASCII inline default) — source lint back to 0 violations. (3) HANDOVER §6 pitfall: never run quality gates through pipes (cmd | head masks the exit code) — gates run bare with explicit rc. Verification after fix: publish gate READY(0), source lint 0, suites 174/39/15/58, update check rc=0."
+  "notes": "Console UI fixes surfaced by the first end-to-end install acceptance (clean clone from origin to a native Linux path, fresh machine-local files, full gate run). (1) Horizontal overflow fix: the status mini-panel row now uses minmax(0,1fr) tracks with min-width:0, so a long watchdog detail line is ellipsized instead of widening the row past the viewport (desktop scrollW 2049 -> 1440; mobile layout no longer forced wider than the device). (2) Language race fix: an explicit ?lang= view override now beats the saved settings.language, so ?lang=zh renders Chinese deterministically instead of racing the settings fetch and falling back to English. Verified after fix: suites 174/39/15/58, doctor 9 active + 20 SKIP 0F/0W, publish gate READY(0), update check rc=0, dual-viewport screenshots with no overflow warning."
 }

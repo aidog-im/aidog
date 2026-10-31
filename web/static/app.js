@@ -6,6 +6,7 @@
 const LANG_KEY = "aidog_lang";
 const TOKEN_KEY = "aidog_token";
 const params = new URLSearchParams(location.search);
+const QS_LANG = params.get("lang");  // one-off ?lang= override (beats saved settings.language for this view)
 const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 let dict = {};
@@ -645,7 +646,10 @@ async function loadSettings() {
     document.getElementById("alertSelect").value = settings.alert_preview || "off";
     document.getElementById("refreshSelect").value = String(settings.refresh_sec || 10);
     const stored = localStorage.getItem(LANG_KEY);
-    if (!stored && settings.language && settings.language !== document.documentElement.lang) {
+    // An explicit ?lang= view override wins over the saved setting for this
+    // page view — otherwise the settings fetch races loadLang() and can flip
+    // the UI back to the saved language after the pack already applied.
+    if (!stored && !QS_LANG && settings.language && settings.language !== document.documentElement.lang) {
       loadLang(settings.language);
     }
     if (!settings.language) settings.language = document.documentElement.lang;
@@ -794,8 +798,7 @@ document.getElementById("alertSelect").addEventListener("change", e => {
   if (statusData) applyAlert(statusData.advisory);
 });
 
-const startLang = localStorage.getItem(LANG_KEY) ||
-  new URLSearchParams(location.search).get("lang") || "en";
+const startLang = localStorage.getItem(LANG_KEY) || QS_LANG || "en";
 runBoot();
 loadLang(startLang);
 loadSettings().then(() => { scheduleRefresh(); renderVoice(); });

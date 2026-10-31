@@ -240,9 +240,11 @@ body {
 @keyframes nodePulse { 50% { opacity: .55; } }
 .tickmark { stroke: rgba(0, 229, 255, .35); stroke-width: 1; }
 
-.panel-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+/* minmax(0, …) caps every track: .mini details are single-line (nowrap) and
+   a long watchdog line would otherwise widen the whole row past the viewport. */
+.panel-row { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; }
 .mini { background: var(--panel); border: 1px solid var(--line); padding: 8px 6px;
-  text-align: center; }
+  text-align: center; min-width: 0; }
 .mini .m-name { font-size: 10px; letter-spacing: .14em; color: var(--muted); }
 .mini .m-state { font-size: 12px; margin-top: 3px; font-weight: 600; letter-spacing: .1em; }
 .mini.up .m-state { color: var(--ok); }
@@ -352,7 +354,7 @@ footer { display: flex; justify-content: space-between; margin-top: 14px;
   .head-right { margin-left: auto; }
   .clock { font-size: 15px; }
   .grid { grid-template-columns: 1fr; }
-  .panel-row { grid-template-columns: repeat(3, 1fr); }
+  .panel-row { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   #ring { width: min(88vw, 340px); }
   .ring-state { font-size: 17px; }
   .stat-grid { grid-template-columns: 1fr 1fr; }
