@@ -13,7 +13,9 @@
   },
   "mycore": {
     "base_url": "http://127.0.0.1:3460/v1",
-    "model": "mimo-v2.6-flash"
+    "model": "mimo-v2.6-flash",
+    "context_dirs": "",
+    "upstreams": ""
   },
   "evolution": {
     "enabled": false,

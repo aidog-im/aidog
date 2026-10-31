@@ -72,6 +72,52 @@ memory home through the same chain — first hit wins:
   > legacy profile `external_dirs:` (shim-gated — dies with P5-5). Existing
   dirs only, deduplicated; scoring/ranking behavior is unchanged.
 
+### Skill frontmatter compatibility (car 1-D3, 2026-10-20)
+
+`lib/skill_route.py` parses `SKILL.md` frontmatter with a **conservative YAML
+subset**, field-wise aligned with the `SKILL.md` + YAML frontmatter convention
+that the in-repo skills-ecosystem survey records as the de-facto standard
+(anthropics/skills, `docs/research/` survey §B [S1]) and with the
+agentskills.io open standard [S2]. **Spec caveat**: this car had no network,
+so field details come from that survey, not a live spec fetch — re-verify
+against the survey/spec before widening the surface.
+
+- **Aligned/parsed fields**: `name` and `description` as plain, `'…'` / `"…"`
+  quoted, multi-line quoted, and `|` / `>` block scalars (with `+`/`-`
+  chomping and indentation indicators). `license`, `allowed-tools` and
+  `version` additionally surface **per hit** in `--json` output, present-only
+  (a skill that declares none simply lacks the key); no existing JSON key is
+  renamed, removed or reordered for skills that declare nothing.
+- **Tolerance contract (never fatal)**: unknown keys (`unknown-field: …`),
+  nested-looking indents (`metadata:` sub-lines are skipped, not interpreted),
+  comments and malformed lines never raise — `parse_frontmatter_fields`
+  fail-softs to `{}`. Absent **or unterminated** frontmatter keeps the
+  pre-existing behavior exactly: H1 + first prose line fallback
+  (`fallback_desc`), name falls back to the directory name.
+- **Ranking unchanged**: corpus stays `name + description + directory name`
+  and the score formula is untouched; a multi-line description enters the
+  corpus verbatim (no truncation, no first-line-only shortcut). Regression
+  wall: `python3 tests/skill_route_p4.py` = **30/30** (the original 15
+  contract checks unchanged, 15 new frontmatter checks added).
+- **Progressive disclosure (body lazy-load) is already in force** — evidence:
+  - `mycore/assembly.py:12` — skill descriptions stay OUT of the system
+    prompt by design; the loop calls the `skill_route` tool instead (lazy bodies);
+  - `mycore/assembly.py:75` — system rule: call `skill_route` **before**
+    reading any SKILL.md (TOP1 only, max 2 bodies per turn);
+  - `mycore/tools.py:292` / `:295` — the tool returns the verdict the loop
+    reads before any body load (registration blurb `:416`: "TOP3 before
+    loading any SKILL.md body");
+  - this document:55 — upstream body loading is on demand (`skill_view`);
+  - `lib/skill_route.py:2` — "TOP3 before any SKILL.md body load".
+  So a third-party skill's frontmatter alone drives selection; its body is
+  read only after TOP1 is chosen — the frontmatter subset above is therefore
+  the full surface that needs standards alignment today.
+- **Honest boundaries**: parser/field compatibility only — **no runtime
+  auto-install**, no registry integration (skills stay owner-installed from
+  trusted sources: browse-then-adopt, catalogue ≠ endorsement); no full YAML
+  validation (subset parser, fail-soft by design); nested structured values
+  are tolerated but not interpreted.
+
 ## 3. GA checklist (deltas from transition)
 
 - [x] memory sync self-contained (env `AIDOG_MEMORY_SRC` > `deploy/memory_sources.local`

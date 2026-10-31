@@ -31,6 +31,10 @@ Skill roots, in resolution order (deduplicated, existing dirs only):
 Matching algorithm (stdlib only, deterministic):
   - corpus per skill = name + frontmatter description (fallback: H1 + first
     prose paragraph) + directory name
+  - frontmatter parse = conservative YAML subset (quoted scalars incl.
+    multi-line quoted values, |/> block scalars; unknown/nested/malformed
+    lines tolerated, never fatal); optional license/allowed-tools/version
+    surface in --json hits (present-only)
   - tokens = ASCII stems (strip plural/-ing/-ed) + CJK bigrams (single char
     kept as-is for one-char runs)
   - score = ASCII hit x2 + CJK bigram hit x1 + description whole-phrase (>=2
@@ -63,22 +67,145 @@ def read_text(path: Path) -> str | None:
         return None
 
 
+# --- frontmatter: conservative YAML subset, aligned to the SKILL.md + YAML ---
+# --- frontmatter convention (anthropics/skills / agentskills.io; field list ---
+# --- sourced from the in-repo skills-ecosystem survey under docs/research/, ---
+# --- skills section B). Tolerance contract: unknown keys, nested-looking ---
+# --- indents and malformed lines are skipped, never fatal; ---
+# --- absent/unterminated frontmatter -> {}. --------------------------------
+
+FRONTMATTER_RE = re.compile(r"^---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|$)", re.S)
+KEY_RE = re.compile(r"^([A-Za-z0-9_.-]+):[ \t]*(.*)$")
+BLOCK_RE = re.compile(r"^[|>][+-]?[0-9]*$")
+QUOTED_RE = re.compile(r"^([\"'])(.*?)\1[ \t]*(?:#.*)?$")
+
+# Optional frontmatter fields surfaced in --json hits: emitted only when the
+# skill declares a non-empty value; never removes or renames existing keys.
+JSON_EXTRA_FIELDS = ("license", "allowed-tools", "version")
+
+
+def _fold_quoted(lines: list[str]) -> str:
+    """YAML flow-scalar folding: a break between text folds to a space, a
+    blank line stays a break; trailing breaks are clipped."""
+    out: list[str] = []
+    buf: list[str] = []
+    for ln in lines:
+        if ln.strip():
+            buf.append(ln.strip())
+        else:
+            if buf:
+                out.append(" ".join(buf))
+                buf = []
+            out.append("\n")
+    if buf:
+        out.append(" ".join(buf))
+    return "".join(out).rstrip("\n")
+
+
+def _block_scalar(style: str, lines_: list[str]) -> str:
+    """Literal (|) keeps line breaks; folded (>) joins text lines with
+    spaces. Indentation = min indent of non-blank lines; trailing blanks
+    clipped (YAML clip semantics)."""
+    nonblank = [ln for ln in lines_ if ln.strip()]
+    if not nonblank:
+        return ""
+    indent = min(len(ln) - len(ln.lstrip()) for ln in nonblank)
+    content = [ln[indent:] if ln.strip() else "" for ln in lines_]
+    if style == "|":
+        return "\n".join(content).rstrip("\n")
+    return _fold_quoted(content)
+
+
+def _unquote(quote: str, body: str) -> str:
+    if quote == "'":
+        return body.replace("''", "'")
+    return re.sub(r'\\(["\\])', r"\1", body)
+
+
+def _plain_scalar(raw: str) -> str:
+    """Unquoted value: YAML comment rule — a '#' preceded by whitespace ends
+    the scalar; a leading '#' means an empty (null) value. Otherwise verbatim."""
+    if raw.startswith("#"):
+        return ""
+    cm = re.search(r"\s#", raw)
+    return raw[: cm.start()].rstrip() if cm else raw
+
+
+def _read_multiline_quoted(lines: list[str], start: int, quote: str,
+                            head: str) -> tuple[str, int]:
+    """Quoted scalar opened on the key line but not closed there: consume the
+    following indented/blank lines as one flow scalar (multi-line quoted
+    description). -> (value, index of the last consumed line)."""
+    pieces = [head]
+    last = start
+    for j in range(start + 1, len(lines)):
+        ln = lines[j]
+        if not ln.strip():
+            pieces.append("")
+            last = j
+            continue
+        if not ln[0].isspace():
+            break  # unterminated: stop, the next line is parsed as a key
+        s = ln.strip()
+        pos = s.find(quote)
+        if pos >= 0:
+            pieces.append(s[:pos])
+            return _unquote(quote, _fold_quoted(pieces)), j
+        pieces.append(s)
+        last = j
+    return _unquote(quote, _fold_quoted(pieces)), last
+
+
+def _parse_frontmatter_fields(text: str) -> dict[str, str]:
+    """-> flat {key: value} map of the frontmatter; {} if absent/unterminated."""
+    if not text.startswith("---"):
+        return {}
+    m = FRONTMATTER_RE.match(text)
+    if not m:
+        return {}
+    lines = m.group(1).splitlines()
+    fields: dict[str, str] = {}
+    i = 0
+    while i < len(lines):
+        km = KEY_RE.match(lines[i])
+        if not km:  # blanks, comments, nested indents, garbage -> tolerated
+            i += 1
+            continue
+        key, rest = km.group(1), km.group(2).strip()
+        if BLOCK_RE.match(rest):
+            j = i + 1
+            while j < len(lines) and (not lines[j].strip() or lines[j][0].isspace()):
+                j += 1
+            block = lines[i + 1:j]
+            while block and not block[-1].strip():
+                block.pop()
+            fields[key] = _block_scalar(rest[0], block)
+            i = j - 1
+        elif rest[:1] in ("'", '"') and not QUOTED_RE.match(rest):
+            value, last = _read_multiline_quoted(lines, i, rest[0], rest[1:])
+            fields[key] = value
+            i = last
+        else:
+            qm = QUOTED_RE.match(rest)
+            fields[key] = _unquote(qm.group(1), qm.group(2)) if qm else _plain_scalar(rest)
+        i += 1
+    return fields
+
+
+def parse_frontmatter_fields(text: str) -> dict[str, str]:
+    """Best-effort frontmatter parse -> flat {key: value} (YAML subset above).
+    Fail-soft by contract: an unexpected shape degrades to {} so a malformed
+    skill file can never crash the router (routing falls back to H1+prose)."""
+    try:
+        return _parse_frontmatter_fields(text)
+    except Exception:  # noqa: BLE001 — frontmatter tolerance is the contract
+        return {}
+
+
 def parse_frontmatter(text: str) -> tuple[str | None, str | None]:
     """-> (name, description) from YAML-ish frontmatter; (None, None) if absent."""
-    if not text.startswith("---"):
-        return None, None
-    m = re.match(r"^---\n(.*?)\n---\n?", text, re.S)
-    if not m:
-        return None, None
-    name = desc = None
-    for line in m.group(1).splitlines():
-        mn = re.match(r"^name:\s*(.*)$", line.strip())
-        if mn:
-            name = mn.group(1).strip().strip("'\"")
-        md = re.match(r"^description:\s*(.*)$", line.strip())
-        if md:
-            desc = md.group(1).strip().strip("'\"")
-    return name, desc
+    fields = parse_frontmatter_fields(text)
+    return fields.get("name") or None, fields.get("description") or None
 
 
 def fallback_desc(text: str) -> str:
@@ -207,14 +334,16 @@ def load_skills(roots: list[Path]) -> list[dict]:
             text = read_text(child / "SKILL.md")
             if text is None:
                 continue
-            name, desc = parse_frontmatter(text)
+            fields = parse_frontmatter_fields(text)
+            desc = fields.get("description") or None
             if not desc:
                 desc = fallback_desc(text)
-            name = name or child.name
+            name = fields.get("name") or child.name
             corpus = f"{name} {child.name} {desc}"
             a, c = tokenize(corpus)
             out.append({
                 "dir": child.name, "name": name, "desc": desc,
+                "extra": {k: fields[k] for k in JSON_EXTRA_FIELDS if fields.get(k)},
                 "ascii": a | {stem(t) for t in re.split(r"[-_/]", child.name)},
                 "bigrams": c,
                 "runs": set(cjk_runs(corpus)),
@@ -244,8 +373,10 @@ def route(query: str, roots: list[Path], topn: int = 3) -> list[dict]:
             reasons.append('desc contains "%s"' % "/".join(matched_bi[:4]))
         if name_hit:
             reasons.append("name match")
-        scored.append({"name": s["name"], "dir": s["dir"], "score": score,
-                       "reason": "; ".join(reasons), "desc": s["desc"]})
+        entry = {"name": s["name"], "dir": s["dir"], "score": score,
+                 "reason": "; ".join(reasons), "desc": s["desc"]}
+        entry.update(s.get("extra") or {})  # optional frontmatter fields,
+        scored.append(entry)                # present-only (license etc.)
     scored.sort(key=lambda x: (-x["score"], x["name"]))
     return scored[:topn]
 

@@ -128,23 +128,39 @@ def _read_file(path: str, offset: int = 0, limit: int = 200,
     return "\n".join(out) if out else f"[empty: {p.name} has {len(lines)} lines]"
 
 
+def _snapshot_note(path: Path, state_dir: str | Path | None) -> str:
+    """Best-effort pre-write snapshot (car 1-D2) -> short result suffix.
+    Never raises and never blocks the write — checkpointing is a safety net,
+    not a gate; an existing file that could not be snapshotted says so."""
+    from . import checkpoint  # local import: keeps the module graph acyclic
+    if not path.is_file():
+        return ""                              # create — nothing to roll back
+    entry = checkpoint.snapshot(path, state_dir)
+    if entry is not None:
+        return f" · checkpoint #{entry['id']}"
+    return " · previous file not checkpointed (too large or unreadable)"
+
+
 def _write_file(path: str, content: str,
-                roots: tuple[str, ...] | list[str] = DEFAULT_ALLOWED_ROOTS) -> str:
+                roots: tuple[str, ...] | list[str] = DEFAULT_ALLOWED_ROOTS,
+                state_dir: str | Path | None = None) -> str:
     p = resolve_inside(path, roots)
     if p.is_dir():
         raise ToolError(f"is a directory: {p}")
     if not isinstance(content, str):
         raise ToolError("content must be a string")
     p.parent.mkdir(parents=True, exist_ok=True)
+    note = _snapshot_note(p, state_dir)        # previous bytes, before overwrite
     try:
         p.write_text(content, encoding="utf-8")
     except OSError as e:
         raise ToolError(f"cannot write {p.name}: {type(e).__name__}") from None
-    return f"wrote {len(content)} chars to {p}"
+    return f"wrote {len(content)} chars to {p}{note}"
 
 
 def _edit_file(path: str, old_text: str, new_text: str,
-               roots: tuple[str, ...] | list[str] = DEFAULT_ALLOWED_ROOTS) -> str:
+               roots: tuple[str, ...] | list[str] = DEFAULT_ALLOWED_ROOTS,
+               state_dir: str | Path | None = None) -> str:
     """Exact-string replace; `count` defaults to 1 (must match exactly once)."""
     p = resolve_inside(path, roots)
     if not p.is_file():
@@ -162,8 +178,9 @@ def _edit_file(path: str, old_text: str, new_text: str,
         raise ToolError("old_text not found in file")
     if n > 1:
         raise ToolError(f"old_text matches {n} times; must be unique (add context)")
+    note = _snapshot_note(p, state_dir)        # previous bytes, before replace
     p.write_text(text.replace(old_text, new_text, 1), encoding="utf-8")
-    return f"edited {p} (1 replacement)"
+    return f"edited {p} (1 replacement){note}"
 
 
 def _run_bash(command: str, timeout: int = BASH_TIMEOUT,
@@ -376,8 +393,9 @@ def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
                    state_dir: str | Path | None = None) -> ToolRegistry:
     """The 9 core tools (design §14.3 + cron/Phase B2). `allowed_roots`
     overrides path policy (tests use temp dirs; production default = repo +
-    system temp). `state_dir` anchors the cron registry (service passes its
-    own state dir; None = resolve AIDOG_MC_STATE at tool-call time)."""
+    system temp). `state_dir` anchors the cron registry AND the pre-write
+    checkpoints (service passes its own state dir; None = resolve
+    AIDOG_MC_STATE at tool-call time)."""
     roots = tuple(allowed_roots) if allowed_roots else DEFAULT_ALLOWED_ROOTS
     r = ToolRegistry()
     r.register("read_file", "Read a text file with line numbers.",
@@ -389,12 +407,12 @@ def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
     r.register("write_file", "Create or overwrite a text file.",
                {"type": "object", "properties": {"path": _STR, "content": _STR},
                 "required": ["path", "content"]},
-               lambda path, content: _write_file(path, content, roots))
+               lambda path, content: _write_file(path, content, roots, state_dir))
     r.register("edit_file", "Replace one unique occurrence of old_text in a file.",
                {"type": "object", "properties": {
                    "path": _STR, "old_text": _STR, "new_text": _STR},
                 "required": ["path", "old_text", "new_text"]},
-               lambda path, old_text, new_text: _edit_file(path, old_text, new_text, roots))
+               lambda path, old_text, new_text: _edit_file(path, old_text, new_text, roots, state_dir))
     r.register("run_bash", f"Run a shell command in the repo root (<= {BASH_TIMEOUT}s).",
                {"type": "object", "properties": {
                    "command": _STR, "timeout": _INT}, "required": ["command"]},

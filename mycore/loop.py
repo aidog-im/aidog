@@ -82,7 +82,14 @@ def run_turn(messages: list[dict], chat: ChatFn, registry: ToolRegistry,
         try:
             doc = chat(**chat_kw)
         except Exception as e:  # noqa: BLE001 — contract: honest stop, no raise
-            note = (f"[mycore: model call failed ({type(e).__name__}); "
+            from .model import ModelError as _ModelError
+            # ModelError text is vetted (status codes / class names / endpoint
+            # urls — never keys), and the failover chain annotates its final
+            # failure with what was tried, so surfacing it is both safe and
+            # necessary; any other exception keeps to the class name so
+            # arbitrary text never reaches a reply.
+            detail = f" — {e}" if isinstance(e, _ModelError) and str(e) else ""
+            note = (f"[mycore: model call failed ({type(e).__name__}){detail}; "
                     f"turn stopped after {it - 1} iteration(s)]")
             messages.append({"role": "assistant", "content": note})
             return stop("model_error", note)

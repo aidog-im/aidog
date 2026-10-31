@@ -346,6 +346,28 @@ def main() -> int:
     s, body = post("/api/settings", {"mycore": {"unknown": "x"}}, token)
     check("POST mycore unknown key -> 400", s == 400, f"got {s}")
 
+    # --- car 1-D1/D4: context_dirs + upstreams (empty = off must be legal,
+    # malformed must be refused with the parser's exact reason) ---
+    s, body = post("/api/settings", {"mycore": {"context_dirs": ""}}, token)
+    check("POST mycore empty context_dirs (off) -> 200", s == 200,
+          f"got {s} {body}")
+    s, body = post("/api/settings", {"mycore": {"context_dirs": "/tmp:/var"}},
+                   token)
+    check("POST mycore context_dirs list -> 200", s == 200, f"got {s} {body}")
+    s, body = post("/api/settings", {"mycore": {"context_dirs": "a\nb"}}, token)
+    check("POST mycore multiline context_dirs -> 400", s == 400, f"got {s}")
+    s, body = post("/api/settings", {"mycore": {"upstreams": "bogus"}}, token)
+    check("POST mycore bad upstreams spec -> 400 + reason",
+          s == 400 and "upstreams" in str(body), f"got {s} {body}")
+    s, body = post("/api/settings",
+                   {"mycore": {"upstreams": "http://b1.example/v1|KEY_B1"}},
+                   token)
+    check("POST mycore valid upstreams -> 200", s == 200, f"got {s} {body}")
+    s, body = post("/api/settings",
+                   {"mycore": {"upstreams": "", "context_dirs": ""}}, token)
+    check("POST mycore chain/context back to off -> 200", s == 200,
+          f"got {s} {body}")
+
     # --- evolution settings partition: strict validation, all-or-nothing ---
     if token:
         s, body = post("/api/settings",

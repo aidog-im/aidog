@@ -98,10 +98,11 @@ import time
 import urllib.parse
 from pathlib import Path
 
+from . import checkpoint
 from . import cli
 from . import evolution
 from . import scheduler
-from .assembly import build_system_stack
+from .assembly import build_system_stack, resolve_context_dirs
 from .loop import run_turn
 from .model import ChatClient
 from .session import Session
@@ -651,6 +652,8 @@ class ChatService:
             return self._evolution_command()
         if name == "cron":
             return self._cron_command(chat_id, arg)
+        if name == "checkpoint":
+            return self._checkpoint_command(chat_id, arg)
         return self._t("cmd.unknown")
 
     def _lang_command(self, chat_id: int, arg: str) -> str:
@@ -899,6 +902,46 @@ class ChatService:
             return self._t("cmd.cron.deleted", id=job_id)
         return self._t("cmd.cron.usage")
 
+    def _checkpoint_command(self, chat_id: int, arg: str) -> str:
+        """`/checkpoint` (list) · `/checkpoint restore <id>` (rollback) —
+        the write safety net (car 1-D2): write_file/edit_file snapshot the
+        previous bytes and mycore.checkpoint owns the store. A bare numeric
+        arg is accepted as restore. Replies scrub machine paths through
+        _rel_path like every other reply."""
+        words = arg.strip().split(None, 1)
+        sub = words[0].lower() if words else "list"
+        rest = words[1].strip() if len(words) > 1 else ""
+        if sub in ("list", "ls"):
+            entries = checkpoint.list_entries(self.state, limit=10)
+            if not entries:
+                return self._t("cmd.checkpoint.empty")
+            lines = [self._t("cmd.checkpoint.head", n=len(entries))]
+            for e in entries:
+                lines.append(f"  #{e['id']} · {self._rel_path(e.get('path', ''))} · "
+                             f"{checkpoint.fmt_when(float(e.get('ts', 0.0)))}")
+            return "\n".join(lines)
+        token = rest.split()[0] if rest.split() else ""
+        if sub.isdigit():                     # /checkpoint 7 accepted as restore
+            token = sub
+        elif sub not in ("restore", "undo", "get"):
+            return self._t("cmd.checkpoint.usage")
+        if not token.isdigit():
+            return self._t("cmd.checkpoint.usage")
+        entry_id = int(token)
+        try:
+            entry = checkpoint.restore(entry_id, self.state, now=self._now())
+        except checkpoint.CheckpointError as e:
+            if str(e).startswith("no checkpoint"):
+                return self._t("cmd.checkpoint.miss", id=entry_id)
+            self.log.write("CHECKPOINT_ERR", f"chat={redact_chat(chat_id)}",
+                           f"id={entry_id}", f"err={str(e)[:60]}")
+            return self._t("cmd.checkpoint.fail")
+        self.log.write("CHECKPOINT_RESTORE", f"chat={redact_chat(chat_id)}",
+                       f"id={entry_id}")
+        return self._t("cmd.checkpoint.restored", id=entry_id,
+                       path=self._rel_path(entry.get("path", "")),
+                       size=entry.get("size", 0))
+
     def _wd_chat_target(self) -> int | None:
         """Fallback delivery chat: env MYCORE_WD_CHAT when it is a plain
         integer; unset/garbage -> None (log-only, by design)."""
@@ -921,8 +964,9 @@ class ChatService:
         reply — honest short lines on any stop, same mapping as _pipeline."""
         cfg = cli.resolve_model_config()
         chat_fn = self.chat or ChatClient(cfg).chat
-        messages = build_system_stack() + [{"role": "user",
-                                            "content": job.get("text", "")}]
+        messages = build_system_stack(context_dirs=resolve_context_dirs()) \
+            + [{"role": "user",
+                "content": job.get("text", "")}]
         try:
             res = run_turn(messages, chat_fn, self.registry,
                            budget_chars=self._budget())
@@ -1024,7 +1068,7 @@ class ChatService:
             history = []
         history = [m for m in history if m.get("role") != "system"]
 
-        stack = build_system_stack()               # constitution/memory first
+        stack = build_system_stack(context_dirs=resolve_context_dirs())
         messages = stack + history
         pre_ids = {id(m) for m in messages}
         messages.append({"role": "user", "content": text})

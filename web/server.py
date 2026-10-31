@@ -66,8 +66,8 @@ if str(REPO) in sys.path:
     sys.path.remove(str(REPO))
 sys.path.insert(0, str(REPO))
 from lib import i18n  # noqa: E402
-from mycore import cli, evolution  # noqa: E402  (model config + evolution loop)
-from mycore.assembly import build_system_stack  # noqa: E402
+from mycore import cli, evolution, modeltier  # noqa: E402  (model config + evolution loop)
+from mycore.assembly import build_system_stack, resolve_context_dirs  # noqa: E402
 from mycore.loop import run_turn  # noqa: E402
 from mycore.model import ChatClient  # noqa: E402
 from mycore.service import state_dir as mycore_state_dir  # noqa: E402
@@ -160,7 +160,7 @@ ALLOWED_TOP = ("language", "refresh_sec", "sound", "voice_volume",
                "alert_preview", "currency", "fx_rate", "mycore", "usage",
                "evolution")
 USAGE_KEYS = ("metrics_url", "pricing_config", "log_dir")
-MYCORE_KEYS = ("base_url", "model")
+MYCORE_KEYS = ("base_url", "model", "context_dirs", "upstreams")
 MYCORE_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$")
 # Supported UI languages = the discovered locale packs (overlay/locales/*);
 # fallback keeps validation sane if the packs are ever unreadable.
@@ -414,16 +414,18 @@ def read_config_bits() -> dict:
 def _mycore_config_bits() -> dict:
     """Post-swap config view: the mycore block of web/settings.json (merged over
     defaults). URLs/model ids only — credentials never serialize. fallback is
-    reported off because the single endpoint sits behind the local gateway's
-    key-pool failover; telemetry is off because no upstream telemetry subsystem
-    exists once the transition wiring is deleted."""
+    reported from OUR failover chain (mycore.upstreams — the Tier C leg; the
+    local gateway's key pool still sits behind the primary endpoint),
+    telemetry is off because no upstream telemetry subsystem exists once the
+    transition wiring is deleted."""
     mc = load_settings().get("mycore")
     mc = mc if isinstance(mc, dict) else {}
+    ups = mc.get("upstreams")
     return {"source": "settings.mycore",
             "model_provider": None,
             "model_base_url": mc.get("base_url"),
             "model_default": mc.get("model"),
-            "fallback_enabled": False,
+            "fallback_enabled": bool(isinstance(ups, str) and ups.strip()),
             "telemetry_off": True,
             "standalone_shim": False,
             "external_skill_dirs": []}
@@ -508,6 +510,35 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                     errors.append(f"unknown mycore key: {key}")
                     continue
                 val = mc[key]
+                if key == "context_dirs":
+                    # os.pathsep-separated project-context dirs; empty = off
+                    # (car 1-D1). Single line only — a dir list is one string.
+                    if not isinstance(val, str) or len(val) > 256 or "\x00" in val \
+                            or "\n" in val or "\r" in val:
+                        errors.append("mycore.context_dirs must be one line of at most "
+                                      "256 chars (dirs separated by the os pathsep; "
+                                      "empty = off)")
+                        continue
+                    clean_mc[key] = val
+                    continue
+                if key == "upstreams":
+                    # failover chain (car 1-D4): url[|key_env[|model]] entries
+                    # separated by commas; empty = off. Grammar lives in
+                    # mycore.modeltier — the validator reports its exact reason.
+                    if not isinstance(val, str) or len(val) > modeltier.MAX_SPEC_CHARS \
+                            or "\x00" in val or "\n" in val or "\r" in val:
+                        errors.append("mycore.upstreams must be one line of at most "
+                                      f"{modeltier.MAX_SPEC_CHARS} chars "
+                                      "(empty = off)")
+                        continue
+                    if val.strip():
+                        try:
+                            modeltier.parse_upstreams(val)
+                        except ValueError as e:
+                            errors.append(f"mycore.upstreams: {e}")
+                            continue
+                    clean_mc[key] = val
+                    continue
                 if not isinstance(val, str) or not val or len(val) > 256 or "\x00" in val:
                     errors.append(f"mycore.{key} must be a non-empty string of at most 256 chars")
                     continue
@@ -1655,7 +1686,7 @@ class Handler(BaseHTTPRequestHandler):
             history = []
         history = [m for m in history if m.get("role") != "system"]
 
-        stack = build_system_stack()
+        stack = build_system_stack(context_dirs=resolve_context_dirs())
         messages = stack + history
         pre_ids = {id(m) for m in messages}
         messages.append({"role": "user", "content": text})

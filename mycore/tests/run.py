@@ -6,7 +6,9 @@ Exit 0 = all assertions passed. English output per repo i18n policy.
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -14,6 +16,14 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent.parent
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
+
+# Suite-wide hermetic state (car 1-D2 lesson): tools built with the DEFAULT
+# state dir (cron registry, pre-write checkpoints) must land in a throwaway
+# dir for the whole run — never in the production data/ tree.
+_SUITE_STATE = tempfile.mkdtemp(prefix="mycore_suite_state_")
+os.environ["AIDOG_MC_STATE"] = _SUITE_STATE
+import atexit  # noqa: E402
+atexit.register(shutil.rmtree, _SUITE_STATE, True)
 
 from mycore import compact, measure, build_registry, run_turn  # noqa: E402
 from mycore.model import (ChatClient, ModelConfig, ModelError,  # noqa: E402
@@ -242,6 +252,8 @@ def test_loop() -> None:
     res = run_turn([{"role": "user", "content": "x"}], chat.chat, build_registry())
     check("loop: model error contained", res.stop == "model_error")
     check("loop: model error text honest", "model call failed" in res.text)
+    check("loop: vetted ModelError context surfaced (failover diagnosis)",
+          "HTTP 500 Internal Server Error" in res.text)
 
 
 def test_compact() -> None:
@@ -410,6 +422,452 @@ def test_assembly() -> None:
     else:
         check("assembly: legacy profile SOUL identity (shim/profile absent — N/A)",
               True, "post-swap: no profile copy to compare")
+
+
+def test_context_files() -> None:
+    """Car 1-D1: configured project context dirs -> injected, present-only,
+    env > settings > off. Hermetic: tmp dirs + tmp settings, env restored."""
+    import os
+    from mycore.assembly import (CONTEXT_DIRS_ENV, CONTEXT_FILE_NAMES,
+                                 build_system_stack, resolve_context_dirs)
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        cons = tdp / "SOUL.md"
+        cons.write_text("# SOUL", encoding="utf-8")
+        mem = tdp / "MEMORY_curated.md"
+        mem.write_text("- fact", encoding="utf-8")
+        proj = tdp / "proj"
+        proj.mkdir()
+        (proj / "AGENTS.md").write_text("# project rules", encoding="utf-8")
+        (proj / "CLAUDE.md").write_text("# project claude", encoding="utf-8")
+        empty = tdp / "emptyproj"
+        empty.mkdir()
+        (empty / "AGENTS.md").write_text("   ", encoding="utf-8")
+
+        # --- injection: both files, name priority order, hint stays last ---
+        stack = build_system_stack(cons, (mem,), learned_path=None,
+                                   context_dirs=(proj,))
+        check("ctx: configured dir injects AGENTS+CLAUDE before the hint",
+              len(stack) == 5 and "skill_route" in stack[4]["content"]
+              and "project rules" in stack[2]["content"]
+              and "project claude" in stack[3]["content"])
+        check("ctx: provenance header names the file",
+              "[project context]" in stack[2]["content"]
+              and str(proj / "AGENTS.md") in stack[2]["content"])
+        order = [n for n in CONTEXT_FILE_NAMES if (proj / n).is_file()]
+        check("ctx: injection order = CONTEXT_FILE_NAMES",
+              order == ["AGENTS.md", "CLAUDE.md"])
+        # --- present-only: a dir without files adds nothing, no notice ---
+        bare = build_system_stack(cons, (mem,), learned_path=None,
+                                  context_dirs=(empty,))
+        check("ctx: absent/empty context files add no stack entry",
+              len(bare) == 3 and all("project context" not in m["content"]
+                                     for m in bare))
+        check("ctx: default context_dirs is off (stack shape unchanged)",
+              len(build_system_stack(cons, (mem,), learned_path=None)) == 3)
+        # --- honest truncation cap applies ---
+        big = tdp / "big"
+        big.mkdir()
+        (big / "AGENTS.md").write_text("x" * 9000, encoding="utf-8")
+        big_stack = build_system_stack(cons, (mem,), learned_path=None,
+                                       context_dirs=(big,))
+        check("ctx: oversized context file truncated honestly",
+              "truncated" in big_stack[2]["content"]
+              and len(big_stack[2]["content"]) < 8500)
+        # --- third name honoured ---
+        loc = tdp / "loc"
+        loc.mkdir()
+        (loc / "AGENTS.local.md").write_text("local rules", encoding="utf-8")
+        loc_stack = build_system_stack(cons, (mem,), learned_path=None,
+                                       context_dirs=(loc,))
+        check("ctx: AGENTS.local.md discovered",
+              len(loc_stack) == 4 and "local rules" in loc_stack[2]["content"])
+
+        # --- resolve_context_dirs precedence (env > settings > off) ---
+        settings = tdp / "settings.json"
+        settings.write_text(json.dumps({"mycore": {
+            "context_dirs": os.pathsep.join([str(proj), str(tdp / "nope")])
+        }}), encoding="utf-8")
+        saved = os.environ.get(CONTEXT_DIRS_ENV)
+        try:
+            os.environ.pop(CONTEXT_DIRS_ENV, None)
+            check("ctx: settings dirs applied, missing dir dropped silently",
+                  resolve_context_dirs(settings) == (proj,))
+            os.environ[CONTEXT_DIRS_ENV] = os.pathsep.join(
+                [str(empty), str(empty)])      # dedupe + env beats settings
+            check("ctx: env beats settings, duplicates deduped",
+                  resolve_context_dirs(settings) == (empty,))
+            os.environ[CONTEXT_DIRS_ENV] = " "   # blank env = fall through
+            check("ctx: blank env falls through to settings",
+                  resolve_context_dirs(settings) == (proj,))
+            settings.write_text("{broken", encoding="utf-8")
+            check("ctx: corrupt settings -> feature off, no exception",
+                  resolve_context_dirs(settings) == ())
+            settings.unlink()
+            check("ctx: missing settings -> feature off",
+                  resolve_context_dirs(settings) == ())
+        finally:
+            if saved is None:
+                os.environ.pop(CONTEXT_DIRS_ENV, None)
+            else:
+                os.environ[CONTEXT_DIRS_ENV] = saved
+
+
+def test_checkpoint() -> None:
+    """Car 1-D2: pre-write snapshots (write_file/edit_file) + /checkpoint
+    rollback — offline, tmp state, byte-exact roundtrip, honest failures."""
+    import os as _os
+    from mycore import checkpoint as cp
+    from mycore.service import ChatService
+    from mycore.tg import POLL_BOT_ENV
+
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        state = tdp / "state"
+        target = tdp / "file.txt"
+        target.write_text("original", encoding="utf-8")
+
+        # --- snapshot basics ---
+        e1 = cp.snapshot(target, state, now=1000.0)
+        check("ckpt: snapshot records id/ts/size/sha",
+              e1 is not None and e1["id"] == 1 and e1["size"] == 8
+              and e1["ts"] == 1000.0 and len(e1["sha256"]) == 64)
+        check("ckpt: snapshot stores raw bytes",
+              (cp.store_dir(state) / e1["file"]).read_bytes() == b"original")
+        check("ckpt: absent file needs no snapshot -> None, no entry",
+              cp.snapshot(tdp / "absent.txt", state) is None
+              and len(cp.list_entries(state, limit=0)) == 1)
+        big = tdp / "big.bin"
+        big.write_bytes(b"x" * (cp.MAX_SNAPSHOT_BYTES + 1))
+        check("ckpt: oversize file skipped honestly (cap)",
+              cp.snapshot(big, state) is None)
+        check("ckpt: list newest first",
+              [e["id"] for e in cp.list_entries(state, limit=5)] == [1])
+        target.write_text("v2", encoding="utf-8")
+        e2 = cp.snapshot(target, state, now=2000.0)
+        check("ckpt: second snapshot gets id 2, list reversed",
+              e2["id"] == 2
+              and [e["id"] for e in cp.list_entries(state, limit=5)] == [2, 1])
+
+        # --- restore: byte-exact, and itself undoable ---
+        target.write_text("broken by agent", encoding="utf-8")
+        used = cp.restore(1, state, now=3000.0)
+        check("ckpt: restore puts the original bytes back",
+              used["id"] == 1 and target.read_text(encoding="utf-8") == "original")
+        check("ckpt: restore snapshots current content first (undoable)",
+              len(cp.list_entries(state, limit=0)) == 3)
+        cp.restore(3, state)                       # undo the undo
+        check("ckpt: undo-of-undo roundtrip",
+              target.read_text(encoding="utf-8") == "broken by agent")
+
+        # --- honest failures ---
+        try:
+            cp.restore(999, state)
+            check("ckpt: unknown id raises honestly", False)
+        except cp.CheckpointError as e:
+            check("ckpt: unknown id raises honestly", "no checkpoint" in str(e))
+        (cp.store_dir(state) / e1["file"]).write_bytes(b"tampered")
+        try:
+            cp.restore(1, state)
+            check("ckpt: tampered snapshot refused (sha256)", False)
+        except cp.CheckpointError as e:
+            check("ckpt: tampered snapshot refused (sha256)",
+                  "integrity" in str(e))
+        idx = cp.store_dir(state) / cp.INDEX_NAME
+        idx.write_text(idx.read_text(encoding="utf-8") + "{garbage\n",
+                       encoding="utf-8")
+        check("ckpt: corrupt index line skipped (fail-soft)",
+              len(cp.list_entries(state, limit=0)) == 4)
+
+        # --- rotation: keep newest MAX_ENTRIES, unlink old snapshot files ---
+        cap = cp.MAX_ENTRIES
+        cp.MAX_ENTRIES = 3
+        try:
+            for i in range(5):
+                cp.snapshot(target, state, now=9000.0 + i)
+        finally:
+            cp.MAX_ENTRIES = cap
+        kept = [e["id"] for e in cp.list_entries(state, limit=0)]
+        check("ckpt: rotation keeps the newest entries only",
+              len(kept) == 3 and kept == sorted(kept, reverse=True), str(kept))
+        check("ckpt: pruned snapshot files are unlinked",
+              not (cp.store_dir(state) / e1["file"]).exists())
+
+        # --- tools leg: both write tools snapshot + report the id ---
+        state2 = tdp / "state2"
+        reg = build_registry(allowed_roots=(str(tdp),), state_dir=state2)
+        tool_file = tdp / "tool.txt"
+        tool_file.write_text("before", encoding="utf-8")
+        out = reg.dispatch("write_file", {"path": str(tool_file),
+                                          "content": "after"})
+        check("ckpt: write_file snapshots + reports the checkpoint id",
+              "checkpoint #1" in out and tool_file.read_text(encoding="utf-8") == "after",
+              out)
+        out = reg.dispatch("edit_file", {"path": str(tool_file),
+                                         "old_text": "after", "new_text": "done"})
+        check("ckpt: edit_file snapshots too", "checkpoint #2" in out, out)
+        cp.restore(1, state2)
+        check("ckpt: tool-written file restorable to its pre-write content",
+              tool_file.read_text(encoding="utf-8") == "before")
+        out = reg.dispatch("write_file", {"path": str(tdp / "brand_new.txt"),
+                                          "content": "x"})
+        check("ckpt: create has no rollback note (nothing to restore)",
+              "checkpoint" not in out, out)
+
+    # --- service leg: /checkpoint list/restore + help advertises it ---
+    saved_tok = _os.environ.get(POLL_BOT_ENV)
+    _os.environ[POLL_BOT_ENV] = "second-bot-TEST-token"
+    try:
+        fake = FakeTgTransport()
+        with tempfile.TemporaryDirectory() as td2:
+            svc = ChatService(Path(td2), frozenset({111}), transport=fake,
+                              chat=lambda messages=None, tools=None, **kw:
+                              fake_response(text="pong"))
+
+            def cmd(text, cid=424242, uid=111, upd=1):
+                before = len(fake.sends)
+                svc.handle_update(mk_update(upd, uid, cid, text))
+                return fake.sends[before][1] if len(fake.sends) > before \
+                    else None
+
+            check("ckpt: /checkpoint empty is honest",
+                  "checkpoint" in (cmd("/checkpoint") or "").lower())
+            doc = Path(td2) / "notes.md"
+            doc.write_text("original doc", encoding="utf-8")
+            entry = cp.snapshot(doc, svc.state, now=4000.0)
+            listed = cmd("/checkpoint") or ""
+            check("ckpt: /checkpoint lists id + scrubbed name",
+                  f"#{entry['id']}" in listed and "notes.md" in listed
+                  and td2 not in listed, listed)
+            doc.write_text("clobbered", encoding="utf-8")
+            out = cmd(f"/checkpoint restore {entry['id']}") or ""
+            check("ckpt: /checkpoint restore puts the file back",
+                  "restored" in out and doc.read_text(encoding="utf-8") == "original doc",
+                  out)
+            check("ckpt: restore miss is honest",
+                  "no checkpoint #999" in (cmd("/checkpoint restore 999") or ""))
+            check("ckpt: unknown subcommand -> usage",
+                  "/checkpoint restore" in (cmd("/checkpoint bogus") or ""))
+            from lib import i18n as _i18n
+            check("ckpt: /help lists /checkpoint (en)",
+                  "/checkpoint" in _i18n.get("en", "cmd.help.body"))
+            check("ckpt: /help lists /checkpoint (zh)",
+                  "/checkpoint" in _i18n.get("zh", "cmd.help.body"))
+            check("ckpt: zh pack carries the checkpoint strings",
+                  bool(_i18n.get("zh", "cmd.checkpoint.restored")))
+    finally:
+        if saved_tok is None:
+            _os.environ.pop(POLL_BOT_ENV, None)
+        else:
+            _os.environ[POLL_BOT_ENV] = saved_tok
+
+
+def test_modeltier() -> None:
+    """Car 1-D4: multi-upstream failover (Tier C v1) — spec parsing, error
+    classification, the attempt chain, no-replay-after-first-byte, config
+    precedence. Fully offline (scripted transports), zero real keys."""
+    import os
+    from mycore import cli as _cli
+    from mycore import modeltier as mt
+
+    # --- spec parsing + classification (policy module) ---
+    ups = mt.parse_upstreams("http://a.example/v1|KEY_A|model-a, "
+                             "https://b.example/v1/")
+    check("tier: parse url|key_env|model and defaults",
+          len(ups) == 2 and ups[0].base_url == "http://a.example/v1"
+          and ups[0].key_env == "KEY_A" and ups[0].model == "model-a"
+          and ups[1].key_env == "" and ups[1].model == ""
+          and ups[1].base_url == "https://b.example/v1")
+    check("tier: empty spec -> no chain", mt.parse_upstreams("") == ())
+    bad_ok = True
+    for spec in ("ftp://x/v1", "http://", "http://a|bad env name|x",
+                 "http://a||m|z", "no-scheme", "http://a,b"):
+        try:
+            mt.parse_upstreams(spec)
+            bad_ok = False
+        except ValueError:
+            pass
+    check("tier: invalid specs rejected with ValueError", bad_ok)
+    try:
+        mt.parse_upstreams(",".join(["http://a.example/v1"] * 5))
+        cap_ok = False
+    except ValueError:
+        cap_ok = True
+    check("tier: entry count capped", cap_ok)
+    check("tier: payload errors are fatal (same request fails everywhere)",
+          not mt.is_failover_class("HTTP 400 Bad Request")
+          and not mt.is_failover_class("HTTP 422 Unprocessable Entity"))
+    check("tier: capacity/transport/protocol errors fail over",
+          all(mt.is_failover_class(m) for m in
+              ("HTTP 503 unavailable", "HTTP 429 rate limit",
+               "HTTP 401 unauthorized", "HTTP 404 model not found",
+               "transport failure: URLError", "response is not JSON")))
+    check("tier: chain resolves inherited key slot + model",
+          list(ModelConfig(api_key_env="SLOT", model="m0",
+                           upstreams=(mt.Upstream(base_url="http://u.example/v1"),)).chain())
+          == [(ModelConfig().base_url, "SLOT", "m0"),
+              ("http://u.example/v1", "SLOT", "m0")])
+
+    # --- config precedence: env MYCORE_UPSTREAMS > settings > off ---
+    saved_env = os.environ.get("MYCORE_UPSTREAMS")
+    with tempfile.TemporaryDirectory() as td:
+        web = Path(td) / "web"
+        web.mkdir()
+        (web / "settings.json").write_text(json.dumps({"mycore": {
+            "upstreams": "http://s1.example/v1|K1"}}), encoding="utf-8")
+        old_repo = _cli.REPO
+        try:
+            _cli.REPO = Path(td)
+            os.environ.pop("MYCORE_UPSTREAMS", None)
+            cfg = _cli.resolve_model_config()
+            check("tier: settings upstreams resolved",
+                  len(cfg.upstreams) == 1 and cfg.upstreams[0].key_env == "K1"
+                  and not cfg.upstreams_note)
+            os.environ["MYCORE_UPSTREAMS"] = "http://e1.example/v1"
+            cfg = _cli.resolve_model_config()
+            check("tier: env beats settings for the chain",
+                  cfg.upstreams[0].base_url == "http://e1.example/v1")
+            os.environ["MYCORE_UPSTREAMS"] = "bogus"
+            cfg = _cli.resolve_model_config()
+            check("tier: invalid spec -> chain off + honest note, no raise",
+                  cfg.upstreams == () and "upstreams-invalid" in cfg.describe()
+                  and "entry 1" in cfg.upstreams_note)
+        finally:
+            _cli.REPO = old_repo
+            if saved_env is None:
+                os.environ.pop("MYCORE_UPSTREAMS", None)
+            else:
+                os.environ["MYCORE_UPSTREAMS"] = saved_env
+
+    # --- the attempt chain (scripted transport) ---
+    calls: list[tuple[str, dict, dict]] = []
+
+    def failover_transport(url, headers, payload, timeout):
+        calls.append((url, headers, json.loads(payload)))
+        if url.startswith("http://primary"):
+            raise ModelError("HTTP 503 unavailable")
+        return json.dumps(fake_response(text="ok from backup"))
+
+    cfg = ModelConfig(base_url="http://primary/v1", model="m-primary",
+                      api_key_env="TIER_KEY_P",
+                      upstreams=mt.parse_upstreams(
+                          "http://backup/v1|TIER_KEY_B|model-b"))
+    os.environ["TIER_KEY_P"] = "sk-PRIMARY-secret"
+    os.environ["TIER_KEY_B"] = "sk-BACKUP-secret"
+    saved_plain_key = os.environ.pop("MODEL_API_KEY", None)
+    try:
+        doc = ChatClient(cfg, transport=failover_transport).chat(
+            [{"role": "user", "content": "hi"}])
+        check("tier: failover reaches the next upstream",
+              first_choice_text(doc) == "ok from backup" and len(calls) == 2)
+        check("tier: per-upstream model + its own key slot",
+              calls[0][2]["model"] == "m-primary"
+              and calls[1][2]["model"] == "model-b"
+              and calls[1][1].get("Authorization") == "Bearer sk-BACKUP-secret")
+
+        # payload-class error: no failover, message untouched
+        calls.clear()
+
+        def fatal_transport(url, headers, payload, timeout):
+            calls.append((url, headers, json.loads(payload)))
+            raise ModelError("HTTP 400 Bad Request")
+
+        try:
+            ChatClient(cfg, transport=fatal_transport).chat(
+                [{"role": "user", "content": "x"}])
+            check("tier: payload error never fails over", False)
+        except ModelError as e:
+            check("tier: payload error never fails over (single attempt)",
+                  len(calls) == 1 and "400" in str(e) and "failover" not in str(e))
+
+        # every upstream dead -> honest exhaustion, no key material in it
+        calls.clear()
+
+        def dead_transport(url, headers, payload, timeout):
+            calls.append((url, headers, None))
+            raise ModelError("transport failure: URLError")
+
+        try:
+            ChatClient(cfg, transport=dead_transport).chat(
+                [{"role": "user", "content": "x"}])
+            check("tier: exhausted chain raises with failover context", False)
+        except ModelError as e:
+            check("tier: exhausted chain raises with failover context",
+                  len(calls) == 2 and "failover" in str(e)
+                  and "sk-" not in str(e))
+
+        # single endpoint: behavior and message byte-identical to pre-D4
+        def solo_transport(url, headers, payload, timeout):
+            raise ModelError("HTTP 500 Internal Server Error")
+
+        try:
+            ChatClient(ModelConfig(), transport=solo_transport).chat(
+                [{"role": "user", "content": "x"}])
+            check("tier: single endpoint message unchanged", False)
+        except ModelError as e:
+            check("tier: single endpoint message unchanged",
+                  str(e) == "HTTP 500 Internal Server Error")
+
+        # auth-header policy per upstream (loopback placeholder vs real key)
+        captured: list[tuple[str, dict]] = []
+
+        def head_capture(url, headers, payload, timeout):
+            captured.append((url, headers))
+            if url.startswith("http://127.0.0.1"):
+                raise ModelError("HTTP 503 unavailable")
+            return json.dumps(fake_response(text="ok"))
+
+        cfg2 = ModelConfig(base_url="http://127.0.0.1:1/v1",
+                           upstreams=(mt.Upstream(base_url="https://far.example/v1"),))
+        ChatClient(cfg2, transport=head_capture).chat(
+            [{"role": "user", "content": "x"}])
+        check("tier: loopback placeholder kept, non-loopback keyless = no auth",
+              captured[0][1].get("Authorization") == "Bearer local"
+              and "Authorization" not in captured[1][1])
+
+        # --- streaming: failover before the first byte, never after ---
+        s_calls: list[str] = []
+
+        def stream_ok(url, headers, payload, timeout, on_line):
+            s_calls.append(url)
+            if url.startswith("http://primary"):
+                raise ModelError("HTTP 503 unavailable")
+            on_line('data: {"choices":[{"delta":{"content":"streamed"}}]}\n')
+            on_line("\n")
+            on_line("data: [DONE]\n")
+            on_line("\n")
+            return ""
+
+        pieces: list[str] = []
+        ChatClient(cfg, stream_transport=stream_ok).chat(
+            [{"role": "user", "content": "x"}], on_delta=pieces.append)
+        check("tier: stream failover allowed before the first byte",
+              len(s_calls) == 2 and "".join(pieces) == "streamed")
+
+        s_calls.clear()
+
+        def stream_half(url, headers, payload, timeout, on_line):
+            s_calls.append(url)
+            if url.startswith("http://primary"):
+                on_line('data: {"choices":[{"delta":{"content":"partial"}}]}\n')
+                on_line("\n")
+                raise ModelError("transport failure: URLError")
+            on_line('data: {"choices":[{"delta":{"content":"never"}}]}\n')
+            return ""
+
+        pieces2: list[str] = []
+        try:
+            ChatClient(cfg, stream_transport=stream_half).chat(
+                [{"role": "user", "content": "x"}], on_delta=pieces2.append)
+            check("tier: no replay after the first byte", False)
+        except ModelError:
+            check("tier: no replay after the first byte (1 attempt, partial kept)",
+                  len(s_calls) == 1 and "".join(pieces2) == "partial")
+    finally:
+        os.environ.pop("TIER_KEY_P", None)
+        os.environ.pop("TIER_KEY_B", None)
+        if saved_plain_key is not None:
+            os.environ["MODEL_API_KEY"] = saved_plain_key
 
 
 def test_loop_budget() -> None:
@@ -2274,6 +2732,9 @@ def main() -> int:
     test_compact()
     test_session()
     test_assembly()
+    test_context_files()
+    test_checkpoint()
+    test_modeltier()
     test_skill_dirs_chain()
     test_loop_budget()
     test_cli_precedence()

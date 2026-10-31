@@ -9,6 +9,11 @@ read from the environment at call time and NEVER echoed: not in logs, not in
 reprs, not in exception messages, not in argv (the transport is urllib inside
 this process — nothing secret ever reaches `ps`).
 
+Failover (car 1-D4, mycore.modeltier): when the config carries upstreams the
+attempt runs primary-first through the chain — one attempt per upstream
+(same-URL fail-fast), payload-class errors fail immediately, and a failure
+after the first streamed delta is NEVER replayed (no duplicate output).
+
 `transport` is injectable so tests run fully offline with a scripted fake.
 English comments per repo i18n policy.
 """
@@ -20,6 +25,8 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Callable
+
+from .modeltier import Upstream, is_failover_class
 
 DEFAULT_TIMEOUT = 120.0
 
@@ -43,11 +50,31 @@ class ModelConfig:
     max_tokens: int = 4096
     timeout: float = DEFAULT_TIMEOUT
     extra_headers: dict = field(default_factory=dict)
+    # Failover chain AFTER the primary endpoint (car 1-D4): entries hold env
+    # slot NAMES for keys, never values. Empty = single endpoint (today's
+    # default topology, zero behavior change).
+    upstreams: tuple[Upstream, ...] = ()
+    upstreams_note: str = ""          # parse problem, surfaced via describe()
+
+    def chain(self) -> tuple[tuple[str, str, str], ...]:
+        """Ordered attempts: primary first, then each upstream. Every entry is
+        (base_url, key_env, model) with defaults already resolved; key VALUES
+        are read from the environment per attempt inside ChatClient."""
+        out = [(self.base_url, self.api_key_env, self.model)]
+        for u in self.upstreams:
+            out.append((u.base_url, u.key_env or self.api_key_env,
+                        u.model or self.model))
+        return tuple(out)
 
     def describe(self) -> str:
         """Safe-to-log summary: presence of a key, never its value."""
         has_key = bool(os.environ.get(self.api_key_env))
-        return f"{self.base_url} model={self.model} key[{self.api_key_env}]={'set' if has_key else 'unset'}"
+        out = (f"{self.base_url} model={self.model} "
+               f"key[{self.api_key_env}]={'set' if has_key else 'unset'} "
+               f"upstreams={len(self.upstreams)}")
+        if self.upstreams_note:
+            out += f" upstreams-invalid: {self.upstreams_note}"
+        return out
 
 
 class ModelError(RuntimeError):
@@ -239,6 +266,13 @@ class ChatClient:
              **opts) -> dict:
         """One completion. Returns the parsed `chat.completions` JSON object.
 
+        Failover (car 1-D4): the configured chain runs primary-first, one
+        attempt per upstream (same-URL fail-fast). Payload-class errors
+        (HTTP 400/405/413/415/422) raise at once — every upstream would
+        reject the same request — and a failure after the first streamed
+        delta raises without replay (no duplicated output). A single-endpoint
+        config behaves exactly as before.
+
         `opts.on_delta`, when callable, requests streaming: the payload gains
         `stream: true`, each content piece is passed to it as it arrives, and
         the return value is assembled into the same dict shape as the
@@ -247,11 +281,61 @@ class ChatClient:
         full text — never an error, never a fake.
 
         Raises ModelError with safe context only (status codes / exception
-        class names); the API key never enters the exception chain.
+        class names / endpoint URLs); the API key never enters the exception
+        chain.
         """
+        on_delta = opts.get("on_delta")
+        chain = self.cfg.chain()
+        emitted = [False]
+
+        def _delta(piece: str) -> None:
+            emitted[0] = True
+            on_delta(piece)
+
+        failed_from: str | None = None
+        last: ModelError | None = None
+        for idx, (base_url, key_env, model) in enumerate(chain):
+            try:
+                return self._attempt(base_url, key_env, model, messages,
+                                     tools, opts,
+                                     _delta if callable(on_delta) else None)
+            except ModelError as e:
+                last = e
+                if emitted[0]:
+                    raise                      # strategy 5: no replay mid-stream
+                if idx + 1 >= len(chain) or not is_failover_class(str(e)):
+                    if failed_from is not None:
+                        raise ModelError(
+                            f"{e} [failover: {failed_from} -> {base_url}]") from None
+                    raise
+                failed_from = base_url         # next upstream; this one is done
+        raise last if last is not None else ModelError("no upstream to attempt")
+
+    def _headers(self, base_url: str, key_env: str) -> dict:
+        """Per-attempt headers. The key VALUE is read from the environment
+        here (the credential pool stores slot names only) and never logged."""
+        cfg = self.cfg
+        headers = {"Content-Type": "application/json"}
+        key = os.environ.get(key_env or cfg.api_key_env, "")
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        elif _is_loopback(base_url):
+            # Local gateway groups require the header's PRESENCE but no real
+            # secret (observed 2026-10-18 on the local OpenAI-compatible gate).
+            # Placeholder value only; never sent to non-loopback endpoints.
+            headers["Authorization"] = "Bearer local"
+        headers.update(cfg.extra_headers)
+        return headers
+
+    def _attempt(self, base_url: str, key_env: str, model: str,
+                 messages: list[dict], tools: list[dict] | None, opts: dict,
+                 on_delta: Callable[[str], None] | None) -> dict:
+        """Exactly one request against one upstream. Raises ModelError; the
+        caller (chat) owns failover policy. A per-call `opts['model']` wins
+        over every chain model (explicit beats configured)."""
         cfg = self.cfg
         payload: dict = {
-            "model": opts.get("model", cfg.model),
+            "model": opts.get("model") or model,
             "messages": messages,
             "temperature": opts.get("temperature", cfg.temperature),
             "max_tokens": opts.get("max_tokens", cfg.max_tokens),
@@ -259,21 +343,11 @@ class ChatClient:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = opts.get("tool_choice", "auto")
-        on_delta = opts.get("on_delta")
         if callable(on_delta):
             payload["stream"] = True
-        key = os.environ.get(cfg.api_key_env, "")
-        headers = {"Content-Type": "application/json"}
-        if key:
-            headers["Authorization"] = f"Bearer {key}"
-        elif _is_loopback(cfg.base_url):
-            # Local gateway groups require the header's PRESENCE but no real
-            # secret (observed 2026-10-18 on the local OpenAI-compatible gate).
-            # Placeholder value only; never sent to non-loopback endpoints.
-            headers["Authorization"] = "Bearer local"
-        headers.update(cfg.extra_headers)
+        headers = self._headers(base_url, key_env)
         body = json.dumps(payload).encode("utf-8")
-        url = f"{cfg.base_url.rstrip('/')}/chat/completions"
+        url = f"{base_url.rstrip('/')}/chat/completions"
         timeout = opts.get("timeout", cfg.timeout)
         if not callable(on_delta):
             return self._finish(self.transport(url, headers, body, timeout))

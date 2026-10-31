@@ -18,7 +18,8 @@ import os
 import sys
 from pathlib import Path
 
-from .assembly import build_system_stack, stack_digest
+from .assembly import build_system_stack, resolve_context_dirs, stack_digest
+from .modeltier import parse_upstreams
 from .loop import run_turn
 from .model import ChatClient, ModelConfig, ModelError
 from .session import Session
@@ -30,8 +31,13 @@ REPO = Path(__file__).resolve().parent.parent
 
 def resolve_model_config() -> ModelConfig:
     """Endpoint precedence (owner 2026-10-18 user-configurable decision):
-    env MYCORE_* > CONSOLE settings (web/settings.json mycore block) > defaults."""
+    env MYCORE_* > CONSOLE settings (web/settings.json mycore block) > defaults.
+    Failover chain (car 1-D4): settings mycore.upstreams, overridden by env
+    MYCORE_UPSTREAMS (same precedence rule). An invalid spec never raises —
+    the chain turns off and the reason is reported through
+    ModelConfig.upstreams_note (visible in describe(), i.e. never silent)."""
     cfg = ModelConfig()
+    raw_upstreams: str | None = None
     try:
         stored = json.loads((REPO / "web" / "settings.json").read_text())
         mc = stored.get("mycore") if isinstance(stored, dict) else None
@@ -40,12 +46,22 @@ def resolve_model_config() -> ModelConfig:
                 cfg.base_url = mc["base_url"]
             if isinstance(mc.get("model"), str) and mc["model"]:
                 cfg.model = mc["model"]
+            if isinstance(mc.get("upstreams"), str) and mc["upstreams"].strip():
+                raw_upstreams = mc["upstreams"]
     except (OSError, ValueError):
         pass
     if os.environ.get("MYCORE_BASE_URL"):
         cfg.base_url = os.environ["MYCORE_BASE_URL"]
     if os.environ.get("MYCORE_MODEL"):
         cfg.model = os.environ["MYCORE_MODEL"]
+    if os.environ.get("MYCORE_UPSTREAMS", "").strip():
+        raw_upstreams = os.environ["MYCORE_UPSTREAMS"]
+    if raw_upstreams:
+        try:
+            cfg.upstreams = parse_upstreams(raw_upstreams)
+        except ValueError as e:
+            cfg.upstreams = ()
+            cfg.upstreams_note = str(e)
     return cfg
 
 
@@ -84,7 +100,7 @@ def main(argv: list[str] | None = None) -> int:
 
     body: list[dict] = []
     if not args.no_body:
-        body = build_system_stack()
+        body = build_system_stack(context_dirs=resolve_context_dirs())
     system_msgs = body + ([{"role": "system", "content": args.system}]
                           if args.system else [])
     # Session files never persist system messages (the body stack is rebuilt
