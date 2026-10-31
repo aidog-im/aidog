@@ -10,7 +10,12 @@
    Signature graphic = guilloche engraving: hypotrochoid rosettes generated in
    main.js (hero halo, horizontal bands, certificate watermark, wax seal).
    Droplet glyph motif kept: teardrop dots (rounded corner top-left + 45deg).
-   Zero dependencies: system fonts only, no CDN, no font files. */
+   Zero dependencies: system fonts only, no CDN, no font files.
+   Readability pass (2026-10-26, slogan car): verified by
+   tmp/contrast_audit_site.js (computed WCAG ratios, no screenshot reading).
+   Rule: bright --blue is graphics-only; text in blue uses --blue-deep.
+   Primary CTA keeps the tech-blue background (gate contract) and takes ink
+   text. CJK fallbacks + font smoothing + no fake italics for zh. */
 
 :root {
   --paper:  #fcfcfa;
@@ -31,13 +36,19 @@
   --line-2:  #a5b7ca;
   --text:    #133659;
   --blue-deep: #1c519a;
-  --coral-ink: #c96a45;
+  --coral-ink: #ad4e29;  /* darkened from #c96a45: AA 4.5+ on paper/panel */
   --shadow:  0 14px 34px rgba(0, 22, 51, .08);
   --glow:    0 0 16px rgba(40, 146, 255, .3);
 
-  --font-head: Georgia, "Liberation Serif", "Times New Roman", serif;
-  --font: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-  --mono: Consolas, "Cascadia Mono", "SF Mono", Menlo, monospace;
+  /* serif display stack + text stack: CJK fallbacks appended so zh renders in
+     a real serif/sans instead of a fontconfig default (readability pass) */
+  --font-head: Georgia, "Liberation Serif", "Times New Roman",
+    "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC", "SimSun", serif;
+  --font: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei",
+    "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC", "Hiragino Sans GB",
+    "WenQuanYi Micro Hei", sans-serif;
+  --mono: Consolas, "Cascadia Mono", "SF Mono", Menlo, monospace,
+    "Noto Sans Mono CJK SC", "WenQuanYi Micro Hei";
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -49,6 +60,8 @@ body {
   font-size: 16px;
   line-height: 1.6;
   overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 img { max-width: 100%; }
 a { color: inherit; text-decoration: none; }
@@ -95,11 +108,11 @@ h1, h2, h3, h4, .serif {
   font-family: var(--mono); font-weight: 400; letter-spacing: .28em;
   font-size: 14px; color: var(--navy);
 }
-.brand-dot { color: var(--blue); }
+.brand-dot { color: var(--blue-deep); }
 .nav-links { display: flex; gap: clamp(10px, 2.4vw, 28px); margin: 0 auto; }
 .nav-link {
   position: relative;
-  font-family: var(--mono); font-size: 11.5px; letter-spacing: .16em;
+  font-family: var(--mono); font-size: 12px; letter-spacing: .1em;
   text-transform: uppercase; color: var(--muted);
   padding: 6px 2px; transition: color .2s;
 }
@@ -107,16 +120,16 @@ h1, h2, h3, h4, .serif {
   content: ""; position: absolute; left: 0; right: 100%; bottom: 0; height: 1px;
   background: var(--blue); transition: right .25s ease;
 }
-.nav-link:hover, .nav-link.active { color: var(--blue); }
+.nav-link:hover, .nav-link.active { color: var(--blue-deep); }
 .nav-link:hover::after, .nav-link.active::after { right: 0; }
 .nav-right { display: flex; align-items: center; gap: 10px; }
 .lang-btn {
   background: transparent; border: 1px solid var(--ink); color: var(--navy);
-  font-family: var(--mono); font-size: 11.5px; letter-spacing: .14em;
+  font-family: var(--mono); font-size: 12px; letter-spacing: .1em;
   padding: 5px 12px; cursor: pointer; border-radius: 999px;
   transition: all .2s;
 }
-.lang-btn:hover { border-color: var(--blue); color: var(--blue); }
+.lang-btn:hover { border-color: var(--blue); color: var(--blue-deep); }
 .burger { display: none; background: none; border: 1px solid var(--ink);
   border-radius: 4px; padding: 8px; cursor: pointer; }
 .burger span { display: block; width: 18px; height: 1.5px; background: var(--navy);
@@ -126,7 +139,7 @@ h1, h2, h3, h4, .serif {
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 8px;
   padding: 13px 26px;
-  font-family: var(--mono); font-size: 12px; letter-spacing: .16em;
+  font-family: var(--mono); font-size: 12px; letter-spacing: .12em;
   text-transform: uppercase;
   border: 1px solid var(--ink); border-radius: 26px; cursor: pointer;
   color: var(--navy); background: transparent;
@@ -134,19 +147,21 @@ h1, h2, h3, h4, .serif {
     background .2s;
 }
 .btn:hover { transform: translateY(-2px); border-color: var(--blue);
-  color: var(--blue); }
-/* gate contract: primary computes to tech blue rgb(40, 146, 255) */
+  color: var(--blue-deep); }
+/* gate contract: primary computes to tech blue rgb(40, 146, 255).
+   Background may not change — so the label takes ink: navy-on-blue = 5.7:1
+   (white-on-blue was 3.16:1 and read fuzzy at 12px). */
 .btn-primary {
-  background: var(--blue); border-color: var(--blue); color: #fff;
+  background: var(--blue); border-color: var(--blue); color: var(--navy);
   box-shadow: 0 8px 22px rgba(40, 146, 255, .28);
 }
 .btn-primary:hover {
-  background: var(--blue); border-color: var(--blue); color: #fff;
+  background: var(--blue); border-color: var(--blue); color: var(--navy);
   box-shadow: 0 12px 28px rgba(40, 146, 255, .4);
 }
 .btn-ghost { border-color: var(--line-2); color: var(--navy); }
 .btn-ghost:hover { border-color: var(--ink); color: var(--ink); }
-.nav-gh { padding: 6px 16px; font-size: 11px; }
+.nav-gh { padding: 6px 16px; font-size: 11.5px; }
 
 /* -------------------------------------------------------------- hero --- */
 .hero {
@@ -164,23 +179,35 @@ h1, h2, h3, h4, .serif {
 }
 .hero-copy { min-width: 0; }
 .hero-kicker {
-  font-family: var(--mono); font-size: 11.5px; letter-spacing: .2em;
-  color: var(--blue); text-transform: uppercase; margin-bottom: 22px;
+  font-family: var(--mono); font-size: 12px; letter-spacing: .14em;
+  color: var(--blue-deep); text-transform: uppercase; margin-bottom: 22px;
 }
 .hero-title {
   font-size: clamp(40px, 5.6vw, 82px); line-height: .98; color: var(--navy);
 }
 .hero-title span { display: block; }
 .hero-title .hero-title-sub {
-  font-style: italic; color: var(--blue);
+  font-style: italic; color: var(--blue-deep);
   font-size: .62em; line-height: 1.12; margin-top: 14px;
 }
+/* --- product slogan (pack key hero.slogan) — engraved lead line --- */
+.hero-slogan, .section-slogan {
+  font-family: var(--font-head); font-style: italic; color: var(--ink);
+}
+.hero-slogan::before, .section-slogan::before {
+  content: ""; display: inline-block; width: 9px; height: 9px;
+  margin-right: 10px; vertical-align: .1em;
+  background: linear-gradient(160deg, #70e4fd, #2892ff);
+  border-radius: 0 50% 50% 50%; transform: rotate(45deg);
+}
+.hero-slogan { margin-top: 20px; font-size: clamp(19px, 2vw, 24px);
+  line-height: 1.25; }
 .hero-sub { max-width: 520px; margin-top: 26px; color: var(--muted);
   font-size: clamp(15px, 1.5vw, 17px); line-height: 1.7; }
 .hero-badges { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 28px; }
 .badge {
   display: inline-flex; align-items: center; gap: 8px;
-  font-family: var(--mono); font-size: 11px; letter-spacing: .14em;
+  font-family: var(--mono); font-size: 11.5px; letter-spacing: .1em;
   text-transform: uppercase;
   padding: 7px 14px; border: 1px solid var(--line);
   background: rgba(255, 255, 255, .8); color: var(--navy);
@@ -227,7 +254,7 @@ h1, h2, h3, h4, .serif {
   position: relative; z-index: 2; display: flex; justify-content: space-between;
   gap: 12px; margin-top: 11px; padding-top: 8px;
   border-top: 1px solid var(--line);
-  font-family: var(--mono); font-size: 10.5px; letter-spacing: .16em;
+  font-family: var(--mono); font-size: 11px; letter-spacing: .1em;
   text-transform: uppercase; color: var(--muted);
 }
 /* guilloche halo behind the plate */
@@ -255,7 +282,7 @@ h1, h2, h3, h4, .serif {
   display: flex; gap: 8px; align-items: center;
   background: var(--paper); border: 1px solid var(--ink);
   padding: 7px 11px;
-  font-family: var(--mono); font-size: 10.5px; letter-spacing: .16em;
+  font-family: var(--mono); font-size: 11px; letter-spacing: .1em;
   text-transform: uppercase; color: var(--navy);
 }
 .led { width: 6px; height: 6px; border-radius: 50%; background: var(--blue);
@@ -275,7 +302,7 @@ h1, h2, h3, h4, .serif {
   width: max-content; animation: ticker 34s linear infinite; }
 .fact-strip:hover .fact-strip-track { animation-play-state: paused; }
 .fact {
-  font-family: var(--mono); font-size: 12px; letter-spacing: .16em;
+  font-family: var(--mono); font-size: 12px; letter-spacing: .1em;
   text-transform: uppercase; color: var(--muted); white-space: nowrap;
 }
 .fact b { color: var(--blue-deep); font-weight: 600; margin-right: 6px; }
@@ -307,6 +334,9 @@ h1, h2, h3, h4, .serif {
   font-size: clamp(32px, 4.4vw, 56px); line-height: 1.04; margin-top: 16px;
   color: var(--ink);
 }
+/* slogan as the section's opening line (same pack key as the hero) */
+.section-slogan { margin-top: 14px; font-size: clamp(17px, 1.7vw, 21px);
+  line-height: 1.3; }
 .section-sub { max-width: 760px; color: var(--muted); margin-top: 14px;
   font-size: 15.5px; line-height: 1.72; }
 
@@ -319,8 +349,8 @@ h1, h2, h3, h4, .serif {
 .counsel-eyebrow,
 .cert-eyebrow {
   display: inline-block;
-  font-family: var(--mono); font-size: 11.5px; letter-spacing: .2em;
-  text-transform: uppercase; color: var(--blue);
+  font-family: var(--mono); font-size: 12px; letter-spacing: .14em;
+  text-transform: uppercase; color: var(--blue-deep);
 }
 .watch-head h2 { margin-top: 16px; }
 
@@ -338,7 +368,7 @@ h1, h2, h3, h4, .serif {
   border-right: 1px solid var(--rule); }
 .beat-right .beat-card { grid-column: 3; border-left: 1px solid var(--rule); }
 .beat-num {
-  font-family: var(--mono); font-size: 10.5px; letter-spacing: .18em;
+  font-family: var(--mono); font-size: 11px; letter-spacing: .12em;
   text-transform: uppercase; color: var(--muted);
 }
 .beat h3 { font-size: clamp(22px, 2.4vw, 28px); margin: 9px 0; color: var(--ink);
@@ -355,7 +385,7 @@ h1, h2, h3, h4, .serif {
   background: var(--blue); border-color: var(--blue);
   box-shadow: 0 0 0 6px rgba(40, 146, 255, .16);
 }
-.beat.on .beat-num { color: var(--blue); }
+.beat.on .beat-num { color: var(--blue-deep); }
 .beat.on h3 { color: var(--blue-deep); }
 .beat-left.on .beat-card { border-right-color: rgba(40, 146, 255, .5); }
 .beat-right.on .beat-card { border-left-color: rgba(40, 146, 255, .5); }
@@ -372,7 +402,7 @@ h1, h2, h3, h4, .serif {
 .step-num {
   position: absolute; top: -16px; left: 20px; width: 32px; height: 32px;
   display: grid; place-items: center;
-  font-family: var(--mono); font-size: 14px; color: #fff;
+  font-family: var(--mono); font-size: 14px; color: var(--navy);
   background: var(--blue); border-radius: 50%;
   box-shadow: 0 6px 16px rgba(40, 146, 255, .35);
 }
@@ -397,7 +427,7 @@ h1, h2, h3, h4, .serif {
   color: #dbeeff; white-space: pre-wrap; overflow-wrap: anywhere;
 }
 .copy-btn {
-  flex: 0 0 auto; font-family: var(--mono); font-size: 11px;
+  flex: 0 0 auto; font-family: var(--mono); font-size: 11.5px;
   letter-spacing: .1em; padding: 5px 10px;
   border: 1px solid rgba(165, 183, 202, .5); color: #cfe3f5;
   background: rgba(255, 255, 255, .06); cursor: pointer;
@@ -441,7 +471,7 @@ h1, h2, h3, h4, .serif {
 }
 .mock-tag {
   display: flex; align-items: center; gap: 10px; padding: 10px 18px;
-  font-family: var(--mono); font-size: 11px; letter-spacing: .16em;
+  font-family: var(--mono); font-size: 11.5px; letter-spacing: .1em;
   text-transform: uppercase; color: var(--blue-deep);
   border-bottom: 1px solid var(--ink);
   background: rgba(40, 146, 255, .07);
@@ -456,8 +486,8 @@ h1, h2, h3, h4, .serif {
   line-height: 1.25; }
 .mock-brand b { font-family: var(--mono); letter-spacing: .24em;
   color: var(--navy); font-size: 15px; font-weight: 400; }
-.mock-sub { color: var(--muted); font-family: var(--mono); font-size: 10.5px;
-  letter-spacing: .16em; text-transform: uppercase; }
+.mock-sub { color: var(--muted); font-family: var(--mono); font-size: 11px;
+  letter-spacing: .1em; text-transform: uppercase; }
 .mock-chips { display: flex; gap: 8px; margin-left: auto; }
 .chip, .tool {
   font-family: var(--mono); font-size: 11px; letter-spacing: .1em;
@@ -480,7 +510,7 @@ h1, h2, h3, h4, .serif {
 .mock-nav { display: flex; flex-direction: column; gap: 4px; }
 .mock-nav-item {
   position: relative; display: flex; align-items: center; gap: 9px;
-  font-size: 12.5px; color: var(--muted); padding: 8px 10px;
+  font-size: 13px; color: var(--muted); padding: 8px 10px;
   border: 1px solid transparent;
 }
 .mock-nav-item::before {
@@ -503,7 +533,7 @@ h1, h2, h3, h4, .serif {
 .mock-main { min-width: 0; }
 .mock-view-head { margin-bottom: 12px; }
 .mock-view-head h3 { font-size: 17px; color: var(--navy); letter-spacing: -.01em; }
-.mock-view-head p { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+.mock-view-head p { font-size: 13px; color: var(--muted); margin-top: 2px; }
 .mock-ov { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px; align-items: start; }
 .mc-span3 { grid-column: span 3; }
@@ -516,7 +546,7 @@ h1, h2, h3, h4, .serif {
 }
 .mcard h3 {
   font-family: var(--mono); font-size: 11px; font-weight: 400;
-  letter-spacing: .2em; color: var(--blue-deep);
+  letter-spacing: .14em; color: var(--blue-deep);
   border-bottom: 1px solid var(--line); padding-bottom: 8px; margin-bottom: 12px;
   display: flex; justify-content: space-between; text-transform: uppercase;
 }
@@ -536,11 +566,11 @@ h1, h2, h3, h4, .serif {
   50% { opacity: .4; transform: scale(.7); } }
 .voice-state { font-family: var(--mono); font-size: 12px; letter-spacing: .14em;
   color: var(--navy); }
-.voice-sub { font-size: 11.5px; color: var(--muted); }
+.voice-sub { font-size: 12.5px; color: var(--muted); }
 .ticker { margin-top: 12px; display: flex; align-items: center; gap: 8px;
   border: 1px solid var(--line); padding: 7px 10px;
   background: var(--panel-2); color: var(--muted); font-family: var(--mono);
-  font-size: 11.5px; }
+  font-size: 12px; }
 .ticker-dot { width: 7px; height: 7px; background: var(--blue); flex: none; }
 .bar-block { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px;
   margin-bottom: 12px; }
@@ -562,12 +592,12 @@ h1, h2, h3, h4, .serif {
 .m-dot { display: block; width: 8px; height: 8px; margin-bottom: 7px;
   background: var(--blue); border-radius: 0 50% 50% 50%;
   transform: rotate(45deg); }
-.m-name { display: block; font-family: var(--mono); font-size: 10px;
+.m-name { display: block; font-family: var(--mono); font-size: 11px;
   letter-spacing: .1em; color: var(--muted); text-transform: uppercase;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .m-state { display: block; font-family: var(--mono); font-size: 12px;
   color: var(--muted); margin-top: 3px; font-variant-numeric: tabular-nums; }
-.stat-note { font-size: 11.5px; color: var(--muted); text-align: center; }
+.stat-note { font-size: 12.5px; color: var(--muted); text-align: center; }
 .mock-ov .stat-note { text-align: left; }
 .kv { width: 100%; border-collapse: collapse; font-family: var(--mono);
   font-size: 12px; }
@@ -579,7 +609,7 @@ h1, h2, h3, h4, .serif {
   letter-spacing: .04em; text-transform: none; }
 .mock-foot { display: flex; justify-content: space-between; margin-top: 14px;
   padding-top: 10px; border-top: 1px solid var(--line);
-  font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
 .feature-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px;
   margin-top: 26px; }
 .feature {
@@ -611,8 +641,8 @@ h1, h2, h3, h4, .serif {
   max-width: 420px; }
 .counsel-note {
   margin-top: 22px !important; color: var(--coral-ink) !important;
-  font-family: var(--mono); font-size: 11.5px !important;
-  letter-spacing: .14em; text-transform: uppercase;
+  font-family: var(--mono); font-size: 12px !important;
+  letter-spacing: .1em; text-transform: uppercase;
 }
 .letter {
   position: relative; background: var(--paper); border: 1px solid var(--ink);
@@ -627,10 +657,10 @@ h1, h2, h3, h4, .serif {
 .letter-head {
   display: flex; justify-content: space-between; gap: 14px;
   border-bottom: 1px solid var(--rule); padding-bottom: 13px;
-  font-family: var(--mono); font-size: 11px; letter-spacing: .16em;
+  font-family: var(--mono); font-size: 11.5px; letter-spacing: .1em;
   text-transform: uppercase; color: var(--muted);
 }
-.letter-flag { color: var(--blue); }
+.letter-flag { color: var(--blue-deep); }
 .letter-title { font-size: clamp(21px, 2.4vw, 29px); margin: 22px 0 8px; }
 .letter-body { font-size: 15.5px; line-height: 1.78; color: #28415a; }
 .letter-body::first-letter {
@@ -642,11 +672,11 @@ h1, h2, h3, h4, .serif {
   gap: 16px; margin-top: 24px; border-top: 1px solid var(--rule);
   padding-top: 16px;
 }
-.sign-label { display: block; font-family: var(--mono); font-size: 10.5px;
-  letter-spacing: .16em; text-transform: uppercase; color: var(--muted); }
+.sign-label { display: block; font-family: var(--mono); font-size: 11px;
+  letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
 .sign-name { display: block; font-family: var(--font-head); font-style: italic;
   font-size: 25px; color: var(--ink); }
-.sign-flag { font-family: var(--mono); font-size: 11px; letter-spacing: .14em;
+.sign-flag { font-family: var(--mono); font-size: 11.5px; letter-spacing: .1em;
   text-transform: uppercase; color: var(--coral-ink); }
 
 /* ------------------------------------------------------------- models --- */
@@ -657,7 +687,7 @@ h1, h2, h3, h4, .serif {
   padding: clamp(20px, 3vw, 30px);
 }
 .status-pill { display: inline-flex; align-items: center; gap: 10px;
-  font-family: var(--mono); font-size: 12px; letter-spacing: .18em;
+  font-family: var(--mono); font-size: 12px; letter-spacing: .12em;
   text-transform: uppercase; color: var(--coral-ink);
   border: 1px solid rgba(233, 134, 103, .65);
   padding: 7px 18px; background: #fff; }
@@ -754,8 +784,8 @@ h1, h2, h3, h4, .serif {
   white-space: nowrap; }
 .cline-dots { flex: 1; border-bottom: 1px dotted var(--rule);
   transform: translateY(-4px); }
-.cline-val { font-family: var(--mono); font-size: 10.5px; letter-spacing: .15em;
-  color: var(--blue); text-transform: uppercase; text-align: right; }
+.cline-val { font-family: var(--mono); font-size: 11px; letter-spacing: .1em;
+  color: var(--blue-deep); text-transform: uppercase; text-align: right; }
 .cert-final { display: flex; align-items: center; gap: 26px; margin-top: 40px;
   flex-wrap: wrap; position: relative; max-width: 940px; }
 .cert-seal { width: 128px; height: 128px; flex: none; color: var(--coral); }
@@ -824,7 +854,7 @@ h1, h2, h3, h4, .serif {
 .footer-fine { display: flex; justify-content: space-between; gap: 20px;
   flex-wrap: wrap; margin-top: 22px; padding-top: 16px;
   border-top: 1px solid rgba(255, 255, 255, .1);
-  font-family: var(--mono); font-size: 11px; letter-spacing: .14em;
+  font-family: var(--mono); font-size: 11.5px; letter-spacing: .1em;
   text-transform: uppercase; color: #7d97ac; }
 
 /* -------------------------------------------------------- responsive --- */
@@ -883,6 +913,26 @@ h1, h2, h3, h4, .serif {
   .letter { padding: 24px 20px; }
   .letter-body::first-letter { font-size: 54px; }
   .cert-final { gap: 18px; }
+}
+
+/* ------------------------------------------------ CJK readability --- */
+/* Chinese needs neither negative display tracking nor synthetic italics,
+   and reads better with a looser leading; small uppercase labels keep a
+   tight tracking so 中英 mixed lines stay on one row. */
+html[lang="zh-Hans"] body { line-height: 1.75; }
+html[lang="zh-Hans"] h1, html[lang="zh-Hans"] h2,
+html[lang="zh-Hans"] h3, html[lang="zh-Hans"] h4,
+html[lang="zh-Hans"] .serif { letter-spacing: 0; }
+html[lang="zh-Hans"] .hero-title-sub, html[lang="zh-Hans"] .sign-name,
+html[lang="zh-Hans"] .hero-slogan, html[lang="zh-Hans"] .section-slogan {
+  font-style: normal;
+}
+html[lang="zh-Hans"] .nav-link, html[lang="zh-Hans"] .badge,
+html[lang="zh-Hans"] .fact, html[lang="zh-Hans"] .btn,
+html[lang="zh-Hans"] .letter-head, html[lang="zh-Hans"] .cline-val,
+html[lang="zh-Hans"] .watch-eyebrow, html[lang="zh-Hans"] .counsel-eyebrow,
+html[lang="zh-Hans"] .cert-eyebrow, html[lang="zh-Hans"] .hero-kicker {
+  letter-spacing: .04em;
 }
 
 @media (prefers-reduced-motion: reduce) {

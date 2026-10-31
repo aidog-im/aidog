@@ -1650,7 +1650,7 @@ function chatQueueRender() {
       b.type = "button";
       b.textContent = txt;
       b.style.cssText = "border:1px solid var(--line);background:#fff;" +
-        "border-radius:6px;padding:2px 8px;font-size:11px;cursor:pointer;" +
+        "border-radius:6px;padding:2px 8px;font-size:12px;cursor:pointer;" +
         "color:var(--text);";
       b.addEventListener("click", fn);
       return b;
@@ -1704,7 +1704,7 @@ function chatProgress(data) {
     document.getElementById("chatEmpty")?.remove();
     chatProgEl = document.createElement("div");
     chatProgEl.className = "chat-progress";
-    chatProgEl.style.cssText = "font-size:11px;color:var(--muted);" +
+    chatProgEl.style.cssText = "font-size:12px;color:var(--muted);" +
       "font-family:Consolas,monospace;padding:2px 4px;" +
       "transition:opacity .35s ease;";
     log.insertBefore(chatProgEl, log.lastElementChild);
@@ -2291,19 +2291,20 @@ function paintCredHint() {
 
 /* Re-render the pure-data status lines ("NAME · set / empty / N chars")
    after a language switch — rows are built once, so their pack-driven words
-   need an explicit repaint. Rows carrying an error keep their detail. */
+   need an explicit repaint. Rows carrying an error keep their detail. Both
+   credential containers are covered (Credentials card + the Telegram card). */
 function repaintCredStatuses() {
   if (!credsData || !Array.isArray(credsData.slots)) return;
   credsData.slots.forEach(slot => {
     if (!slot || !slot.name) return;
-    const row = document.querySelector(`#credList [data-slot="${slot.name}"]`);
-    if (!row) return;
-    const st = row.querySelector(".cred-status");
-    if (!st || st.dataset.errDetail) return;
-    st.textContent = credStatusText(slot) +
-      (st.dataset.restartHint === "1"
-        ? " · " + t("cred.restartHint", "restart the chat service to apply")
-        : "");
+    document.querySelectorAll(`[data-slot="${slot.name}"]`).forEach(row => {
+      const st = row.querySelector(".cred-status");
+      if (!st || st.dataset.errDetail) return;
+      st.textContent = credStatusText(slot) +
+        (st.dataset.restartHint === "1"
+          ? " · " + t("cred.restartHint", "restart the chat service to apply")
+          : "");
+    });
   });
 }
 
@@ -2313,7 +2314,7 @@ function credErrDetail(st, detail) {
   st.textContent = t("cred.err", "error: ") + String(detail);
 }
 
-function credRow(slot, writable) {
+function credRow(slot, writable, labelKey) {
   const name = String(slot && slot.name ? slot.name : "");
   const wrap = document.createElement("div");
   wrap.dataset.slot = name;
@@ -2321,8 +2322,13 @@ function credRow(slot, writable) {
   row.className = "ctl-row token-row";
   row.style.marginTop = "6px";
   const label = document.createElement("label");
-  label.textContent = name;
-  label.style.fontFamily = "var(--mono)";
+  if (labelKey) {                 // friendly label (Telegram card rows)
+    label.dataset.i18n = labelKey;
+    label.textContent = t(labelKey, name);
+  } else {
+    label.textContent = name;
+    label.style.fontFamily = "var(--mono)";
+  }
   row.appendChild(label);
   const st = document.createElement("div");
   st.className = "cred-status stat-note";
@@ -2381,7 +2387,7 @@ function renderCreds(body) {
   buckets.filter(b => b[1].length).forEach(([g, items]) => {
     const head = document.createElement("div");
     head.style.cssText =
-      "font-size:11px;letter-spacing:.14em;color:var(--blue-ink);" +
+      "font-size:12px;letter-spacing:.14em;color:var(--blue-ink);" +
       "margin-top:14px;text-transform:uppercase;";
     if (CRED_GROUPS.includes(g)) {
       head.dataset.i18n = "cred.group." + g;
@@ -2394,8 +2400,44 @@ function renderCreds(body) {
   });
 }
 
+/* -------------------------------------------------- Telegram card (0.5.43) --
+   The two TG slots rendered into #tgCredList by the SAME presence-only
+   mechanism as the Credentials card (credRow / credWrite / wireCredList):
+   status line, inline SET/CLEAR, zero value echo. Rows only render for
+   slots the server actually reported — an absent row is an honest absence,
+   never a guessed state. */
+const TG_CARD_SLOTS = [
+  ["MYCORE_TG_TOKEN", "act.item.tg_token", "act.hint.tg_token",
+   "the bot's login token — set it under Credentials"],
+  ["AIDOG_TG_ALLOWED_USERS", "act.item.tg_allowlist", "act.hint.tg_allowlist",
+   "numeric Telegram user ids, comma separated — who may talk to the bot"],
+];
+
+function renderTgCreds(body) {
+  const list = document.getElementById("tgCredList");
+  if (!list) return;
+  const slots = Array.isArray(body.slots) ? body.slots : [];
+  const writable = body.writable !== false;
+  list.textContent = "";
+  let shown = 0;
+  TG_CARD_SLOTS.forEach(([name, labelKey, hintKey, hintFb]) => {
+    const slot = slots.find(s => s && s.name === name);
+    if (!slot) return;            // not in the payload: hide, never invent
+    list.appendChild(credRow(slot, writable, labelKey));
+    const hint = document.createElement("div");
+    hint.className = "stat-note";
+    hint.style.marginTop = "2px";
+    hint.dataset.i18n = hintKey;
+    hint.textContent = t(hintKey, hintFb);
+    list.appendChild(hint);
+    shown++;
+  });
+  list.hidden = shown === 0;
+}
+
 async function loadCreds() {
   const list = document.getElementById("credList");
+  const tgList = document.getElementById("tgCredList");
   if (!list) return;
   try {
     const res = await fetch("/api/secrets");
@@ -2406,12 +2448,14 @@ async function loadCreds() {
     }
     credsData = body;
     renderCreds(body);
+    renderTgCreds(body);
     list.hidden = false;
     credHintReason = body.writable === false ? "readOnly"
       : ((localStorage.getItem(TOKEN_KEY) || "") ? "" : "needToken");
   } catch (e) {                       // 404 / network: honest unavailable
     credsData = null;
     list.hidden = true;
+    if (tgList) { tgList.textContent = ""; tgList.hidden = true; }
     credHintReason = "unavailable";
   }
   paintCredHint();
@@ -2463,6 +2507,20 @@ async function credWrite(name, value, wrap, input) {
       (st.dataset.restartHint === "1"
         ? " · " + t("cred.restartHint", "restart the chat service to apply")
         : "");
+    // the same slot may be rendered twice (Credentials + Telegram card):
+    // keep every row for this name in sync with the fresh server truth
+    document.querySelectorAll(`[data-slot="${name}"]`).forEach(w => {
+      if (w === wrap) return;
+      const st2 = w.querySelector(".cred-status");
+      if (!st2 || st2.dataset.errDetail) return;
+      if (st.dataset.restartHint === "1") st2.dataset.restartHint = "1";
+      st2.textContent = credStatusText(slot) +
+        (st2.dataset.restartHint === "1"
+          ? " · " + t("cred.restartHint", "restart the chat service to apply")
+          : "");
+    });
+    // setup probes (slot state chips in both cards) re-read the server truth
+    refreshSetup();
     beep(880, 0.06);
   } catch (e) {
     credErrDetail(st, String(e).slice(0, 80));
@@ -2470,9 +2528,7 @@ async function credWrite(name, value, wrap, input) {
 }
 
 function wireCredList() {
-  const list = document.getElementById("credList");
-  if (!list) return;
-  list.addEventListener("click", e => {
+  const handler = e => {
     const btn = e.target.closest(".cred-set, .cred-clear");
     if (!btn) return;
     const wrap = e.target.closest("[data-slot]");
@@ -2493,6 +2549,10 @@ function wireCredList() {
     } else {
       credWrite(name, "", wrap, input);
     }
+  };
+  ["credList", "tgCredList"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("click", handler);
   });
 }
 
@@ -2821,7 +2881,7 @@ function renderToolsOff() {
   known.forEach(name => {
     const lab = document.createElement("label");
     lab.style.cssText =
-      "display:flex;gap:6px;align-items:center;font-family:var(--mono);font-size:11.5px;";
+      "display:flex;gap:6px;align-items:center;font-family:var(--mono);font-size:12.5px;";
     const cb = document.createElement("input");
     cb.type = "checkbox";
     cb.className = "tool-off";
@@ -3379,6 +3439,8 @@ function renderSetup() {
   if (!setupData) {                // no endpoint / bad shape: hide, honestly
     card.hidden = true;
     card.style.display = "none";
+    const tgBotHide = document.getElementById("tgBotState");
+    if (tgBotHide) { tgBotHide.hidden = true; tgBotHide.textContent = ""; }
     return;
   }
   card.hidden = false;
@@ -3400,7 +3462,7 @@ function renderSetup() {
         "Welcome — 3 steps to activate: 1) set the console access token, " +
         "2) set the bot token and the owner allowlist, 3) point the model " +
         "endpoint. Fix each row below, or run in a terminal:")) + " " +
-        `<code style="font-family:Consolas,monospace;font-size:11.5px;` +
+        `<code style="font-family:Consolas,monospace;font-size:12.5px;` +
         `color:var(--blue-ink);border:1px dashed var(--line);` +
         `padding:1px 6px;border-radius:6px;">aidog setup</code>`;
     }
@@ -3432,24 +3494,28 @@ function renderSetup() {
         `</div>${hint}</div>`;
     }).join("");
   }
-  // bot block: token / allowlist presence + format, service state
-  const bot = document.getElementById("actBotState");
-  if (bot) {
-    const find = id => items.find(x => x && x.id === id) || null;
-    const parts = [];
-    ["tg_token", "tg_allowlist"].forEach(id => {
-      const o = find(id);
-      if (!o) return;
-      parts.push(escapeHtml(t("act.item." + id, id)) + " " +
-        actChip(actChipText(o.state), actTone(o.state)));
-    });
-    const svc = String(setupData.service || "");
-    if (svc) {
-      parts.push(escapeHtml(t("act.item.service", "Chat service")) + " " +
-        actChip(actChipText(svc), actTone(svc)));
-    }
-    bot.innerHTML = parts.length ? parts.join(" · ") : "—";
+  // bot block: token / allowlist presence + format, service state — painted
+  // into BOTH faces (Overview #actBotState + Settings Telegram card
+  // #tgBotState) from the same honest setup payload; a missing payload
+  // leaves the Settings chip hidden (renderSetup already returned above).
+  const find = id => items.find(x => x && x.id === id) || null;
+  const parts = [];
+  ["tg_token", "tg_allowlist"].forEach(id => {
+    const o = find(id);
+    if (!o) return;
+    parts.push(escapeHtml(t("act.item." + id, id)) + " " +
+      actChip(actChipText(o.state), actTone(o.state)));
+  });
+  const svc = String(setupData.service || "");
+  if (svc) {
+    parts.push(escapeHtml(t("act.item.service", "Chat service")) + " " +
+      actChip(actChipText(svc), actTone(svc)));
   }
+  const botHtml = parts.length ? parts.join(" · ") : "—";
+  const bot = document.getElementById("actBotState");
+  if (bot) bot.innerHTML = botHtml;
+  const tgBot = document.getElementById("tgBotState");
+  if (tgBot) { tgBot.hidden = false; tgBot.innerHTML = botHtml; }
 }
 
 async function refreshSetup() {
@@ -3511,9 +3577,11 @@ function actFix(id) {
   });
 }
 
-async function svcRestart() {
-  const btn = document.getElementById("svcRestartBtn");
-  const msg = document.getElementById("svcRestartMsg");
+/* shared chat-service restart (Overview #svcRestartBtn + Settings Telegram
+   card #tgRestartBtn): confirm -> POST /api/service/restart {target:
+   "service"} -> poll /api/status up to 20s. Behavior for the Overview face
+   is byte-for-byte the pre-existing one (activation E2E U2 depends on it). */
+async function svcRestartWith(btn, msg) {
   if (!btn || !msg) return;
   if (!window.confirm(t("act.restartConfirm",
       "Restart the chat service now? Bot token / allowlist / tool changes " +
@@ -3581,6 +3649,18 @@ async function svcRestart() {
   }
   btn.disabled = false;
   refreshSetup();
+}
+
+/* two faces of the same flow (element ids resolved at call time) */
+function svcRestart() {
+  return svcRestartWith(
+    document.getElementById("svcRestartBtn"),
+    document.getElementById("svcRestartMsg"));
+}
+function tgRestart() {
+  return svcRestartWith(
+    document.getElementById("tgRestartBtn"),
+    document.getElementById("tgRestartMsg"));
 }
 
 /* ------------------------------------------------------ doctor (0.5.40) -- */
@@ -3882,6 +3962,8 @@ if (actListEl) actListEl.addEventListener("click", e => {
 });
 const svcRestartBtnEl = document.getElementById("svcRestartBtn");
 if (svcRestartBtnEl) svcRestartBtnEl.addEventListener("click", svcRestart);
+const tgRestartBtnEl = document.getElementById("tgRestartBtn");
+if (tgRestartBtnEl) tgRestartBtnEl.addEventListener("click", tgRestart);
 const updCheckEl = document.getElementById("updateCheckBtn");
 if (updCheckEl) updCheckEl.addEventListener("click", updateCheck);
 const updApplyEl = document.getElementById("updateApplyBtn");

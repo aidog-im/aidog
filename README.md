@@ -5,6 +5,7 @@
 <h1 align="center">I'm AiDog</h1>
 
 <p align="center">
+  <em>Your loyal AI companion</em><br>
   <strong>grown for one, built for anyone</strong><br>
   A personal embodied AI — a constitution for a personality, curated memory
   for a life, and a self-developed core that answers to you alone.<br>
@@ -13,7 +14,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/aidog-im/aidog/releases"><img src="https://img.shields.io/badge/release-0.5.42-blue?style=flat-square" alt="release 0.5.42"></a>
+  <a href="https://github.com/aidog-im/aidog/releases"><img src="https://img.shields.io/badge/release-0.5.43-blue?style=flat-square" alt="release 0.5.43"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
   <img src="https://img.shields.io/badge/core_tests-1180%2F1180-brightgreen?style=flat-square" alt="core tests 1180/1180">
   <img src="https://img.shields.io/badge/console_smoke-234%2F234-brightgreen?style=flat-square" alt="console smoke 234/234">
@@ -204,7 +205,7 @@ Catalog scope: **25 registered tools** · **9 exchange venues** · **12
 real-machine E2E legs** — all green.
 
 Locale packs: `en` (default) + `zh`, **536 keys** each, parity lint in CI;
-the marketing site ships its own **216-key** bilingual pack.
+the marketing site ships its own **217-key** bilingual pack.
 
 ## Documentation
 

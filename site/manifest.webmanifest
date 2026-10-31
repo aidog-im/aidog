@@ -1,7 +1,7 @@
 {
   "name": "I'm AiDog",
   "short_name": "AiDog",
-  "description": "I'm AiDog (aidog.im) — a personal embodied AI, permanently free, with a self-developed core, local-first console and Telegram-first channels.",
+  "description": "I'm AiDog (aidog.im) — your loyal AI companion: a personal embodied AI, permanently free, with a self-developed core, local-first console and Telegram-first channels.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

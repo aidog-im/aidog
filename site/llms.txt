@@ -1,6 +1,6 @@
 # I'm AiDog
 
-> A personal embodied AI: a constitution for a personality, curated memory for a life, and a self-developed core that answers to you alone. Permanently free for any use, local-first console, 9-route channel gateway with Telegram live.
+> Your loyal AI companion — a personal embodied AI: a constitution for a personality, curated memory for a life, and a self-developed core that answers to you alone. Permanently free for any use, local-first console, 9-route channel gateway with Telegram live.
 
 I'm AiDog is a single companion you run yourself — not a platform, not an assistant farm. Three constitutional facts: it is permanently free (no paid tier, no usage fee, no paid feature gate, ever), the console is local-first (state, memory and configuration stay on your own machine), and the core kernel is self-developed in-house rather than wrapped from a third party.
 
@@ -17,7 +17,7 @@ I'm AiDog is a single companion you run yourself — not a platform, not an assi
 - Web3 exchanges: nine venues in one catalog — keyless chain reads (Jupiter, Velora, Hyperliquid, dYdX, GMX, public RPC) beside slot-gated CEX accounts (OKX, Kraken, Binance) behind six `exchange_*` tools. Orders only ever run prepare → human console approval → execute; thresholds fail closed (default 0 = every plan waits for a person), market orders never auto-approve, and withdrawals / on-chain transfers / transaction signing do not exist in the core at all. With no slot configured the order tool never registers.
 - Activation & operations: the console's Overview ACTIVATION card mirrors `aidog setup --check` (required slots, endpoint reachability, service state) with FIX deep-links; a credential-slot editor writes runtime slots with values never echoed; doctor-run, service-restart and update controls live in the panel.
 - Evidence (the same numbers shown in the site's fact strip): core tests 1180/1180 · console smoke 234/234 · skill router 30/30 · memory 58/58 · setup wizard 99/99 · profile isolation 63/63 · desktop shell 15/15 · doctor 0 FAIL · 0 WARN · 12 real-machine E2E suites · 536 locale keys per pack · 25 registered tools · 31 capability documents · 28 self-developed modules ≈ 13.4k LOC.
-- Current release: 0.5.42.
+- Current release: 0.5.43.
 
 ## Interfaces
 

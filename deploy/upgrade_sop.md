@@ -17,7 +17,7 @@ Source: upstream `getting-started/updating.md` + `user-guide/configuration.md`
 
 ## Pre-flight (mandatory)
 
-1. `upstream backup` → zip of `<HOME_DIR>` (or set `updates.pre_update_backup: full`).
+1. `upstream backup` → zip of `~/.upstream` (or set `updates.pre_update_backup: full`).
 2. Snapshot our repo state: `git status --short` from the repo root (clean tree).
 3. Export config: `upstream -p aidog config get ...` for keys we tune
    (skills.external_dirs, telemetry, updates).
@@ -47,7 +47,7 @@ upstream update            # 8-stage: snapshot → fetch → syntax gate (auto-r
 
 - Upstream auto-rolls back on syntax gate failure.
 - Manual: reinstall previous tag in `$AIDOG_UPSTREAM_TREE` (path lived in `deploy/upstream_shim.env` — HISTORICAL, deleted at P5-5; stable channel
-  pins exact commit) + restore `<HOME_DIR>` backup zip via `upstream import`.
+  pins exact commit) + restore `~/.upstream` backup zip via `upstream import`.
 - MIT license guarantees permanent use of already-held versions (no vendor lock-in).
 
 ## Never do

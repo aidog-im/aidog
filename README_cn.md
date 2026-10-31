@@ -5,13 +5,14 @@
 <h1 align="center">I'm AiDog（我是智能狗）</h1>
 
 <p align="center">
+  <em>您的忠实AI伙伴</em><br>
   <strong>为一个具体的人长出来的具身 AI · 但任何人都能跑起来</strong><br>
   宪法人格 + 策展记忆 + 自研核心，只效忠你一个人。<br>
   不是平台，不是助手农场——一个专属伙伴，长给你一个人，工程化到人人都能部署。
 </p>
 
 <p align="center">
-  <a href="https://github.com/aidog-im/aidog/releases"><img src="https://img.shields.io/badge/release-0.5.42-blue?style=flat-square" alt="release 0.5.42"></a>
+  <a href="https://github.com/aidog-im/aidog/releases"><img src="https://img.shields.io/badge/release-0.5.43-blue?style=flat-square" alt="release 0.5.43"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
   <img src="https://img.shields.io/badge/core_tests-1180%2F1180-brightgreen?style=flat-square" alt="核心测试 1180/1180">
   <img src="https://img.shields.io/badge/console_smoke-234%2F234-brightgreen?style=flat-square" alt="控制台冒烟 234/234">
@@ -188,7 +189,7 @@ python3 deploy/aidog_update.py check # 版本通道：up to date
 E2E**——全部全绿。
 
 语言包：`en`（默认）+ `zh` 各 **536 键**，parity lint 把关；官网另有
-**216 键**双语站包。
+**217 键**双语站包。
 
 ## 文档
 

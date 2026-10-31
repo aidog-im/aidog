@@ -719,6 +719,21 @@
           </div>
         </div>
 
+        <!-- Telegram bot card (0.5.43): the two TG slots inline — the SAME
+             presence-only credential mechanism as Credentials (never a value)
+             — plus the setup probes' bot/service chips and the shared restart
+             action. Credentials card + #credList stay untouched. -->
+        <div class="card" id="tgCard">
+          <h2 data-i18n="act.bot">BOT & SERVICE</h2>
+          <div class="stat-note" id="tgBotState" hidden></div>
+          <div id="tgCredList" hidden></div>
+          <div class="ctl-actions" style="margin-top:12px;">
+            <button class="btn primary" id="tgRestartBtn" type="button"
+                    data-i18n="act.restartBtn">RESTART CHAT SERVICE</button>
+            <span class="save-state" id="tgRestartMsg" role="status"></span>
+          </div>
+        </div>
+
         <div class="card">
           <h2 data-i18n="sec.creds">CREDENTIALS</h2>
           <div class="stat-note" id="credTokenHint" hidden></div>
@@ -786,6 +801,7 @@
     </section>
 
     <footer>
+      <span class="brand-line">您的忠实AI伙伴 · Your loyal AI companion</span>
       <span id="footnote">loopback · free forever</span>
       <span id="ts">–</span>
     </footer>

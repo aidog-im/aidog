@@ -113,9 +113,11 @@ states only what this repository does.
 - **Status:** Enforced.
 - **What:** every git-tracked file must match an allow rule or a deny rule
   (deny wins); unclassified files block the verdict; required deny entries
-  are tamper-guarded; a leak scan runs over allow-classified files
-  (filled-credential, machine-path, personal-account patterns plus the
-  brand-token pattern whose constant lives in the tool itself).
+  are tamper-guarded; a leak scan runs over every tracked file for the
+  machine-path and personal-TG-identifier patterns (deny-classified included),
+  and over allow-classified files for the filled-credential and brand/vendor
+  patterns (the brand-token pattern whose constant lives in the tool itself;
+  docs/research/* is the citation vault where quoted third-party names live).
   READY from this tool is **necessary, never sufficient** for public
   placement — that additionally requires the desensitization pass, a
   reviewed manifest and owner adjudication (`AGENTS.md`).

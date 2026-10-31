@@ -2177,7 +2177,7 @@ def test_evolution() -> None:
     check("evolution: bearer rejected",
           "bearer" in ev.lint_text("Authorization: Bearer " + "x" * 24))
     check("evolution: machine path rejected",
-          "machine-path" in ev.lint_text("the files live under <MNT_PATH>/data"))
+          "machine-path" in ev.lint_text("the files live under /mnt/example/data"))
     check("evolution: windows path rejected",
           "windows-path" in ev.lint_text(r"saved to C:\Users\me\notes.md"))
     check("evolution: personal bot handle rejected",
@@ -2360,7 +2360,7 @@ def test_evolution() -> None:
                       for e in summ["log_tail"]), str(summ)[:200])
         check("evolution: lint_tree clean after accepted learns",
               ev.lint_tree(repo) == [], str(ev.lint_tree(repo)))
-        learned.write_text("- ok\n<HOME_DIR>/id_rsa leaked\n", encoding="utf-8")
+        learned.write_text("- ok\n/home/example/.ssh/id_rsa leaked\n", encoding="utf-8")
         hits = ev.lint_tree(repo)
         check("evolution: lint_tree catches a poisoned artifact",
               any("EVOLUTION_learned" in h and "machine-path" in h
@@ -6073,7 +6073,7 @@ def test_terminal() -> None:
                        ("docker:container=aidog-box", "docker"),
                        ("ssh:me@example.com", "ssh"),
                        ("ssh:me@10.0.0.5:2222", "ssh"),
-                       ("ssh:me@host;identity=<HOME_DIR>/id_ed25519", "ssh")):
+                       ("ssh:me@host;identity=/home/example/.ssh/id_ed25519", "ssh")):
         try:
             be = tm.parse(spec)
             check(f"terminal: parse {spec or '(empty)'}", be.kind == kind,

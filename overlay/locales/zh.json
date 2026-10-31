@@ -512,7 +512,7 @@
   "act.item.service": "聊天服务",
   "act.hint.web_token": "控制台写操作的闸门 —— 只检查存在性，永不回显",
   "act.hint.model_key": "本地回环端点不需要它",
-  "act.hint.tg_token": "机器人的登录令牌 —— 在「凭据」卡设置",
+  "act.hint.tg_token": "机器人的登录令牌 —— 在「凭据」卡或 Telegram 卡设置",
   "act.hint.tg_allowlist": "数字用户 ID，逗号分隔 —— 决定谁可以与机器人对话",
   "act.hint.model_endpoint": "OpenAI 兼容 base URL —— 必须能响应 /models",
   "act.hint.service": "机器人随聊天服务运行 —— 改凭据后需重启",

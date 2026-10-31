@@ -85,7 +85,7 @@ GETs (that is how increment is asserted).
 - `site/assets/main.js`: one `fetch("/api/visits", {cache:"no-store"})` on
   load; on any failure (network error, non-2xx, non-numeric count) the whole
   block stays `hidden`. Success reveals it with the integer.
-- Locale packs (`site/i18n/en.json`, `zh.json`, 216 keys each, same-name
+- Locale packs (`site/i18n/en.json`, `zh.json`, 217 keys each, same-name
   parity): `footer.views` = `"Page views:"` / `"页面浏览："`.
 
 ### Degradation ladder (what happens when a permission is missing)
@@ -107,7 +107,7 @@ GETs (that is how increment is asserted).
   `/api/visits` 200 with two-GET increment + `?format=text` (or `PENDING`
   with an `error` body when the binding is absent). All curl calls use
   `--noproxy '*'`.
-- `node tmp/shoot_site.js` (Playwright, local static server) — 43 assertions,
+- `node tmp/shoot_site.js` (Playwright, local static server) — 62 assertions,
   including per-shot: manifest link in head, apple-touch-icon in head,
   theme-color `#2892ff`, footer visits block `hidden` without an endpoint or
   strictly numeric with one. The local server has no Pages Function, so that

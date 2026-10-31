@@ -206,7 +206,7 @@ the restart handler logs a tmux session name and a return code only.
   spawned by the script: **33 checks · U0–U7** — settings save round trip,
   credential set/clear + DOM/storage value scan, evolution editor, exchange
   caps, `#capGrid`/`#cronList`, zh pack parity, zero `pageerror`, production
-  health. Run: `PW_PATH=<HOME_DIR>/_npx/e41f203b7505f1fb/node_modules/playwright node tmp/e2e_frontend_ui.js`.
+  health. Run: `PW_PATH=<playwright node path> node tmp/e2e_frontend_ui.js`.
 - **`tmp/e2e_activation_ui.js`** — Playwright against an isolated **named**-
   profile console spawned by the script (so the RESTART button can only hit
   the absent `aidog_svc_<name>` session — it can never kill production):
@@ -216,7 +216,7 @@ the restart handler logs a tmux session name and a return code only.
   save → read-back + restart-hint chip, action buttons (channel SEND TEST
   409 detail, seeded plan APPROVE/REJECT flip, LEARN + REFLECT round trip),
   zh pack parity + DOM credential scan, zero `pageerror`, production health.
-  Run: `PW_PATH=<HOME_DIR>/_npx/e41f203b7505f1fb/node_modules/playwright node tmp/e2e_activation_ui.js`.
+  Run: `PW_PATH=<playwright node path> node tmp/e2e_activation_ui.js`.
 - **`tmp/e2e_activation.py`** (activation car, 0.5.40) — isolated profile,
   never production: **81 checks · 10 legs (L1–L10)** — L1 `/api/setup`
   fresh → filled (mock model endpoint) → invalid allowlist + wizard pattern
@@ -254,7 +254,7 @@ the restart handler logs a tmux session name and a return code only.
   store untouched (all-or-nothing), U3 zh repaint of the new and a
   pre-existing control, U4 no token/slot value in the DOM or any input
   value, U5 zero `pageerror`, U6 production console health. Run:
-  `PW_PATH=<HOME_DIR>/_npx/e41f203b7505f1fb/node_modules/playwright node tmp/e2e_settings_matrix_ui.js`.
+  `PW_PATH=<playwright node path> node tmp/e2e_settings_matrix_ui.js`.
 - Standing gates (after the activation car): `mycore/tests/run.py` **1180** ·
   `tests/web_console_p3.py` **234** · `tests/source_lang_check.py` **0/66**
   (locale packs **536/536**). The 0.5.39 baseline of this page was

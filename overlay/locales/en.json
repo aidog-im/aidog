@@ -512,7 +512,7 @@
   "act.item.service": "Chat service",
   "act.hint.web_token": "opens the console write gate — presence only, never echoed",
   "act.hint.model_key": "not needed for loopback endpoints",
-  "act.hint.tg_token": "the bot's login token — set it under Credentials",
+  "act.hint.tg_token": "the bot's login token — set it under Credentials or in the Telegram card",
   "act.hint.tg_allowlist": "numeric Telegram user ids, comma separated — who may talk to the bot",
   "act.hint.model_endpoint": "OpenAI-compatible base URL — it must answer /models",
   "act.hint.service": "the bot runs inside the chat service — restart it after credential changes",
