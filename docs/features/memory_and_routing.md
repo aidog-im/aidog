@@ -209,6 +209,9 @@ absent), writes `deploy/memory_sources.local` when absent, then runs
 
 ### Credential gate (export)
 
+*Development-repository only: `deploy/check_publish.py` is release tooling of
+the development checkout, never part of a user install.*
+
 Every payload file is scanned before the tarball is written; a hit refuses the
 export (exit 3, **no tarball**) and prints `REFUSED <file> [<label>]` — the
 matched value is never echoed.

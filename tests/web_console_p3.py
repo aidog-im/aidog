@@ -680,6 +680,155 @@ def main() -> int:
     s, body = post("/api/settings", {"mycore": {"mcp": ""}}, token)
     check("POST mycore mcp back to off -> 200", s == 200, f"got {s} {body}")
 
+    # --- SNIFF car: the sense board partition (grammar in mycore.sniff,
+    # slot NAMES only, all-or-nothing like every other settings block) ---
+    s, st = get("/api/settings")
+    _sn = (st.get("mycore") or {}).get("sniff") if isinstance(st, dict) else None
+    check("GET settings always carries mycore.sniff (documented defaults)",
+          s == 200 and isinstance(_sn, dict)
+          and _sn.get("enabled") is True and _sn.get("pause") is False
+          and _sn.get("interval_s") == 300 and _sn.get("digest_cap") == 5
+          and _sn.get("quiet_hours") == "" and _sn.get("sources") == []
+          and _sn.get("rules") == [], str(_sn)[:240])
+    if token:
+        def sniff_patch(part: dict, tk: str | None = token):
+            return post("/api/settings", {"mycore": {"sniff": part}}, tk)
+
+        s, body = sniff_patch({
+            "interval_s": 60, "quiet_hours": "23:00-07:30",
+            "sources": [{"id": "ha", "kind": "home",
+                         "url": "http://homeassistant.local:8123",
+                         "token": "HA_TOKEN", "entities": ["sensor.*"]}],
+            "rules": [{"id": "hot", "source": "ha",
+                       "when": "sensor.temp > 30", "severity": "warn",
+                       "speak": True}]})
+        check("POST mycore.sniff valid partition -> 200", s == 200,
+              f"got {s} {str(body)[:200]}")
+        s, st = get("/api/settings")
+        _sn = (st.get("mycore") or {}).get("sniff")
+        check("GET echoes the sniff sources/rules + mycore keys survive",
+              s == 200 and isinstance(_sn, dict)
+              and [x.get("id") for x in _sn.get("sources", [])] == ["ha"]
+              and _sn.get("interval_s") == 60
+              and [r.get("id") for r in _sn.get("rules", [])] == ["hot"]
+              and st.get("mycore", {}).get("model"), str(_sn)[:240])
+        s, body = sniff_patch({
+            "sources": [{"id": "a", "kind": "mqtt", "url": "http://x"}]})
+        check("POST sniff bad kind -> 400 + closed enum reason",
+              s == 400 and "kind must be one of" in str(body),
+              f"got {s} {body}")
+        s, body = sniff_patch({
+            "sources": [{"id": "a", "kind": "home", "url": "http://ha.local",
+                         "token": "eyJhbGciOiJIUzI1NiJ9.payload.sig"}]})
+        check("POST sniff credential VALUE refused by the slot grammar",
+              s == 400 and "slot name" in str(body)
+              and "eyJhbGciOiJIUzI1NiJ9" not in str(body),
+              f"got {s} {body}")
+        s, body = sniff_patch({
+            "sources": [{"id": "a", "kind": "home", "url": "ftp://x/y"}]})
+        check("POST sniff non-http url -> 400", s == 400
+              and "http(s)" in str(body), f"got {s} {body}")
+        s, body = sniff_patch({
+            "sources": [{"id": "ha", "kind": "home",
+                         "url": "http://ha.local:8123", "token": "HA_TOKEN"}],
+            "rules": [{"id": "hot", "source": "ghost", "when": "a > 1"}]})
+        check("POST sniff rule on an unknown source -> 400",
+              s == 400 and "configured source" in str(body),
+              f"got {s} {body}")
+        s, body = sniff_patch({
+            "sources": [{"id": "ha", "kind": "home",
+                         "url": "http://ha.local:8123", "token": "HA_TOKEN"}],
+            "rules": [{"id": "hot", "source": "ha", "when": "a ~ 1"}]})
+        check("POST sniff malformed rule -> 400 naming the rule id",
+              s == 400 and "rule 1 (hot)" in str(body)
+              and "unexpected character" in str(body), f"got {s} {body}")
+        s, body = sniff_patch({
+            "sources": [{"id": "a", "kind": "home", "url": "http://x"}],
+            "zz": 1})
+        check("POST sniff unknown field -> 400", s == 400
+              and "unknown field 'zz'" in str(body), f"got {s} {body}")
+        s, body = sniff_patch({"quiet_hours": "25:00-07:00"})
+        check("POST sniff bad quiet_hours -> 400", s == 400
+              and "quiet_hours" in str(body), f"got {s} {body}")
+        s, body = sniff_patch({"interval_s": 5})
+        check("POST sniff interval out of range -> 400", s == 400
+              and "interval_s" in str(body), f"got {s} {body}")
+        # the mcp lane: a bridge NAME, no url, no credential, no rate cap —
+        # the source reads the mycore.mcp registry and session status only.
+        s, body = sniff_patch({
+            "interval_s": 60, "quiet_hours": "23:00-07:30",
+            "sources": [{"id": "br", "kind": "mcp", "server": "ha-mcp"}],
+            "rules": []})
+        check("POST sniff mcp source (bridge name, no url) -> 200", s == 200,
+              f"got {s} {str(body)[:200]}")
+        s, board = get("/api/sniff")
+        _srcs = board.get("sources") if isinstance(board, dict) else None
+        check("GET /api/sniff lists the mcp source with an honest status",
+              s == 200 and isinstance(_srcs, list) and len(_srcs) == 1
+              and _srcs[0].get("kind") == "mcp"
+              and _srcs[0].get("status") in
+              ("pending", "never-configured", "detached", "reachable"),
+              str(_srcs)[:240])
+        s, body = sniff_patch({
+            "sources": [{"id": "br", "kind": "mcp", "server": "ha-mcp",
+                         "url": "http://x"}]})
+        check("POST sniff mcp source refuses a url field -> 400", s == 400
+              and "unknown field 'url'" in str(body), f"got {s} {body}")
+        s, body = sniff_patch({"sources": [{"id": "br", "kind": "mcp"}]})
+        check("POST sniff mcp source without a server -> 400", s == 400
+              and "server must be a bridge name" in str(body),
+              f"got {s} {body}")
+        # leave settings as found: the documented default partition
+        s, body = sniff_patch({
+            "enabled": True, "pause": False, "interval_s": 300,
+            "quiet_hours": "", "digest_cap": 5, "sources": [], "rules": []})
+        check("sniff leg cleanup -> 200", s == 200, f"got {s} {body}")
+        s, st = get("/api/settings")
+        _sn = (st.get("mycore") or {}).get("sniff")
+        check("cleanup verified: sniff back to empty defaults",
+              s == 200 and isinstance(_sn, dict) and _sn.get("sources") == []
+              and _sn.get("rules") == [] and _sn.get("interval_s") == 300,
+              str(_sn)[:240])
+
+    # --- SNIFF board API: read model + the two write actions ---------------
+    s, board = get("/api/sniff")
+    check("GET /api/sniff read model shape (read-only board)",
+          s == 200 and isinstance(board, dict)
+          and board.get("read_only") is True
+          and board.get("config_error") == ""
+          and board.get("enabled") is True and board.get("pause") is False
+          and board.get("interval_s") == 300 and board.get("digest_cap") == 5
+          and board.get("sources") == [] and board.get("rules") == []
+          and isinstance(board.get("findings"), list)
+          and isinstance(board.get("findings_total"), int)
+          and isinstance(board.get("last_swept"), (int, float)),
+          f"got {s} {str(board)[:260]}")
+    check("GET /api/sniff carries no credential material",
+          "Bearer " not in json.dumps(board) and "secrets.env" not in json.dumps(board),
+          str(board)[:200])
+    s, body = post("/api/sniff", {"action": "sweep"}, None)
+    check("POST /api/sniff without token -> 401", s == 401, f"got {s}")
+    if token:
+        s, body = post("/api/sniff", {"action": "bogus"}, token)
+        check("POST /api/sniff bad action -> 400 + closed enum",
+              s == 400 and "sweep|ack" in str(body), f"got {s} {body}")
+        s, body = post("/api/sniff", {"action": "ack", "signature": ""},
+                       token)
+        check("POST /api/sniff ack without signature -> 400", s == 400,
+              f"got {s} {body}")
+        s, body = post("/api/sniff", {"action": "ack",
+                                      "signature": "deadbeefdeadbeef"}, token)
+        check("POST /api/sniff ack unknown finding -> 404", s == 404,
+              f"got {s} {body}")
+        s, body = post("/api/sniff", {"action": "sweep"}, token)
+        rep = body.get("sweep") if isinstance(body, dict) else None
+        check("POST /api/sniff sweep-now -> 200 + honest report",
+              s == 200 and isinstance(body, dict) and body.get("ok") is True
+              and isinstance(rep, dict) and rep.get("skipped") == ""
+              and rep.get("sources") == {} and rep.get("error") == ""
+              and (body.get("sniff") or {}).get("read_only") is True,
+              f"got {s} {str(body)[:300]}")
+
     # --- evolution settings partition: strict validation, all-or-nothing ---
     if token:
         s, body = post("/api/settings",

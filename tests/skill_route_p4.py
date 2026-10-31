@@ -240,8 +240,9 @@ def main() -> int:
     check("wrapper has no machine path", "/mnt/" not in wsrc and "/root/" not in wsrc)
     check("wrapper resolves own dir", 'HERE="$(cd "$(dirname' in wsrc)
     check("wrapper execs sibling python", '"$HERE/skill_route.py"' in wsrc)
-    # Detection patterns embedded as regexes (same convention as
-    # deploy/check_publish.py): the pattern source itself never matches the
+    # Detection patterns embedded as regexes (same self-exclusion convention
+    # as the development repository's publish gate): the pattern source itself
+    # never matches the
     # machine-path signature it hunts for.
     machine_path = re.compile(r"/mnt/[a-zA-Z]/TEST")
     check("router source has no machine path",

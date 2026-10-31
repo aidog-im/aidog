@@ -21,7 +21,7 @@
 <meta name="twitter:title" content="I'm AiDog — a personal embodied AI">
 <meta name="twitter:description" content="A personal embodied AI: a constitution for a personality, curated memory for a life, and a self-developed core that answers to you alone. Permanently free, local-first.">
 <meta name="twitter:image" content="https://aidog.im/assets/icons/icon-512.png">
-<link rel="stylesheet" href="assets/style.css?v=20261028">
+<link rel="stylesheet" href="assets/style.css?v=20261029">
 </head>
 <body>
 
@@ -36,6 +36,7 @@
     <a href="#start" class="nav-link" data-i18n="nav.start">Start</a>
     <a href="#skills" class="nav-link" data-i18n="nav.skills">Skills</a>
     <a href="#capabilities" class="nav-link" data-i18n="nav.capabilities">Capabilities</a>
+    <a href="#sniff" class="nav-link" data-i18n="nav.sniff">Sniff</a>
     <a href="#console" class="nav-link" data-i18n="nav.console">Console</a>
     <a href="#models" class="nav-link" data-i18n="nav.models">Models</a>
     <a href="#security" class="nav-link" data-i18n="nav.security">Security</a>
@@ -60,7 +61,7 @@
     <p class="hero-sub reveal" data-i18n="hero.sub">A personal embodied AI — a constitution for a personality, curated memory for a life, and a self-developed core that answers to you alone. Not a platform. Not an assistant farm. One companion, grown for one person, engineered so anyone can run it.</p>
     <div class="hero-badges reveal">
       <span class="badge badge-free"><span class="pulse-dot" aria-hidden="true"></span><span data-i18n="hero.badgeFree">PERMANENTLY FREE — forever, no exceptions</span></span>
-      <span class="badge badge-core" data-i18n="hero.badgeCore">Self-developed core · 31 modules · 1686/1686 tests</span>
+      <span class="badge badge-core" data-i18n="hero.badgeCore">Self-developed core · 32 modules · 1773/1773 tests</span>
       <span class="badge badge-local" data-i18n="hero.badgeLocal">Runs on your machine · loopback by default</span>
     </div>
     <div class="hero-cta reveal">
@@ -77,7 +78,6 @@
         <svg class="corner c3" viewBox="0 0 40 40" aria-hidden="true"><path d="M1 39V13C1 6 6 1 13 1h26" fill="none" stroke="currentColor"/><path d="M7 33c0-14 12-26 26-26" fill="none" stroke="currentColor"/><circle cx="13" cy="13" r="3" fill="none" stroke="currentColor"/></svg>
         <svg class="corner c4" viewBox="0 0 40 40" aria-hidden="true"><path d="M1 39V13C1 6 6 1 13 1h26" fill="none" stroke="currentColor"/><path d="M7 33c0-14 12-26 26-26" fill="none" stroke="currentColor"/><circle cx="13" cy="13" r="3" fill="none" stroke="currentColor"/></svg>
         <img src="assets/logo.jpg" alt="I'm AiDog logo" class="orb-img" width="1192" height="1167" data-i18n-alt="brand.logoAlt">
-        <div class="plate-cap"><span data-i18n="hero.fig">Fig. 01 — the original mark</span><span>1192 × 1167 px</span></div>
       </div>
       <span class="orb-drop od-1" aria-hidden="true"></span>
       <span class="orb-drop od-2" aria-hidden="true"></span>
@@ -87,9 +87,9 @@
   </div>
   <div class="fact-strip" aria-label="verified facts">
     <div class="fact-strip-track" id="factTrack">
-      <span class="fact"><b>1686/1686</b> <span data-i18n="facts.core">core tests</span></span>
-      <span class="fact"><b>31</b> <span data-i18n="facts.modules">self-developed modules</span></span>
-      <span class="fact"><b>310/310</b> <span data-i18n="facts.smoke">console smoke</span></span>
+      <span class="fact"><b>1773/1773</b> <span data-i18n="facts.core">core tests</span></span>
+      <span class="fact"><b>32</b> <span data-i18n="facts.modules">self-developed modules</span></span>
+      <span class="fact"><b>334/334</b> <span data-i18n="facts.smoke">console smoke</span></span>
       <span class="fact"><b>30/30</b> <span data-i18n="facts.router">skill router</span></span>
       <span class="fact"><b>58/58</b> <span data-i18n="facts.memory">memory suite</span></span>
       <span class="fact"><b>0F/0W</b> <span data-i18n="facts.doctor">doctor check</span></span>
@@ -98,9 +98,9 @@
       <span class="fact"><b>63/63</b> <span data-i18n="facts.profiles">profile isolation</span></span>
       <span class="fact"><b>15/15</b> <span data-i18n="facts.desktop">desktop shell</span></span>
       <span class="fact"><b>26</b> <span data-i18n="facts.tools">registered tools</span></span>
-      <span class="fact"><b>35</b> <span data-i18n="facts.docs">capability docs</span></span>
-      <span class="fact"><b>≈17.2k</b> <span data-i18n="facts.loc">lines of core code</span></span>
-      <span class="fact"><b>899</b> <span data-i18n="facts.i18n">locale keys · en + zh each</span></span>
+      <span class="fact"><b>36</b> <span data-i18n="facts.docs">capability docs</span></span>
+      <span class="fact"><b>≈18.6k</b> <span data-i18n="facts.loc">lines of core code</span></span>
+      <span class="fact"><b>979</b> <span data-i18n="facts.i18n">locale keys · en + zh each</span></span>
     </div>
   </div>
 </section>
@@ -284,10 +284,53 @@
   </div>
 </section>
 
+<!-- ============================================ SNIFF -->
+<section class="section" id="sniff">
+  <div class="section-head reveal">
+    <span class="section-index">04</span>
+    <h2 data-i18n="sniff.title">Sniff — the nose that speaks first</h2>
+    <p class="section-sub" data-i18n="sniff.sub">A read-only sweep smells health, home, vehicle and web signals, turns them into findings with provenance, and speaks first only when one earns it.</p>
+  </div>
+
+  <div class="pipeline reveal">
+    <div class="pnode">
+      <span class="pnode-ic" aria-hidden="true">◎</span>
+      <h4 data-i18n="sniff.b1T">1 · Senses</h4>
+      <p data-i18n="sniff.b1B">A sweep reads only what it may read: Home Assistant states behind a bearer slot, one web page, or a declared bridge's configuration and session status. Never-configured stays silent; a source we did not reach is never called reachable.</p>
+    </div>
+    <div class="parrow" aria-hidden="true">▸</div>
+    <div class="pnode">
+      <span class="pnode-ic" aria-hidden="true">◇</span>
+      <h4 data-i18n="sniff.b2T">2 · Sweeps</h4>
+      <p data-i18n="sniff.b2B">Bounded rules — no eval, a closed operator set, a sustain window — evaluate the readings the sweep just produced. A match becomes a durable, deduplicated finding in a local log your machine owns.</p>
+    </div>
+    <div class="parrow" aria-hidden="true">▸</div>
+    <div class="pnode">
+      <span class="pnode-ic" aria-hidden="true">◉</span>
+      <h4 data-i18n="sniff.b3T">3 · Speaks first</h4>
+      <p data-i18n="sniff.b3B">Quiet hours, a digest cap, the global PAUSE and a per-rule speak flag decide whether a batch earns a message — delivered oldest-first through the same chain the cron lane uses.</p>
+    </div>
+  </div>
+
+  <div class="feature-grid reveal">
+    <div class="feature"><h4 data-i18n="sniff.s1T">home — Home Assistant</h4><p data-i18n="sniff.s1B">Entity states filtered by globs, the hub route for health sensors, locks and devices — GET only, never a service call.</p></div>
+    <div class="feature"><h4 data-i18n="sniff.s2T">web — one URL</h4><p data-i18n="sniff.s2B">A page hash plus an optional regex field, so a changed page or a crossed threshold becomes a reading instead of a guess.</p></div>
+    <div class="feature"><h4 data-i18n="sniff.s3T">mcp — borrowed bridges</h4><p data-i18n="sniff.s3B">Configuration and connection status of a bridge you run yourself — observed, never driven: no tool call, no spawned process, no connection of its own.</p></div>
+  </div>
+
+  <div class="empty-card reveal">
+    <h3 class="empty-title" data-i18n="sniff.howtoTitle">Use it in three steps</h3>
+    <p class="empty-body" data-i18n="sniff.howto1">After install, open the Console → SENSE: add a source (a Home Assistant url + token slot, a URL + extract regex, or a bridge name from mycore.mcp), then add a rule like sensor.temp > 30 for 10m.</p>
+    <p class="empty-body" data-i18n="sniff.howto2">Hit SWEEP NOW (or wait out the interval): hits land in the FINDINGS timeline and stay on your machine — rules marked speak reach you first, with quiet hours, the digest cap and PAUSE deciding when.</p>
+    <p class="arch-note" data-i18n="sniff.boundary">Read-only by construction — no actuation path exists in the engine at all, and the suite asserts that absence. Personal signals stay on your machine, unconfigured sources never speak, and no paid tier ever touches them.</p>
+    <p class="arch-note"><a class="btn btn-primary" href="#start" data-i18n="sniff.cta">Get started</a> <code>/?view=sniff</code></p>
+  </div>
+</section>
+
 <!-- ============================================ CONSOLE -->
 <section class="section" id="console">
   <div class="section-head reveal">
-    <span class="section-index">04</span>
+    <span class="section-index">05</span>
     <h2 data-i18n="console.title">Console</h2>
     <p class="section-sub" data-i18n="console.sub">Local Web Console Preview — see the panel you get after installing, before you download anything.</p>
   </div>
@@ -323,6 +366,8 @@
             <span class="mock-nav-item"><span class="mock-nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13.3 6.7A5.5 5.5 0 0 0 3.6 6.1"/><path d="M2.7 9.3a5.5 5.5 0 0 0 9.7.6"/><path d="M3.3 2.9v3.3h3.3M12.7 13.1V9.8H9.4"/></svg></span><span class="mock-nav-label" data-i18n="console.vEvolution">Evolution</span><span class="mock-nav-drop" aria-hidden="true"></span></span>
             <span class="mock-nav-item"><span class="mock-nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.4h9M2 8h12M2 11.6h7"/></svg></span><span class="mock-nav-label" data-i18n="console.vStream">Stream</span><span class="mock-nav-drop" aria-hidden="true"></span></span>
             <span class="mock-nav-item"><span class="mock-nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="6.1" cy="5.5" r="2.2"/><path d="M2.4 13a3.7 3.7 0 0 1 7.4 0"/><circle cx="11.5" cy="6.3" r="1.7"/><path d="M11.1 9.7a3 3 0 0 1 2.5 3"/></svg></span><span class="mock-nav-label" data-i18n="console.vCommunity">Community</span><span class="mock-nav-drop" aria-hidden="true"></span></span>
+            <span class="mock-nav-group" data-i18n="console.grpSense">Sense</span>
+            <span class="mock-nav-item"><span class="mock-nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="4.6" cy="11.4" r="2"/><path d="M7.7 9.2a4.4 4.4 0 0 1 0 4.4"/><path d="M10.4 7a7.6 7.6 0 0 1 0 8.8"/></svg></span><span class="mock-nav-label" data-i18n="console.vSniff">Sniff</span><span class="mock-nav-drop" aria-hidden="true"></span></span>
             <span class="mock-nav-group" data-i18n="console.grpSystem">System</span>
             <span class="mock-nav-item"><span class="mock-nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2.6 4.6h10.8M2.6 11.4h10.8"/><circle cx="6.2" cy="4.6" r="1.9"/><circle cx="10.2" cy="11.4" r="1.9"/></svg></span><span class="mock-nav-label" data-i18n="console.vSettings">Settings</span><span class="mock-nav-drop" aria-hidden="true"></span></span>
           </nav>
@@ -440,7 +485,7 @@
 <!-- ============================================ MODELS -->
 <section class="section" id="models">
   <div class="section-head reveal">
-    <span class="section-index">05</span>
+    <span class="section-index">06</span>
     <h2 data-i18n="models.title">Models &amp; Transparency</h2>
     <p class="section-sub" data-i18n="models.sub">We will publish how this product actually runs — which models serve it and how much compute it consumes. No estimates, no marketing charts: only what the software itself reports.</p>
   </div>
@@ -484,7 +529,7 @@
 <!-- ============================================ SECURITY -->
 <section class="section" id="security">
   <div class="section-head reveal">
-    <span class="section-index">06</span>
+    <span class="section-index">07</span>
     <h2 data-i18n="security.title">Security &amp; Trust</h2>
     <p class="section-sub" data-i18n="security.sub">Local-first by construction — the quiet guarantees, stated plainly.</p>
   </div>
@@ -548,7 +593,7 @@
 <!-- ============================================ ARCHITECTURE -->
 <section class="section" id="architecture">
   <div class="section-head reveal">
-    <span class="section-index">07</span>
+    <span class="section-index">08</span>
     <h2 data-i18n="arch.title">Architecture</h2>
     <p class="section-sub" data-i18n="arch.sub">Three layers, strictly separated — so the core underneath can be swapped without losing who you are.</p>
   </div>

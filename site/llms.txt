@@ -19,8 +19,8 @@ I'm AiDog is a single companion you run yourself — not a platform, not an assi
 - Skills ecosystem: an official skills directory at https://aidog.im/skills.html backed by a public,
   lint-and-review gated skills repository; `GET /api/skills/remote` serves the same catalog fail-soft
   (remote -> bundled copy -> honest `unavailable`, never a 5xx).
-- Evidence (the same numbers shown in the site's fact strip): core tests 1686/1686 · console smoke 310/310 · skill router 30/30 · memory 58/58 · setup wizard 99/99 · profile isolation 63/63 · desktop shell 15/15 · doctor 0 FAIL · 0 WARN · 18 real-machine E2E suites · 899 locale keys per pack · 26 registered tools · 35 capability documents · 31 self-developed modules ≈ 17.2k LOC.
-- Current release: 0.5.56.
+- Evidence (the same numbers shown in the site's fact strip): core tests 1773/1773 · console smoke 334/334 · skill router 30/30 · memory 58/58 · setup wizard 99/99 · profile isolation 63/63 · desktop shell 15/15 · doctor 0 FAIL · 0 WARN · 18 real-machine E2E suites · 979 locale keys per pack · 26 registered tools · 36 capability documents · 32 self-developed modules ≈ 18.6k LOC.
+- Current release: 0.5.57.
 
 ## Interfaces
 
@@ -40,6 +40,7 @@ I'm AiDog is a single companion you run yourself — not a platform, not an assi
 - [Skills](https://aidog.im/#skills): what the skill system does.
 - [Skills directory](https://aidog.im/skills): the official, review-gated skill catalog (six categories, bilingual).
 - [Capabilities](https://aidog.im/#capabilities): the card-by-card feature inventory, including the Web3 approval gate.
+- [Sniff](https://aidog.im/#sniff): the read-only sense engine that sweeps, finds and speaks first.
 - [Console](https://aidog.im/#console): the local-first web console.
 - [Models](https://aidog.im/#models): model configuration.
 - [Security](https://aidog.im/#security): credential discipline and approval gates.

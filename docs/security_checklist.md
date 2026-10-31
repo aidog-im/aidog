@@ -183,7 +183,11 @@ states only what this repository does.
   Outside the documented exclusions (the tool itself, the internal
   citation vault under `docs/research/`, `*.log`, `.git/`) the token must
   have zero hits in tracked files.
-- **Verify:**
+- **Verify (development repository only):** `deploy/check_publish.py` embeds
+  the token and is deliberately NOT part of the exported snapshot, so both
+  commands below run in the development checkout. In this exported snapshot
+  the guarantee is structural instead: the token-bearing file is denied an
+  export, and the export was leak-scanned before it was published.
   - `rg -i "$(sed -n 's/^BRAND_TOKEN = "\(.*\)"$/\1/p' deploy/check_publish.py)"` —
     expect 0 hits outside the exclusions
   - `python3 deploy/check_publish.py --json` (leak list empty → READY)

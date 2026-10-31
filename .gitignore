@@ -1,10 +1,10 @@
-# 凭据永不入库
+# Credentials never enter the repository
 secrets.env
 *.env
 !.env.example
 !secrets.env.example
 
-# 运行态/构建物
+# Runtime state / build output
 __pycache__/
 *.pyc
 *.pyo
@@ -17,7 +17,7 @@ desktop/dist/
 # repo, never in the product repo (credential gate + publish gate still apply).
 exports/
 
-# 系统
+# OS noise
 .DS_Store
 Thumbs.db
 web/settings.json
@@ -30,11 +30,23 @@ deploy/*.local.state.json
 # owner credential drops (tokens/keys land here — never tracked)
 tmp/
 
-# mycore 服务运行态（pidfile/service.log/会话）——永不入库
+# mycore service runtime (pidfile / service.log / sessions) — never tracked
 data/
 
-# 车 F 多用户 profile 运行时（含每个 profile 的 secrets.env/settings/会话）——永不入库
+# multi-user profile runtime (each profile's secrets.env / settings / sessions)
 profiles/
 
-# pi agent 本地工作目录（会话记录/agent 记忆/agent 设置）——随项目目录打包带走，永不入库
+# pi agent local workspace (session records, agent memory, agent settings)
 .pi/
+
+# Sibling repositories moved inside this tree (owner decree 2026-10-28:
+# "nothing outside this directory"). Each is an independent git repository or a
+# rescue artifact; they never enter this repository, and ignoring them is what
+# keeps them invisible to both git scan surfaces (ls-files and
+# --exclude-standard) and to rg, which reads .gitignore by default.
+aidog-internal/
+aidog-skills/
+aidog-public/
+_public_meta/
+# product-repo preservation bundle (git backup artifact), moved in with the rest
+aidog-preserve-full.bundle

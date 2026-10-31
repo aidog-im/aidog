@@ -59,12 +59,16 @@ python3 -m mycore.tests.run
 # via `require("playwright")` in your environment:
 PW_PATH=/path/to/playwright node tmp/e2e_frontend_ui.js
 
-# 6. Publish gate (desensitization + manifest)
-python3 deploy/check_publish.py
+# 6. Publication gate — DEVELOPMENT REPOSITORY ONLY
+#    This repository is a generated, desensitized export. The gate, its
+#    detector vocabulary, the transform table and the export writer are
+#    deliberately not shipped, so nothing in this snapshot can run them.
+#    Maintainers run them in the development checkout (see AGENTS.md).
 ```
 
-A release additionally runs `python3 deploy/pre_release_audit.py`, which must
-report **GO** before any tag is cut.
+A release in the development repository additionally runs the pre-release
+audit, which must report **GO** before any tag is cut; that tool is private
+tooling and is not part of this snapshot either.
 
 ### Honesty rules the gates enforce
 

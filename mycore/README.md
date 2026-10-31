@@ -48,7 +48,7 @@ mycore/
 │                #   one-shot Python child with helpers, allowed-roots bound)
 ├── mcp.py       # car 2-D5: minimal MCP client (stdio + HTTP JSON-RPC,
 │                #   per-tool allow/deny filters, fail-soft attach + notes)
-├── cli.py       # one-shot runner: python3 -m mycore.cli "prompt" (A/B harness口)
+├── cli.py       # one-shot runner: python3 -m mycore.cli "prompt" (A/B harness entry)
 └── tests/       # offline: fake transports, no network, no credentials
 ```
 

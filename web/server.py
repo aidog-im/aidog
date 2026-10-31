@@ -96,6 +96,21 @@ Routes:
                                    / redlines (<=500) / deliverable (<=200) —
                                    all null when absent, injected into the
                                    plan/slice prompts)
+  GET  /api/sniff               -> SNIFF car (SENSE board): {enabled, pause,
+                                   interval_s, quiet_hours, digest_cap,
+                                   config_error, last_swept, sources[] (honest
+                                   status/reads/age), rules[], rule_errors,
+                                   findings[] newest-first + findings_total,
+                                   read_only}; loopback, no auth (mission
+                                   GET parity), slot NAMES only, payloads
+                                   already field-whitelisted by mycore.sniff
+  POST /api/sniff               -> Bearer; {action: sweep|ack, signature?} —
+                                   sweep = ONE read-only sweep now (force
+                                   beats the interval gate, the per-source
+                                   rate cap still applies); ack = mark a
+                                   finding acknowledged in the local log
+                                   (400 bad action/signature, 404 unknown
+                                   signature). No actuation surface exists.
   GET  /api/exchange/quote      -> READ-ONLY public market probe: venue +
                                    optional symbol -> {venue, symbol, lines};
                                    own 10/60s sliding window -> 429
@@ -259,7 +274,7 @@ if str(REPO) in sys.path:
 sys.path.insert(0, str(REPO))
 from lib import i18n  # noqa: E402
 from lib import profile_paths  # noqa: E402  (car F §13.1: per-profile path seams)
-from mycore import checkpoint, cli, evolution, hooks, mission, mcp, modeltier, terminal  # noqa: E402  (X10 snapshots + config + MCP/ hooks/ terminal/ mission grammar)
+from mycore import checkpoint, cli, evolution, hooks, mission, mcp, modeltier, sniff, terminal  # noqa: E402  (X10 snapshots + config + MCP/ hooks/ terminal/ mission grammar/ sniff grammar)
 from mycore import meter as model_meter  # noqa: E402  (v0.5.55 self-metering)
 from mycore.assembly import build_system_stack, resolve_context_dirs  # noqa: E402
 from mycore.compact import measure  # noqa: E402  (X14 context usage: the loop's own payload metric)
@@ -394,7 +409,12 @@ DEFAULT_SETTINGS: dict = {
                "model": "mimo-v2.6-flash",
                # v0.5.55 gateway panel: absent == these defaults == today's
                # behavior (empty chain extras, fixed order, no rate caps).
-               "endpoints": [], "rotation": "", "max_rpm": 0, "max_tpm": 0},
+               "endpoints": [], "rotation": "", "max_rpm": 0, "max_tpm": 0,
+               # SNIFF car: the sense board partition (always present so the
+               # console renders it without an absence check). Fresh lists —
+               # the module constant's own lists are never shared here.
+               "sniff": {**sniff.DEFAULT_SETTINGS,
+                         "sources": [], "rules": []}},
     "usage": {"metrics_url": "http://127.0.0.1:3456/metrics",
               "pricing_config": "", "log_dir": "", "model_pricing": {}},
     # Inbound/outbound channel adapters (car C): non-secret config only —
@@ -445,7 +465,7 @@ USAGE_KEYS = ("metrics_url", "pricing_config", "log_dir", "model_pricing")
 MYCORE_KEYS = ("base_url", "model", "context_dirs", "upstreams", "mcp", "shell",
                "tools_off", "models", "budget", "session_prune_days",
                "reasoning_effort", "endpoints", "rotation", "max_rpm",
-               "max_tpm")
+               "max_tpm", "sniff")
 # v0.5.55: structured endpoint slots the console form may reference — the
 # SAME allowlist mycore.modeltier enforces at parse time (single source of
 # truth is the regex; this tuple only documents it for the route layer).
@@ -1138,6 +1158,21 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                             "mycore.reasoning_effort must be one of: "
                             + "|".join(e or "(empty)"
                                       for e in REASONING_EFFORTS))
+                        continue
+                    clean_mc[key] = val
+                    continue
+                if key == "sniff":
+                    # SNIFF car: the sense board's settings partition.
+                    # Grammar lives in mycore.sniff.parse_config (first error,
+                    # chat-safe; slot NAMES only — the slot regex refuses a
+                    # credential value and the message never echoes one).
+                    if not isinstance(val, dict):
+                        errors.append("mycore.sniff must be an object")
+                        continue
+                    try:
+                        sniff.parse_config(val)
+                    except sniff.SniffError as e:
+                        errors.append(f"mycore.sniff: {e}")
                         continue
                     clean_mc[key] = val
                     continue
@@ -3993,6 +4028,53 @@ def collect_mission_detail(mid: str) -> tuple[dict, int]:
         return {"error": f"detail failed: {type(e).__name__}"}, 500
 
 
+# --------------------------------------------------- SNIFF / SENSE board ---
+# Read model + the two write actions of the sense board (SNIFF car). The
+# whole surface is read-only with respect to the outside world: GET renders
+# local state, POST runs a read-only sweep or marks a finding acknowledged.
+# mycore.sniff has no actuation code path at all (asserted in core tests).
+SNIFF_FINDINGS_PAGE = 50
+
+
+def collect_sniff() -> dict:
+    """GET /api/sniff — the SENSE board read model (loopback, no auth, same
+    contract as GET /api/mission). Config comes from settings (a hand-edited
+    bad partition fails closed to an honest `config_error`), statuses from
+    the sweep state, findings newest-first from the local log.
+
+    No credential material: slot NAMES only, and every finding payload was
+    already field-whitelisted + truncated by mycore.sniff."""
+    now = time.time()
+    try:
+        cfg = sniff.parse_config(sniff.settings_block(), strict_rules=False)
+        config_error = ""
+    except sniff.SniffError as e:
+        cfg = sniff.parse_config({}, strict_rules=False)
+        config_error = str(e)[:160]
+    state = sniff.load_state()
+    entries = state.get("sources") if isinstance(state.get("sources"), dict) else {}
+    findings = sniff.load_findings()
+    findings.sort(key=lambda row: float(row.get("last_seen") or 0.0),
+                  reverse=True)
+    return {
+        "enabled": cfg["enabled"],
+        "pause": cfg["pause"],
+        "interval_s": cfg["interval_s"],
+        "quiet_hours": cfg["quiet_hours"],
+        "digest_cap": cfg["digest_cap"],
+        "config_error": config_error,
+        "last_swept": float(state.get("last_swept") or 0.0),
+        "sources": [sniff.source_status(s, entries.get(s["id"]), now)
+                    for s in cfg["sources"]],
+        "rules": [{k: r[k] for k in ("id", "source", "when", "severity",
+                                      "speak")} for r in cfg["rules"]],
+        "rule_errors": dict(cfg["rule_errors"]),
+        "findings": findings[:SNIFF_FINDINGS_PAGE],
+        "findings_total": len(findings),
+        "read_only": True,
+    }
+
+
 # ------------------------------------- activation & operations (0.5.40) ----
 
 def endpoint_reachable(base: str, timeout: float = 1.0) -> bool:
@@ -4521,6 +4603,8 @@ class Handler(BaseHTTPRequestHandler):
                 payload, code = collect_mission_detail(mid)
                 return self._json(payload, code)
             return self._json(collect_mission())
+        if path == "/api/sniff":
+            return self._json(collect_sniff())
         if path == "/api/exchange/quote":
             return self._handle_exchange_quote()
         if path == "/api/exchange/plans":
@@ -4577,6 +4661,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_upstreams_test()
         if path == "/api/mission":
             return self._handle_mission_post()
+        if path == "/api/sniff":
+            return self._handle_sniff_post()
         if path == "/api/service/restart":
             return self._handle_service_restart()
         if path == "/api/update/apply":
@@ -5411,6 +5497,45 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(payload)
 
     # ------------------------------------------------------ evolution legs ---
+    # ------------------------------------------------------- sniff board ---
+    def _handle_sniff_post(self) -> None:
+        """POST /api/sniff {action: sweep|ack, signature?} — Bearer gate.
+        `sweep` runs ONE read-only sweep now; `ack` marks a finding
+        acknowledged in the local log. Neither action can touch a device or
+        a vehicle: mycore.sniff carries no actuation surface at all (the
+        core suite asserts the absence)."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        action = doc.get("action")
+        if action == "sweep":
+            report = sniff.tick(force=True)
+            return self._json({"ok": True, "sweep": report,
+                               "sniff": collect_sniff()})
+        if action == "ack":
+            sig = doc.get("signature")
+            if not isinstance(sig, str) or not sig or len(sig) > 64:
+                return self._json({"error": "validation failed",
+                                   "details": ["signature must be a non-empty "
+                                               "string of at most 64 chars"]},
+                                  400)
+            rows = sniff.load_findings()
+            if not sniff.ack_finding(rows, sig):
+                return self._json({"error": "not found",
+                                   "details": ["unknown finding signature"]},
+                                  404)
+            try:
+                sniff.save_findings(rows)
+            except OSError as e:  # noqa: BLE001
+                return self._json(
+                    {"error": f"persist failed: {type(e).__name__}"}, 500)
+            return self._json({"ok": True, "sniff": collect_sniff()})
+        return self._json({"error": "validation failed",
+                           "details": ["action must be one of: sweep|ack"]},
+                          400)
+
     def _require_token(self) -> bool:
         """Bearer WEB_TOKEN gate (same contract as the settings write). The
         token value never appears in any response, log line, or exception."""

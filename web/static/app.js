@@ -6491,11 +6491,11 @@ async function commSendReply(num) {
 })();
 
 /* ---------------------------------------------------------------- views -- */
-/* All eight views live in the same document; the inactive ones are hidden with
+/* All nine views live in the same document; the inactive ones are hidden with
    CSS, so every poller keeps writing into real DOM and ids stay stable.
    ?view=<name> deep-links the active view (default: overview). */
 const VIEWS = ["overview", "chat", "skills", "exchange", "evolution", "stream",
-               "community", "settings"];
+               "community", "sniff", "settings"];
 const QS_VIEW = (params.get("view") || "").toLowerCase();
 let currentView = VIEWS.includes(QS_VIEW) ? QS_VIEW : "overview";
 
@@ -6933,6 +6933,501 @@ if (chatDropZone) {
   });
 }
 
+/* ------------------------------------------------------------- SNIFF ---- */
+/* SENSE board (SNIFF car): sources / rules / findings / controls, the fourth
+   sidebar segment. Read-only towards the outside world: GET renders local
+   state, POST runs ONE read-only sweep or marks a finding acknowledged —
+   mycore.sniff carries no actuation path at all (the core suite asserts the
+   absence). Config edits ride the same validated settings merge every other
+   panel uses, always as the FULL partition (the rule grammar validates a
+   patch against the sources carried in the same document, and lists are
+   replaced wholesale by the server merge).
+   Two reads: GET /api/sniff = the honest board (statuses, findings),
+   GET /api/settings mycore.sniff = the stored source configs (url, slot
+   NAME, entity patterns) which the board deliberately does not echo. */
+let sniffData = null;   // GET /api/sniff payload (null = never loaded)
+let sniffCfg = null;    // mycore.sniff partition as stored (null = not loaded)
+
+function sniffCfgBlock() {
+  return (sniffCfg && typeof sniffCfg === "object") ? sniffCfg : {};
+}
+
+function sniffCfgList(key) {
+  const val = sniffCfgBlock()[key];
+  return Array.isArray(val) ? val : [];
+}
+
+function sniffNote(kind, text) {
+  const el = document.getElementById("sniffMsg");
+  if (!el) return;
+  el.className = "stat-note sniff-note " + kind;
+  el.textContent = text;
+}
+
+/* age of a reading, honestly: null = never read yet, not "0s" */
+function sniffAge(sec) {
+  const n = Number(sec);
+  if (!Number.isFinite(n) || n <= 0) return t("sniff.noRead", "no reading yet");
+  if (n < 90) return Math.round(n) + "s";
+  if (n < 5400) return Math.round(n / 60) + "m";
+  if (n < 172800) return Math.round(n / 3600) + "h";
+  return Math.round(n / 86400) + "d";
+}
+
+function sniffBadge(value) {
+  const v = String(value || "pending");
+  return `<span class="sniff-badge ${escapeHtml(v)}">` +
+         `${escapeHtml(t("sniff.status." + v, v))}</span>`;
+}
+
+async function refreshSniff() {
+  try {
+    sniffData = await fetch("/api/sniff").then(r => r.json());
+  } catch (e) { /* keep the last render */ }
+  if (!sniffCfg) await sniffCfgRefresh();
+  renderSniff();
+}
+
+/* the stored partition: refreshed before every write so an edit made in the
+   Settings view (or a hand-edited file) is never clobbered by a stale copy */
+async function sniffCfgRefresh() {
+  try {
+    const doc = await fetch("/api/settings").then(r => r.json());
+    settings = Object.assign(settings, doc);
+    sniffCfg = ((settings.mycore || {}).sniff) || {};
+  } catch (e) { sniffCfg = sniffCfg || {}; }
+  return sniffCfg;
+}
+
+function renderSniff() {
+  if (!sniffData) return;
+  const d = sniffData;
+
+  // onboarding strip: expanded while no source exists yet; a header click
+  // sticks (dataset.touched) so a configured board never re-flips it
+  const howto = document.getElementById("sniffHowto");
+  if (howto && howto.dataset.touched !== "1") {
+    howto.classList.toggle("is-open", sniffCfgList("sources").length === 0);
+    const head0 = document.getElementById("sniffHowtoHead");
+    if (head0) head0.setAttribute("aria-expanded",
+      howto.classList.contains("is-open") ? "true" : "false");
+  }
+
+  // --- sources -----------------------------------------------------------
+  const srcs = Array.isArray(d.sources) ? d.sources : [];
+  const cfgSrc = {};
+  sniffCfgList("sources").forEach(s => {
+    if (s && typeof s === "object" && s.id) cfgSrc[s.id] = s;
+  });
+  const srcCount = document.getElementById("sniffSrcCount");
+  if (srcCount) srcCount.textContent = String(srcs.length);
+  const srcBox = document.getElementById("sniffSources");
+  if (srcBox) {
+    srcBox.innerHTML = srcs.length ? srcs.map(s => {
+      const id = String(s.id || "");
+      const cfg = cfgSrc[id] || {};
+      const cap = Number(cfg.rate_cap_per_min) || 0;
+      const err = s.error
+        ? `<div class="sniff-err">${escapeHtml(String(s.error))}</div>` : "";
+      const meta = `${t("sniff.reads", "reads")} ${Number(s.reads) || 0}` +
+        ` · ${t("sniff.lastRead", "last read")} ${escapeHtml(sniffAge(s.age_s))}` +
+        (cap ? ` · ${t("sniff.cap", "cap {n}/min").replace("{n}", cap)}` : "");
+      const on = cfg.enabled !== false;
+      return `<div class="sniff-row">
+        <div class="sniff-row-main">
+          <span class="sniff-id">${escapeHtml(id)}</span>
+          <span class="sniff-kind">${escapeHtml(String(s.kind || ""))}</span>
+          ${sniffBadge(s.status)}
+          <span class="sniff-meta">${escapeHtml(meta)}</span>
+        </div>${err}
+        <div class="sniff-row-acts">
+          <button class="btn tiny" type="button" data-sniff-toggle="${escapeHtml(id)}">${
+            escapeHtml(on ? t("sniff.disable", "disable")
+                          : t("sniff.enable", "enable"))}</button>
+          <button class="btn tiny" type="button" data-sniff-drop="${escapeHtml(id)}">${
+            escapeHtml(t("sniff.remove", "remove"))}</button>
+        </div></div>`;
+    }).join("")
+      : `<div class="sniff-empty">${escapeHtml(
+          t("sniff.srcEmpty", "no sources yet — add one to start smelling"))}</div>`;
+  }
+
+  // --- rules -------------------------------------------------------------
+  const rules = Array.isArray(d.rules) ? d.rules : [];
+  const ruleErrs = (d.rule_errors && typeof d.rule_errors === "object")
+    ? d.rule_errors : {};
+  const ruleCount = document.getElementById("sniffRuleCount");
+  if (ruleCount) ruleCount.textContent = String(rules.length);
+  const ruleBox = document.getElementById("sniffRules");
+  if (ruleBox) {
+    const errRows = Object.keys(ruleErrs).map(id =>
+      `<div class="sniff-row sniff-row-err">
+         <span class="sniff-id">${escapeHtml(id)}</span>
+         <span class="sniff-meta">${escapeHtml(t("sniff.ruleErr", "invalid rule"))}: ${
+           escapeHtml(String(ruleErrs[id]))}</span></div>`).join("");
+    ruleBox.innerHTML = (rules.length || errRows)
+      ? rules.map(r => `<div class="sniff-row">
+          <div class="sniff-row-main">
+            <span class="sniff-id">${escapeHtml(String(r.id || ""))}</span>
+            <span class="sniff-kind">${escapeHtml(String(r.source || ""))}</span>
+            <span class="sniff-badge sev-${escapeHtml(String(r.severity || "info"))}">${
+              escapeHtml(String(r.severity || "info"))}</span>
+            ${r.speak ? `<span class="sniff-speak">${escapeHtml(
+              t("sniff.speak", "reports"))}</span>` : ""}
+            <button class="btn tiny" type="button" data-sniff-rule="${
+              escapeHtml(String(r.id || ""))}">${escapeHtml(
+              t("sniff.remove", "remove"))}</button>
+          </div>
+          <div class="sniff-when"><code>${escapeHtml(String(r.when || ""))}</code></div>
+        </div>`).join("") + errRows
+      : `<div class="sniff-empty">${escapeHtml(
+          t("sniff.ruleEmpty", "no rules yet — a rule turns a reading into a finding"))}</div>`;
+  }
+
+  // --- findings -----------------------------------------------------------
+  const finds = Array.isArray(d.findings) ? d.findings : [];
+  const findCount = document.getElementById("sniffFindCount");
+  if (findCount) {
+    const total = Number(d.findings_total);
+    findCount.textContent = String(Number.isFinite(total) ? total : finds.length);
+  }
+  const findBox = document.getElementById("sniffFindings");
+  if (findBox) {
+    findBox.innerHTML = finds.length ? finds.map(f => {
+      const sig = String(f.signature || "");
+      const sev = String(f.severity || "info");
+      const cnt = Number(f.count) || 1;
+      const acked = f.ack === true;
+      const seen = t("sniff.seen", "seen {n}× · last {a}")
+        .replace("{n}", String(cnt)).replace("{a}", escapeHtml(sniffAge(
+          (Number(d.last_swept) || 0) - (Number(f.last_seen) || 0))));
+      const payload = (f.payload && typeof f.payload === "object")
+        ? Object.keys(f.payload).slice(0, 6).map(k =>
+            `${k}=${escapeHtml(String(f.payload[k]))}`).join(" ") : "";
+      return `<div class="sniff-row">
+        <div class="sniff-row-main">
+          <span class="sniff-badge sev-${escapeHtml(sev)}">${escapeHtml(sev)}</span>
+          <span class="sniff-sum">${escapeHtml(String(f.summary || ""))}</span>
+          <span class="sniff-meta">${escapeHtml(
+            `${f.source || ""} · ${f.rule || ""}`)}</span>
+        </div>
+        <div class="sniff-row-sub">${escapeHtml(
+          String(f.trigger || ""))}${payload ? " · " + payload : ""}</div>
+        <div class="sniff-row-acts">
+          <span class="sniff-meta">${seen}</span>
+          ${acked ? `<span class="sniff-acked">${escapeHtml(
+              t("sniff.acked", "acknowledged"))}</span>`
+            : `<button class="btn tiny" type="button" data-sniff-ack="${
+                escapeHtml(sig)}">${escapeHtml(t("sniff.ack", "ACK"))}</button>`}
+        </div></div>`;
+    }).join("")
+      : `<div class="sniff-empty">${escapeHtml(
+          t("sniff.findEmpty", "nothing to report yet — silence is the default"))}</div>`;
+  }
+
+  // --- controls -----------------------------------------------------------
+  const dig = document.getElementById("sniffDigest");
+  if (dig && document.activeElement !== dig) dig.value = String(d.digest_cap ?? 5);
+  const iv = document.getElementById("sniffInterval");
+  if (iv) iv.textContent = `${Number(d.interval_s) || 0}s`;
+  const qh = document.getElementById("sniffQuiet");
+  if (qh) qh.textContent = d.quiet_hours
+    ? String(d.quiet_hours) : t("sniff.quietOff", "off");
+  const pz = document.getElementById("sniffPause");
+  if (pz) {
+    const paused = d.pause === true;
+    pz.setAttribute("aria-pressed", String(paused));
+    pz.classList.toggle("primary", !paused);
+    pz.textContent = paused
+      ? t("sniff.resume", "RESUME") : t("sniff.pause", "PAUSE");
+  }
+  const note = document.getElementById("sniffSweepNote");
+  if (note) {
+    const last = Number(d.last_swept) || 0;
+    note.hidden = !last;
+    if (last) note.textContent = t("sniff.lastSweep", "last sweep {a} ago")
+      .replace("{a}", sniffAge((Date.now() / 1000) - last));
+  }
+}
+
+async function sniffPost(payload) {
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) { sniffNote("err", t("save.needToken", "token required")); return null; }
+  try {
+    const res = await fetch("/api/sniff", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify(payload) });
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 401) {
+      sniffNote("err", t("save.badToken", "401 · unauthorized")); return null;
+    }
+    if (!res.ok) {
+      const details = (body.details || [body.error || "error"])
+        .map(x => String(x)).join("; ");
+      sniffNote("err", details.slice(0, 140)); return null;
+    }
+    return body;
+  } catch (e) {
+    sniffNote("err", String(e).slice(0, 80)); return null;
+  }
+}
+
+/* every config write sends the WHOLE partition (see the header note) */
+async function sniffCfgWrite(mutate, okText) {
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) { sniffNote("err", t("save.needToken", "token required")); return false; }
+  await sniffCfgRefresh();
+  const block = {
+    enabled: sniffCfgBlock().enabled !== false,
+    pause: sniffCfgBlock().pause === true,
+    interval_s: Number(sniffCfgBlock().interval_s) || 300,
+    quiet_hours: String(sniffCfgBlock().quiet_hours || ""),
+    digest_cap: Number(sniffCfgBlock().digest_cap) || 5,
+    sources: JSON.parse(JSON.stringify(sniffCfgList("sources"))),
+    rules: JSON.parse(JSON.stringify(sniffCfgList("rules"))) };
+  try { mutate(block); } catch (e) {
+    sniffNote("err", String(e).slice(0, 80)); return false;
+  }
+  try {
+    const res = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify({ mycore: { sniff: block } }) });
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 401) {
+      sniffNote("err", t("save.badToken", "401 · unauthorized")); return false;
+    }
+    if (!res.ok) {
+      const details = (body.details || [body.error || "error"])
+        .map(x => String(x)).join("; ");
+      sniffNote("err", details.slice(0, 160)); return false;
+    }
+    await sniffCfgRefresh();
+    await refreshSniff();
+    if (okText) sniffNote("ok", okText);
+    return true;
+  } catch (e) {
+    sniffNote("err", String(e).slice(0, 80)); return false;
+  }
+}
+
+async function sniffSweep() {
+  const body = await sniffPost({ action: "sweep" });
+  if (!body) return;
+  if (body.sniff) { sniffData = body.sniff; renderSniff(); }
+  const rep = body.sweep || {};
+  if (rep.skipped) {
+    sniffNote("ok", t("sniff.skipped", "sweep skipped: {s}")
+      .replace("{s}", String(rep.skipped)));
+  } else if (rep.error) {
+    sniffNote("err", String(rep.error).slice(0, 140));
+  } else {
+    const n = Number(rep.findings_new) || 0;
+    sniffNote("ok", t("sniff.swept", "swept · {n} new finding(s)")
+      .replace("{n}", String(n)));
+  }
+}
+
+async function sniffAck(signature) {
+  const body = await sniffPost({ action: "ack", signature });
+  if (!body) return;
+  if (body.sniff) { sniffData = body.sniff; renderSniff(); }
+  sniffNote("ok", t("sniff.acked", "acknowledged"));
+}
+
+function sniffSlug(text) {
+  const base = String(text || "").toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24);
+  return base || "rule";
+}
+
+function sniffNextRuleId(used, seed) {
+  const base = sniffSlug(seed);
+  if (!used.has(base)) return base;
+  let n = 2;
+  while (used.has(base + "-" + n)) n += 1;
+  return base + "-" + n;
+}
+
+function wireSniff() {
+  const on = (id, fn) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("click", fn);
+  };
+  on("sniffSweep", sniffSweep);
+  on("sniffPause", async () => {
+    const paused = sniffData && sniffData.pause === true;
+    await sniffCfgWrite(b => { b.pause = !paused; },
+      paused ? t("sniff.resumed", "sweeping resumed")
+             : t("sniff.pausedText", "sweeps paused — nothing is read"));
+  });
+  on("sniffSrcNew", () => {
+    const f = document.getElementById("sniffSrcForm");
+    const a = document.getElementById("sniffSrcActions");
+    if (f) f.hidden = false;
+    if (a) a.hidden = true;
+    sniffKindRows();
+  });
+  on("sniffSrcCancel", () => {
+    const f = document.getElementById("sniffSrcForm");
+    const a = document.getElementById("sniffSrcActions");
+    if (f) f.hidden = true;
+    if (a) a.hidden = false;
+  });
+  on("sniffRuleNew", () => {
+    const f = document.getElementById("sniffRuleForm");
+    const a = document.getElementById("sniffRuleActions");
+    if (f) f.hidden = false;
+    if (a) a.hidden = true;
+    sniffRuleSources();
+  });
+  on("sniffRuleCancel", () => {
+    const f = document.getElementById("sniffRuleForm");
+    const a = document.getElementById("sniffRuleActions");
+    if (f) f.hidden = true;
+    if (a) a.hidden = false;
+  });
+  const kindSel = document.getElementById("sniffSrcKind");
+  if (kindSel) kindSel.addEventListener("change", sniffKindRows);
+  const howtoHead = document.getElementById("sniffHowtoHead");
+  if (howtoHead) howtoHead.addEventListener("click", () => {
+    const box = document.getElementById("sniffHowto");
+    if (!box) return;
+    box.dataset.touched = "1";
+    const open = box.classList.toggle("is-open");
+    howtoHead.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+  on("sniffSrcAdd", sniffAddSource);
+  on("sniffRuleAdd", sniffAddRule);
+  const dig = document.getElementById("sniffDigest");
+  if (dig) dig.addEventListener("change", async () => {
+    const n = Math.min(50, Math.max(1, Math.round(Number(dig.value) || 0)));
+    dig.value = String(n);
+    await sniffCfgWrite(b => { b.digest_cap = n; },
+      t("sniff.digestSaved", "digest cap = {n}").replace("{n}", String(n)));
+  });
+  // delegated row actions: the lists are re-rendered, so the handlers live on
+  // the containers and are bound exactly once
+  const view = document.getElementById("view-sniff");
+  if (view) view.addEventListener("click", async e => {
+    const btn = e.target.closest ? e.target.closest("[data-sniff-toggle],[data-sniff-drop],[data-sniff-rule],[data-sniff-ack]") : null;
+    if (!btn) return;
+    if (btn.dataset.sniffAck) { await sniffAck(btn.dataset.sniffAck); return; }
+    if (btn.dataset.sniffToggle) {
+      const id = btn.dataset.sniffToggle;
+      await sniffCfgWrite(b => {
+        b.sources = b.sources.map(s => s && s.id === id
+          ? { ...s, enabled: s.enabled === false } : s);
+      }, t("sniff.toggled", "source updated: {id}").replace("{id}", id));
+      return;
+    }
+    if (btn.dataset.sniffDrop) {
+      const id = btn.dataset.sniffDrop;
+      await sniffCfgWrite(b => {
+        b.sources = b.sources.filter(s => !(s && s.id === id));
+        b.rules = b.rules.filter(r => !(r && r.source === id));
+      }, t("sniff.dropped", "source removed: {id}").replace("{id}", id));
+      return;
+    }
+    if (btn.dataset.sniffRule) {
+      const id = btn.dataset.sniffRule;
+      await sniffCfgWrite(b => {
+        b.rules = b.rules.filter(r => !(r && r.id === id));
+      }, t("sniff.ruleDropped", "rule removed: {id}").replace("{id}", id));
+    }
+  });
+}
+
+function sniffKindRows() {
+  const sel = document.getElementById("sniffSrcKind");
+  const kind = sel ? sel.value : "home";
+  const home = ["sniffHomeRow", "sniffHomeRow2"];
+  home.forEach(id => { const el = document.getElementById(id); if (el) el.hidden = kind !== "home"; });
+  const web = document.getElementById("sniffWebRow");
+  if (web) web.hidden = kind !== "web";
+  // mcp: the bridge NAME resolves against settings mycore.mcp — there is no
+  // url and no rate cap to ask for (the lane issues no HTTP call of its own).
+  const url = document.getElementById("sniffSrcUrlRow");
+  if (url) url.hidden = kind === "mcp";
+  const srv = document.getElementById("sniffSrcServerRow");
+  if (srv) srv.hidden = kind !== "mcp";
+  const note = document.getElementById("sniffMcpNote");
+  if (note) note.hidden = kind !== "mcp";
+}
+
+async function sniffAddSource() {
+  const kind = (document.getElementById("sniffSrcKind") || {}).value || "home";
+  const id = ((document.getElementById("sniffSrcId") || {}).value || "").trim();
+  const url = ((document.getElementById("sniffSrcUrl") || {}).value || "").trim();
+  const token = ((document.getElementById("sniffSrcToken") || {}).value || "").trim();
+  const ents = ((document.getElementById("sniffSrcEntities") || {}).value || "").trim();
+  const rx = ((document.getElementById("sniffSrcRegex") || {}).value || "").trim();
+  const server = ((document.getElementById("sniffSrcServer") || {}).value || "").trim();
+  const need = kind === "mcp" ? server : url;
+  if (!id || !need) {
+    sniffNote("err", t(kind === "mcp" ? "sniff.srcIncompleteMcp"
+                                      : "sniff.srcIncomplete",
+      kind === "mcp" ? "id and bridge name are required"
+                     : "id and url are required"));
+    return;
+  }
+  const ok = await sniffCfgWrite(b => {
+    const base = kind === "mcp"
+      ? { id, kind, server }
+      : kind === "home"
+      ? { id, kind, url, token,
+          entities: ents ? ents.split(",").map(x => x.trim()).filter(Boolean) : ["*"] }
+      : { id, kind, url, regex: rx, field: "value" };
+    b.sources = b.sources.filter(s => !(s && s.id === id)).concat([{ ...base, enabled: true }]);
+  }, t("sniff.srcAdded", "source added: {id}").replace("{id}", id));
+  if (!ok) return;
+  ["sniffSrcId", "sniffSrcUrl", "sniffSrcToken", "sniffSrcEntities", "sniffSrcRegex",
+   "sniffSrcServer"]
+    .forEach(k => { const el = document.getElementById(k); if (el) el.value = ""; });
+  const f = document.getElementById("sniffSrcForm");
+  const a = document.getElementById("sniffSrcActions");
+  if (f) f.hidden = true;
+  if (a) a.hidden = false;
+}
+
+function sniffRuleSources() {
+  const sel = document.getElementById("sniffRuleSource");
+  if (!sel) return;
+  const srcs = sniffCfgList("sources");
+  const have = Array.from(sel.options).map(o => o.value).join(",");
+  const want = srcs.map(s => String(s && s.id || "")).filter(Boolean).join(",");
+  if (have !== want) {
+    sel.innerHTML = srcs.map(s =>
+      `<option value="${escapeHtml(String(s && s.id || ""))}">` +
+      `${escapeHtml(String(s && s.id || ""))}</option>`).join("");
+  }
+}
+
+async function sniffAddRule() {
+  const source = (document.getElementById("sniffRuleSource") || {}).value || "";
+  const when = ((document.getElementById("sniffRuleWhen") || {}).value || "").trim();
+  const severity = (document.getElementById("sniffRuleSeverity") || {}).value || "info";
+  if (!source || !when) {
+    sniffNote("err", t("sniff.ruleIncomplete", "source and condition are required"));
+    return;
+  }
+  const ok = await sniffCfgWrite(b => {
+    const used = new Set(b.rules.map(r => String(r && r.id || "")));
+    const id = sniffNextRuleId(used, source + "-" + when.slice(0, 16));
+    b.rules = b.rules.concat([{ id, source, when, severity, speak: false }]);
+  }, t("sniff.ruleAdded", "rule added"));
+  if (!ok) return;
+  const w = document.getElementById("sniffRuleWhen");
+  if (w) w.value = "";
+  const f = document.getElementById("sniffRuleForm");
+  const a = document.getElementById("sniffRuleActions");
+  if (f) f.hidden = true;
+  if (a) a.hidden = false;
+}
+
 function setView(name, fromUser) {
   if (!VIEWS.includes(name)) name = "overview";
   currentView = name;
@@ -6963,6 +7458,9 @@ function setView(name, fromUser) {
   // delta4: the community panel fetches on first open, then only on a user
   // nav click (the server cache keeps the upstream read rate sane anyway).
   if (name === "community" && (fromUser || !commData)) refreshCommunity(false);
+  // SNIFF car: the SENSE board lazy-loads on the same rule — first open, then
+  // only on a user nav click (the sweep state changes server-side anyway).
+  if (name === "sniff" && (fromUser || !sniffData)) refreshSniff();
 }
 
 /* --------------------------------------------------------- topbar height -- */
@@ -6998,6 +7496,9 @@ if (commCatEl) {
     renderCommunity();
   });
 }
+/* SNIFF car: the SENSE board wires once — the row actions are delegated and
+   the two composer forms toggle their own visibility. */
+wireSniff();
 document.getElementById("soundToggle").addEventListener("click", e => {
   const b = e.currentTarget;
   b.setAttribute("aria-pressed", b.getAttribute("aria-pressed") !== "true");

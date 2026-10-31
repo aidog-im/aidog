@@ -1,0 +1,69 @@
+name: public-leak-guard
+
+# Layer 3 of the desensitization anti-recurrence mechanism (owner decree
+# 2026-10-28). Layers 1 and 2 live in the development repository and stop an
+# accidental push from there; this workflow is the backstop for everything
+# those layers cannot see — a web-UI edit, a contributor push, a forced update.
+#
+# Every push re-scans the pushed tree with fragment-assembled signatures
+# (.github/scripts/leak_scan.py). On a hit the job:
+#   1. records the finding in the step summary (file + pattern class + SHA —
+#      the matched text itself is never reproduced anywhere);
+#   2. opens an alert issue with the same limited detail;
+#   3. force-pushes the previous clean commit back onto main, so the leaked
+#      tree stops being the checked-out state.
+# Pushes made with the workflow token never re-trigger this workflow, so the
+# rollback cannot loop.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the pushed history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Scan the tree
+        id: scan
+        run: python3 .github/scripts/leak_scan.py
+
+      - name: Alert (finding recorded without reproducing the value)
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "## Leak guard tripped"
+            echo ""
+            echo "- commit: ${GITHUB_SHA}"
+            echo "- repository: ${GITHUB_REPOSITORY}"
+            echo "- detail: see the failed *Scan the tree* step — matched text"
+            echo "  is deliberately not reproduced here, an alert would simply"
+            echo "  re-publish what the guard exists to remove."
+            echo "- action: main is rolled back to the previous clean commit"
+            echo "- next: this repository is a generated export — changes are"
+            echo "  made in the private development repository and re-exported"
+            echo "  there by its maintainer, never edited here"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          gh issue create \
+            --title "leak guard tripped at ${GITHUB_SHA}" \
+            --body-file "${GITHUB_STEP_SUMMARY}" || true
+
+      - name: Roll back to the previous clean commit
+        if: failure()
+        run: |
+          if git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
+            git push --force origin HEAD~1:main
+          else
+            echo "no previous commit to roll back to" >> "${GITHUB_STEP_SUMMARY}"
+          fi

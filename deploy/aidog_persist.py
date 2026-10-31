@@ -126,7 +126,8 @@ def _resolve_persona(explicit: str | None) -> Path | None:
 
 
 # ---------------------------------------------------------------------------
-# credential gate (labels from deploy/check_publish.py + secret-shape regexes)
+# credential gate (labels from the development repository's publish gate
+# + secret-shape regexes)
 # ---------------------------------------------------------------------------
 
 _GATE_KEEP = {"filled-credential", "personal-tg"}
@@ -140,12 +141,23 @@ _EXTRA_GATE = [
 
 
 def _gate_patterns() -> list[tuple[str, re.Pattern]]:
+    """Secret-shape rules for the bundle gate.
+
+    The two labels of the publish gate (`filled-credential`, `personal-tg`) are
+    imported from it so detector text never gets duplicated (a detector that
+    literally contains what it detects trips the gate itself). The publish gate
+    is development-only tooling and is deliberately NOT part of a release
+    snapshot, so this import must degrade instead of exploding: the local
+    secret-shape rules above still run and still refuse a bundle — the owner-id
+    label is simply unavailable, and it is the owner's own id, not the bundle
+    author's, so nothing the exporter could leak goes unchecked.
+    """
     here = str(Path(__file__).resolve().parent)
     if here not in sys.path:
         sys.path.insert(0, here)
     try:
         from check_publish import leak_patterns  # SSOT for the leak labels
-    except Exception:  # gate is development-only; degrade instead of crashing
+    except Exception:  # noqa: BLE001 — release snapshot: gate not shipped
         return list(_EXTRA_GATE)
     pats = [(n, rx) for n, rx in leak_patterns() if n in _GATE_KEEP]
     return pats + list(_EXTRA_GATE)
@@ -452,9 +464,10 @@ def cmd_import(args: argparse.Namespace) -> int:
     print(f"restored: {n_mem} memory file(s) -> {memories} (home={home_label})")
     if n_per:
         print(f"restored: {n_per} persona file(s) -> {persona_home}")
-        if not args.persona_home and persona_home == Path(os.path.expanduser("~/.legacy/persona")):
-            print("note: persona home is legacy — migrate with: "
-                  "mv ~/.legacy/persona ~/.aidog/persona")
+        legacy = _legacy_persona_home()
+        if not args.persona_home and legacy is not None and persona_home == legacy:
+            print(f"note: persona home is legacy — migrate with: "
+                  f"mv {legacy} ~/.aidog/persona")
     print(f"source home: {n_src} file(s) -> {source_home} (self-contained)")
 
     _configure_local(source_home, persona_home)
@@ -463,16 +476,30 @@ def cmd_import(args: argparse.Namespace) -> int:
     return 0
 
 
+def _legacy_persona_home() -> Path | None:
+    """Pre-rename persona location of the PREVIOUS product — opt-in only.
+
+    The path used to be hard-coded here; it is now supplied by the operator
+    through AIDOG_LEGACY_HOME so this tree carries no third-party product name
+    (desensitization car 2026-10-28). Unset simply disables the compatibility
+    fallback: the default home wins and the migration hint never prints."""
+    root = (os.environ.get("AIDOG_LEGACY_HOME") or "").strip()
+    if not root:
+        return None
+    return Path(os.path.expanduser(root)) / "persona"
+
+
 def _resolve_persona_home(explicit: str | None) -> Path:
     """Persona extraction home: explicit flag > $HOME/.aidog/persona (default)
-    > legacy-compat $HOME/.legacy/persona (pre-rename leftover) only while the
-    default does NOT exist yet. No file is ever moved — the caller prints a
-    one-line migration hint when the legacy location is used."""
+    > legacy-compat home while AIDOG_LEGACY_HOME points at the pre-rename
+    location, only while the default does NOT exist yet. No file is ever moved
+    — the caller prints a one-line migration hint when the legacy location is
+    used."""
     if explicit:
         return Path(explicit).expanduser()
     default = Path(os.path.expanduser("~/.aidog/persona"))
-    legacy = Path(os.path.expanduser("~/.legacy/persona"))
-    if not default.is_dir() and legacy.is_dir():
+    legacy = _legacy_persona_home()
+    if legacy is not None and not default.is_dir() and legacy.is_dir():
         return legacy
     return default
 
@@ -779,8 +806,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "MEMORY_HOME > ~/.aidog/memories > legacy shim profile)")
     i.add_argument("--source-home", help="self-contained source home (default: ~/.aidog/memory)")
     i.add_argument("--persona-home",
-                   help="persona home (default: ~/.aidog/persona, legacy "
-                        "~/.legacy/persona while un-migrated)")
+                   help="persona home (default: ~/.aidog/persona; the "
+                        "pre-rename home is used only while AIDOG_LEGACY_HOME "
+                        "is set, points at it, and the default does not exist)")
     i.set_defaults(func=cmd_import)
 
     l = sub.add_parser("list", help="list bundles and verify sidecar + manifest hashes")

@@ -1,4 +1,4 @@
-# Upgrade SOP — 上游内核 kernel (Phase 1)
+# Upgrade SOP — upstream kernel (Phase 1)
 
 > **HISTORICAL / ARCHIVED at P5-5 mycore swap (2026-10-19)**: the transitional
 > kernel track is retired — the gateway (aidog_gw) and its watchdog (aidog_wd)

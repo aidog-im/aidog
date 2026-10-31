@@ -6,14 +6,16 @@ Product ancestor of the future `aidog doctor` CLI. Every check encodes a P1 less
 English output per repo i18n policy; credentials are never printed (length/presence only).
 
 Phase-aware counting (P5-3) — `deploy/upstream_shim.env` is the phase resolver:
-  * shim present (today): the transition-stack gate runs in full — **23 active
+  * shim present (today): the transition-stack gate runs in full — **26 active
     checks, 0 SKIP** expected (dirty repo may WARN; nothing else).
   * shim absent (post-swap, P5-5): the 20 shim/profile-bound checks are emitted
     as `SKIP (post-swap)` entries — counted separately in the summary line,
     NEVER FAIL — and 4 mycore-runtime checks activate instead:
     mycore.service.pid, mycore.watchdog.state, mycore.secrets.slots,
-    mycore.web.console. Post-swap expected = **9 active + 20 SKIP** (29 entries),
+    mycore.web.console. Post-swap expected = **12 active + 20 SKIP** (32 entries),
     target 0 FAIL / 0 WARN (repo dirt is the only tolerated WARN).
+    The 12 include the push-gate triple added by the desensitization car
+    (2026-10-28): git.remote_vault, git.hooks_path, git.pre_push_hook.
 
 Exit code: 0 = all pass (warnings + skips allowed), 1 = at least one FAIL.
 """
@@ -124,6 +126,98 @@ def check_repo() -> None:
         add("PASS" if not dirty else "WARN", "repo.git", "clean" if not dirty else f"dirty: {len(dirty.splitlines())} entries")
     else:
         add("FAIL", "repo.git", "not a git work tree")
+
+
+def _git_out(*args: str) -> tuple[bool, str]:
+    """Non-raising `git -C REPO ...` -> (ok, stdout-or-empty)."""
+    try:
+        out = subprocess.run(["git", "-C", str(REPO), *args],
+                             capture_output=True, text=True, timeout=10)
+        return out.returncode == 0, (out.stdout or "").strip()
+    except Exception:  # noqa: BLE001
+        return False, ""
+
+
+#: Push-gate wiring (desensitization car 2026-10-28). This module is EXPORTED,
+#: the writer it coordinates with is not — so the checks live here (the single
+#: source of truth) and deploy/export_public.py imports them, never the reverse.
+VAULT_REMOTE_MARK = "aidog-internal"
+HOOKS_REL = "deploy/githooks"
+WRITER = REPO / "deploy" / "export_public.py"
+
+
+def guard_checks() -> list[dict]:
+    """Layer 2 of the anti-recurrence mechanism, as data.
+
+    Three facts must hold in the DEVELOPMENT repo or a plain `git push` could
+    undo layer 1 (origin moved to the owner vault):
+      git.remote_vault   origin resolves to the owner-only vault;
+      git.hooks_path     core.hooksPath points at deploy/githooks;
+      git.pre_push_hook  the gate script exists and is executable.
+
+    In a RELEASE SNAPSHOT the writer does not exist, therefore neither does the
+    gate it wires — reporting FAIL there would make a healthy public checkout
+    look broken. Those entries come back as skips instead, honestly labelled.
+
+    Consumers: `aidog doctor` (renders them) and, through export_public, the
+    publish gate (turns failures into a BLOCKED verdict). Returning data rather
+    than printing keeps both honest about the same facts.
+    """
+    if not WRITER.is_file():
+        why = ("SKIP (release snapshot): the push gate is a development-"
+               "repository mechanism; this checkout is written by "
+               "export_public.py only")
+        return [{"name": n, "ok": True, "skip": True, "detail": why}
+                for n in ("git.remote_vault", "git.hooks_path",
+                          "git.pre_push_hook")]
+
+    checks: list[dict] = []
+
+    def record(name: str, ok: bool, good: str, bad: str) -> None:
+        checks.append({"name": name, "ok": ok, "detail": good if ok else bad})
+
+    ok, origin = _git_out("remote", "get-url", "origin")
+    if not ok or not origin:
+        record("git.remote_vault", False, "origin = owner-only vault",
+               "origin remote missing or unreadable")
+    elif VAULT_REMOTE_MARK not in origin:
+        record("git.remote_vault", False, "origin = owner-only vault",
+               "origin is not the owner vault — this development tree may only "
+               "push to the private vault (AGENTS.md iron rule)")
+    else:
+        record("git.remote_vault", True, "origin = owner-only vault", "")
+
+    ok, hooks_path = _git_out("config", "--get", "core.hooksPath")
+    if ok and hooks_path == HOOKS_REL:
+        record("git.hooks_path", True, f"core.hooksPath = {HOOKS_REL}", "")
+    else:
+        record("git.hooks_path", False, f"core.hooksPath = {HOOKS_REL}",
+               f"core.hooksPath = {hooks_path or '(unset)'} — run: "
+               f"git config core.hooksPath {HOOKS_REL}")
+
+    hook = REPO / HOOKS_REL / "pre-push"
+    if hook.is_file() and os.access(hook, os.X_OK):
+        record("git.pre_push_hook", True,
+               "present + executable (non-vault pushes refused)", "")
+    elif hook.is_file():
+        record("git.pre_push_hook", False,
+               "present + executable (non-vault pushes refused)",
+               "present but NOT executable — chmod 755 it")
+    else:
+        record("git.pre_push_hook", False,
+               "present + executable (non-vault pushes refused)",
+               "missing — restore deploy/githooks/pre-push")
+    return checks
+
+
+def check_publish_guard() -> None:
+    """Render export_public's layer-2 guards as doctor lines (see guard_checks)."""
+    try:
+        for check in guard_checks():
+            level = "SKIP" if check.get("skip") else ("PASS" if check["ok"] else "FAIL")
+            add(level, check["name"], check["detail"])
+    except Exception as e:  # noqa: BLE001
+        add("FAIL", "git.push_gate", f"guard checker crashed: {type(e).__name__}: {e}")
 
 
 def check_upstream_clean() -> None:
@@ -306,8 +400,9 @@ def check_endpoints() -> None:
         #   1) env proxy (normal path; a dead local proxy must not be the
         #      only thing we try),
         #   2) direct with an explicit no-proxy opener,
-        #   3) the CF Worker reverse proxy the existing cron tools use
-        #      (needs a browser UA — the zone blocks library agents).
+        #   3) optional: a reverse-proxy mirror of the same endpoint (the
+        #      cron tools' route; needs a browser UA — the zone blocks library
+        #      agents), enabled only when AIDOG_TG_MIRROR is set.
         # Outcomes are attributed honestly: an HTTP answer from Telegram is
         # authoritative (non-200 = token/API FAIL); every route erroring out
         # with no HTTP answer at all means HOST EGRESS is missing — that is an
@@ -317,16 +412,19 @@ def check_endpoints() -> None:
         # as no-answer, not as a Telegram verdict.
         ua = {"User-Agent": "Mozilla/5.0"}
         direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        api = f"https://api.telegram.org/bot{tok}/getMe"
         routes = [
             ("", lambda u: urllib.request.urlopen(u, timeout=15)),
             ("direct", lambda u: direct.open(u, timeout=15)),
-            ("tgapi", lambda u: direct.open(u, timeout=15)),
         ]
-        urls = [
-            f"https://api.telegram.org/bot{tok}/getMe",
-            f"https://api.telegram.org/bot{tok}/getMe",
-            f"https://api.telegram.org/bot{tok}/getMe",
-        ]
+        urls = [api, api]
+        #   3) optional: an operator-supplied reverse-proxy mirror of the same
+        #      endpoint (browser UA required), opt-in via AIDOG_TG_MIRROR and
+        #      absent by default — this tree carries no third-party endpoint.
+        mirror = (os.environ.get("AIDOG_TG_MIRROR") or "").rstrip("/")
+        if mirror:
+            routes.append(("tgapi", lambda u: direct.open(u, timeout=15)))
+            urls.append(f"{mirror}/bot{tok}/getMe")
         verdict = None          # ("pass", name, via) | ("fail", detail)
         saw_route_error = False
         saw_proxy_refusal = False
@@ -497,7 +595,8 @@ def _run(fn) -> None:
 
 
 def main() -> int:
-    plan = (check_repo, check_upstream_clean, check_secrets, check_profile_env,
+    plan = (check_repo, check_publish_guard, check_upstream_clean,
+            check_secrets, check_profile_env,
             check_config, check_soul_sync, check_memory, check_processes,
             check_endpoints, check_version)
     for fn in plan:

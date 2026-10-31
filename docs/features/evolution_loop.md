@@ -121,6 +121,10 @@ never a "missing slot" notice; curated slots keep their notice behavior).
   Evidence: `tmp/e2e_activation_ui.js` `U7` — see
   [frontend_coverage.md](frontend_coverage.md) §4.
 - `python3 tests/source_lang_check.py` → locale packs parity for all new keys.
+
+*Development-repository only: `deploy/check_publish.py` is release tooling of
+the development checkout, never part of a user install.*
+
 - `python3 deploy/check_publish.py` → evolution artifacts are tracked under
   `overlay/**` (allow-classified) and pass the leak scan because the lint
   gate enforces the same classes at write time.

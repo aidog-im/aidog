@@ -10,7 +10,13 @@ Mechanism (two-stage, confidential -> public; flip executed 2026-10-27):
   - Anonymous reads work because GitHub allows unauthenticated contents reads
     on public repositories (rate-limited; the PAT only raises the budget).
   - owner/repo is derived from `git remote get-url origin` — no config to edit
-    when the channel changes.
+    when the channel changes — with ONE honest fallback: when origin has no
+    manifest at its root (404, this development checkout's topology: origin
+    is the internal archive whose default branch carries no release.json),
+    the read falls back to `FALLBACK_REPO` = the product's public release
+    repository, where every release ships. Any other failure (rate limit,
+    egress) surfaces as-is. `apply` is untouched: it still fast-forwards
+    `origin/<branch>` over git refs.
 
 Commands:
   python3 deploy/aidog_update.py check     # installed vs latest (exit 0 = current,
@@ -30,6 +36,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -38,6 +45,11 @@ SECRETS = REPO / "secrets.env"
 VERSION_FILE = REPO / "VERSION"
 MANIFEST_FILE = REPO / "release.json"
 MANIFEST_PATH = "release.json"
+# Release-channel fallback (owner decree: every release is published on the
+# product's own public repository). Fires ONLY on a root-manifest 404 from
+# origin — never on a rate limit, never on egress trouble, never for a
+# clone whose origin already IS this repository.
+FALLBACK_REPO = ("aidog-im", "aidog")
 
 
 def installed_version() -> str:
@@ -76,12 +88,8 @@ def origin_repo() -> tuple[str, str] | None:
     return (m.group(1), m.group(2)) if m else None
 
 
-def fetch_manifest() -> dict:
-    """Latest release.json from origin (authenticated only when needed)."""
-    repo = origin_repo()
-    if not repo:
-        raise RuntimeError("no origin remote configured")
-    owner, name = repo
+def _fetch_repo_manifest(owner: str, name: str) -> dict:
+    """One repository's root release.json (raises on failure)."""
     url = f"https://api.github.com/repos/{owner}/{name}/contents/{MANIFEST_PATH}"
     req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json",
                                                "User-Agent": "aidog-update"})
@@ -96,7 +104,9 @@ def fetch_manifest() -> dict:
             break
         except Exception as e:  # noqa: BLE001
             last = e
-            if attempt == 0:
+            # a 404 is a verdict, not a flake — never retried on the same repo
+            if attempt == 0 and not (isinstance(e, urllib.error.HTTPError)
+                                     and e.code == 404):
                 time.sleep(0.8)
             else:
                 raise last from None
@@ -107,6 +117,28 @@ def fetch_manifest() -> dict:
     if not isinstance(manifest, dict):
         raise RuntimeError("manifest is not an object")
     return manifest
+
+
+def fetch_manifest() -> dict:
+    """Latest release.json — origin first, one honest fallback.
+
+    owner/repo comes from `git remote get-url origin`; when that repository
+    has no release manifest at its ROOT (404 — the development checkout's
+    origin is the internal archive branch), the read falls back once to
+    FALLBACK_REPO, the product's public release repository. Every other
+    failure (rate limit, egress, a broken payload) is reported as-is, never
+    masked. Pinned end-to-end by the activation legs (L5 + U3: update_
+    available must be a real boolean here) and by `aidog_update check` from
+    a public clone (AGENTS.md)."""
+    repo = origin_repo()
+    if not repo:
+        raise RuntimeError("no origin remote configured")
+    try:
+        return _fetch_repo_manifest(*repo)
+    except urllib.error.HTTPError as e:
+        if e.code != 404 or repo == FALLBACK_REPO:
+            raise
+        return _fetch_repo_manifest(*FALLBACK_REPO)
 
 
 def check(doc: bool = False) -> int:

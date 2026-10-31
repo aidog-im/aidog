@@ -132,6 +132,18 @@
         <span class="nav-label" data-i18n="view.community.title">Community</span>
         <span class="nav-drop" aria-hidden="true"></span>
       </button>
+      <!-- SENSE group (SNIFF car): the fourth sidebar segment, one board.
+           Group headings NEVER carry .nav-item (nav parity legs count them). -->
+      <div class="nav-group" data-i18n="nav.group.sense">Sense</div>
+      <button class="nav-item" type="button" data-view="sniff">
+        <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"
+          stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="4.6" cy="11.4" r="2"/>
+          <path d="M7.7 9.2a4.4 4.4 0 0 1 0 4.4"/>
+          <path d="M10.4 7a7.6 7.6 0 0 1 0 8.8"/></svg></span>
+        <span class="nav-label" data-i18n="view.sniff.title">Sniff</span>
+        <span class="nav-drop" aria-hidden="true"></span>
+      </button>
       <div class="nav-group" data-i18n="nav.group.system">System</div>
       <button class="nav-item" type="button" data-view="settings">
         <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"
@@ -717,6 +729,161 @@
         </div>
         <div id="commList"></div>
         <div class="stat-note" id="commChecked" hidden></div>
+      </section>
+    </section>
+
+    <!-- SNIFF: the SENSE board — sources / rules / findings (read-only) -->
+    <section class="view" id="view-sniff" data-view="sniff">
+      <div class="view-head">
+        <div class="view-titles">
+          <h2 data-i18n="view.sniff.title">Sniff</h2>
+          <p class="view-sub" data-i18n="view.sniff.sub">Smell out signals from health, home, vehicle and the web</p>
+        </div>
+        <div class="view-actions">
+          <button class="btn" id="sniffSweep" type="button"
+                  data-i18n="sniff.sweep">SWEEP NOW</button>
+          <button class="btn" id="sniffPause" type="button"
+                  aria-pressed="false" data-i18n="sniff.pause">PAUSE</button>
+        </div>
+      </div>
+      <div class="stat-note" id="sniffMsg" role="status"></div>
+
+      <!-- three-step onboarding: open while the board is empty, one line
+           once configured; the header click is a pure local toggle -->
+      <div class="sniff-howto is-open" id="sniffHowto">
+        <button class="sniff-howto-head" id="sniffHowtoHead" type="button"
+                aria-expanded="true">
+          <span class="sniff-howto-title" data-i18n="sniff.howto.title">HOW TO USE</span>
+          <span class="sniff-howto-line" data-i18n="sniff.howto.line">source → rule → sweep — three steps to your first finding</span>
+          <span class="sniff-howto-caret" aria-hidden="true"></span>
+        </button>
+        <ol class="sniff-howto-steps">
+          <li data-i18n="sniff.howto.s1">1 · ADD SOURCE — pick a kind: home (Home Assistant url + token slot), web (URL + extract regex) or mcp (a bridge name from mycore.mcp)</li>
+          <li data-i18n="sniff.howto.s2">2 · ADD RULE — a bounded condition such as sensor.temp &gt; 30 for 10m; severity colors the finding, speak = it talks</li>
+          <li data-i18n="sniff.howto.s3">3 · SWEEP NOW (or wait out the interval) — hits land in FINDINGS; speak rules reach you via quiet hours · digest cap · PAUSE</li>
+        </ol>
+      </div>
+
+      <section class="card">
+        <h2><span data-i18n="sec.sniffSources">SOURCES</span>
+            <span class="chat-badge" id="sniffSrcCount">–</span></h2>
+        <div id="sniffSources"></div>
+        <div class="stat-note" id="sniffSweepNote" hidden></div>
+        <!-- add-source composer: slot NAMES only, the server refuses a value -->
+        <div class="sniff-add" id="sniffSrcForm" hidden>
+          <div class="ctl-row">
+            <label for="sniffSrcKind" data-i18n="sniff.srcKind">Kind</label>
+            <select id="sniffSrcKind">
+              <option value="home">home</option>
+              <option value="web">web</option>
+              <option value="mcp">mcp</option>
+            </select>
+          </div>
+          <div class="ctl-row">
+            <label for="sniffSrcId" data-i18n="sniff.srcId">Id</label>
+            <input type="text" id="sniffSrcId" maxlength="32" autocomplete="off"
+                   data-i18n-ph="sniff.srcIdPh" placeholder="ha">
+          </div>
+          <div class="ctl-row" id="sniffSrcUrlRow">
+            <label for="sniffSrcUrl" data-i18n="sniff.srcUrl">URL</label>
+            <input type="text" id="sniffSrcUrl" maxlength="256" autocomplete="off"
+                   data-i18n-ph="sniff.srcUrlPh" placeholder="http://homeassistant.local:8123">
+          </div>
+          <div class="ctl-row" id="sniffHomeRow">
+            <label for="sniffSrcToken" data-i18n="sniff.srcToken">Token slot</label>
+            <input type="text" id="sniffSrcToken" maxlength="64" autocomplete="off"
+                   data-i18n-ph="sniff.srcTokenPh" placeholder="HA_TOKEN">
+          </div>
+          <div class="ctl-row" id="sniffHomeRow2">
+            <label for="sniffSrcEntities" data-i18n="sniff.srcEntities">Entity patterns</label>
+            <input type="text" id="sniffSrcEntities" maxlength="512" autocomplete="off"
+                   data-i18n-ph="sniff.srcEntitiesPh" placeholder="sensor.*, binary_sensor.door_*">
+          </div>
+          <div class="ctl-row" id="sniffWebRow" hidden>
+            <label for="sniffSrcRegex" data-i18n="sniff.srcRegex">Extract regex</label>
+            <input type="text" id="sniffSrcRegex" maxlength="200" autocomplete="off"
+                   data-i18n-ph="sniff.srcRegexPh" placeholder="price>(\d+)">
+          </div>
+          <div class="ctl-row" id="sniffSrcServerRow" hidden>
+            <label for="sniffSrcServer" data-i18n="sniff.srcServer">Bridge</label>
+            <input type="text" id="sniffSrcServer" maxlength="32" autocomplete="off"
+                   data-i18n-ph="sniff.srcServerPh" placeholder="ha-mcp">
+          </div>
+          <div class="stat-note" id="sniffMcpNote" data-i18n="sniff.mcpNote"
+               hidden>an mcp source reads the bridge registry and session status
+            only — it never calls a tool</div>
+          <div class="ctl-actions">
+            <button class="btn primary" id="sniffSrcAdd" type="button"
+                    data-i18n="sniff.add">ADD</button>
+            <button class="btn" id="sniffSrcCancel" type="button"
+                    data-i18n="sniff.cancel">Cancel</button>
+          </div>
+        </div>
+        <div class="ctl-actions" id="sniffSrcActions">
+          <button class="btn" id="sniffSrcNew" type="button"
+                  data-i18n="sniff.addSource">+ ADD SOURCE</button>
+        </div>
+      </section>
+
+      <div class="evo-cols">
+        <section class="card">
+          <h2><span data-i18n="sec.sniffRules">RULES</span>
+              <span class="chat-badge" id="sniffRuleCount">–</span></h2>
+          <div id="sniffRules"></div>
+          <div class="sniff-add" id="sniffRuleForm" hidden>
+            <div class="ctl-row">
+              <label for="sniffRuleSource" data-i18n="sniff.ruleSource">Source</label>
+              <select id="sniffRuleSource"></select>
+            </div>
+            <div class="ctl-row">
+              <label for="sniffRuleWhen" data-i18n="sniff.ruleWhen">When</label>
+              <input type="text" id="sniffRuleWhen" maxlength="500" autocomplete="off"
+                     data-i18n-ph="sniff.ruleWhenPh" placeholder="sensor.temp > 30">
+            </div>
+            <div class="ctl-row">
+              <label for="sniffRuleSeverity" data-i18n="sniff.ruleSeverity">Severity</label>
+              <select id="sniffRuleSeverity">
+                <option value="info">info</option>
+                <option value="warn">warn</option>
+                <option value="high">high</option>
+              </select>
+            </div>
+            <div class="ctl-actions">
+              <button class="btn primary" id="sniffRuleAdd" type="button"
+                      data-i18n="sniff.add">ADD</button>
+              <button class="btn" id="sniffRuleCancel" type="button"
+                      data-i18n="sniff.cancel">Cancel</button>
+            </div>
+          </div>
+          <div class="ctl-actions" id="sniffRuleActions">
+            <button class="btn" id="sniffRuleNew" type="button"
+                    data-i18n="sniff.addRule">+ ADD RULE</button>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2><span data-i18n="sec.sniffFindings">FINDINGS</span>
+              <span class="chat-badge" id="sniffFindCount">–</span></h2>
+          <div id="sniffFindings"></div>
+        </section>
+      </div>
+
+      <section class="card">
+        <h2 data-i18n="sec.sniffControls">CONTROLS</h2>
+        <div class="ctl-row">
+          <label for="sniffDigest" data-i18n="sniff.digest">Digest cap</label>
+          <input type="number" id="sniffDigest" min="1" max="50" step="1">
+          <span class="save-state" id="sniffCtlMsg" role="status"></span>
+        </div>
+        <div class="ctl-row">
+          <label data-i18n="sniff.interval">Interval</label>
+          <span class="sniff-ro" id="sniffInterval">–</span>
+        </div>
+        <div class="ctl-row">
+          <label data-i18n="sniff.quiet">Quiet hours</label>
+          <span class="sniff-ro" id="sniffQuiet">–</span>
+        </div>
+        <div class="stat-note" data-i18n="sniff.readOnly">read-only sensing · local only · a source that is never configured stays silent</div>
       </section>
     </section>
 

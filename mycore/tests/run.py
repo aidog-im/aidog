@@ -12709,6 +12709,967 @@ def test_model_gateway() -> None:
         gmeter.deactivate()
 
 
+# ---------------------------------------------------------- SNIFF car ------
+
+def test_sniff() -> None:
+    """SNIFF (sense & proactive-discovery) car, P0: the settings registry's
+    first-error discipline, the closed rule grammar (no eval of free text),
+    findings dedup + payload caps, hermetic home/web sweeps, the read-side
+    mcp lane (registry + session status, never a tool), tick ownership and
+    honest statuses — plus the ABSENCE of any actuation path. Zero network,
+    zero credentials, zero device writes: every HTTP call goes through an
+    injected transport and every payload is empty."""
+    import json as _json
+    import tempfile
+    from mycore import mcp as mcp_mod
+    from mycore import sniff as sn
+
+    # ---------------- A. settings registry (first-error discipline) -------
+    good = {
+        "enabled": True, "interval_s": 60, "quiet_hours": "23:00-07:00",
+        "digest_cap": 3,
+        "sources": [
+            {"id": "ha", "kind": "home", "url": "http://ha.local:8123/",
+             "token": "HA_TOKEN",
+             "entities": ["sensor.*", "binary_sensor.door_*"],
+             "rate_cap_per_min": 12},
+            {"id": "watch", "kind": "web", "url": "https://example.org/p",
+             "regex": r"price>(\d+)", "field": "price"},
+        ],
+        "rules": [
+            {"id": "r1", "source": "ha", "when": "sensor.temp > 30",
+             "severity": "high", "speak": True},
+            {"id": "r2", "source": "watch", "when": "price > 100"},
+        ],
+    }
+    cfg = sn.parse_config(good)
+    check("sniff: registry parses to normalized sources and rules",
+          [s["id"] for s in cfg["sources"]] == ["ha", "watch"]
+          and cfg["sources"][0]["url"] == "http://ha.local:8123"
+          and cfg["sources"][0]["entities"]
+          == ["sensor.*", "binary_sensor.door_*"]
+          and cfg["sources"][0]["rate_cap_per_min"] == 12
+          and cfg["sources"][1]["field"] == "price"
+          and [r["id"] for r in cfg["rules"]] == ["r1", "r2"]
+          and cfg["rules"][0]["severity"] == "high"
+          and cfg["rules"][0]["speak"] is True
+          and cfg["rules"][1]["severity"] == "info"
+          and cfg["rules"][1]["speak"] is False
+          and cfg["rules"][0]["ast"][0] == "cmp",
+          str(cfg)[:400])
+    dflt = sn.parse_config({})
+    check("sniff: empty config -> documented defaults",
+          dflt["enabled"] is True and dflt["pause"] is False
+          and dflt["interval_s"] == sn.DEFAULT_INTERVAL_S
+          and dflt["digest_cap"] == sn.DEFAULT_DIGEST_CAP
+          and dflt["quiet_hours"] == "" and dflt["sources"] == []
+          and dflt["rules"] == [] and dflt["rule_errors"] == {}, str(dflt))
+
+    home_src = {"id": "ha", "kind": "home", "url": "http://ha.local:8123",
+                "token": "HA_TOKEN"}
+    invalids = [
+        ("not-an-object", "must be an object"),
+        ({"nope": 1}, "unknown field 'nope'"),
+        ({"enabled": "yes"}, "enabled must be true or false"),
+        ({"interval_s": 5}, "interval_s must be an integer"),
+        ({"digest_cap": 0}, "digest_cap must be an integer"),
+        ({"quiet_hours": "25:00-07:00"}, "quiet_hours"),
+        ({"sources": "x"}, "sources must be a list"),
+        ({"sources": [1]}, "must be an object"),
+        ({"sources": [{"id": "a", "kind": "mqtt", "url": "http://x"}]},
+         "kind must be one of home|web|mcp"),
+        ({"sources": [{"id": "a", "kind": "mcp"}]},
+         "server must be a bridge name"),
+        ({"sources": [{"id": "a", "kind": "mcp", "server": "ha mcp"}]},
+         "server must be a bridge name"),
+        ({"sources": [{"id": "a", "kind": "mcp", "server": "ha-mcp",
+                       "url": "http://x"}]}, "unknown field 'url'"),
+        ({"sources": [{"id": "a", "kind": "mcp", "server": "ha-mcp",
+                       "rate_cap_per_min": 30}]},
+         "unknown field 'rate_cap_per_min'"),
+        ({"sources": [{"id": "a", "kind": "home", "url": "http://x",
+                       "nope": 1}]}, "unknown field 'nope'"),
+        ({"sources": [{"id": "A B", "kind": "home", "url": "http://x"}]},
+         "id must be a slug"),
+        ({"sources": [{"id": "a", "kind": "home", "url": "ftp://x/y"}]},
+         "url must be http(s) with a host"),
+        ({"sources": [{"id": "a", "kind": "home", "url": "noscheme"}]},
+         "url must be http(s) with a host"),
+        ({"sources": [{"id": "a", "kind": "home"}]},
+         "url is required"),
+        ({"sources": [{"id": "a", "kind": "home", "url": "http://x",
+                       "token": "eyJhbGciOiJIUzI1NiJ9.payload.sig"}]},
+         "token must be a slot name"),
+        ({"sources": [{"id": "a", "kind": "home", "url": "http://x",
+                       "token": "lowercase_token"}]},
+         "token must be a slot name"),
+        ({"sources": [{"id": "a", "kind": "home", "url": "http://x",
+                       "entities": []}]}, "non-empty list"),
+        ({"sources": [{"id": "a", "kind": "home", "url": "http://x",
+                       "entities": [1]}]}, "non-empty strings"),
+        ({"sources": [{"id": "a", "kind": "home", "url": "http://x",
+                       "rate_cap_per_min": 0}]}, "rate_cap_per_min"),
+        ({"sources": [{"id": "a", "kind": "web", "url": "http://x",
+                       "regex": "("}]}, "bad regex"),
+        ({"sources": [{"id": "a", "kind": "web", "url": "http://x",
+                       "field": "Price"}]}, "field must be a lowercase slug"),
+        ({"sources": [home_src, dict(home_src)]}, "duplicate source id"),
+        ({"sources": [home_src],
+          "rules": [{"id": "r", "source": "ghost", "when": "a > 1"}]},
+         "source must name a configured source"),
+        ({"sources": [home_src],
+          "rules": [{"id": "r", "source": "ha", "when": "a > 1",
+                     "nope": 1}]}, "unknown field 'nope'"),
+        ({"sources": [home_src],
+          "rules": [{"id": "r", "source": "ha", "when": "a > 1",
+                     "severity": "critical"}]}, "severity must be one of"),
+        ({"sources": [home_src],
+          "rules": [{"id": "r", "source": "ha", "when": "a > 1",
+                     "speak": "yes"}]}, "speak must be true or false"),
+        ({"sources": [home_src],
+          "rules": [{"id": "bad id", "source": "ha", "when": "a > 1"}]},
+         "id must be a slug"),
+        ({"sources": [home_src],
+          "rules": [{"id": "r", "source": "ha", "when": "a > "}]},
+         "rule 1 (r):"),
+        ({"sources": [home_src],
+          "rules": [{"id": "r", "source": "ha", "when": "a > 1"},
+                    {"id": "r", "source": "ha", "when": "a < 1"}]},
+         "duplicate rule id"),
+    ]
+    wrong = []
+    for raw, needle in invalids:
+        try:
+            sn.parse_config(raw)
+            wrong.append(("NOT REFUSED", needle))
+        except sn.SniffError as e:
+            msg = str(e)
+            if needle not in msg:
+                wrong.append((needle, msg))
+    check(f"sniff: {len(invalids)} invalid config shapes refused with the "
+          "named reason", not wrong, str(wrong)[:400])
+    check("sniff: rejections never echo a credential-shaped value",
+          "eyJhbGciOiJIUzI1NiJ9" not in str(wrong)
+          and "lowercase_token" not in str(wrong), str(wrong)[:300])
+    try:
+        sn.parse_config({"sources": [{"id": "x", "kind": "nope"},
+                                      {"id": "y", "kind": "home",
+                                       "url": "bad url"}]})
+        first = "NOT REFUSED"
+    except sn.SniffError as e:
+        first = str(e)
+    check("sniff: first error stops the registry parse",
+          first.startswith("source 1: kind must be one of"), first)
+    many = sn.parse_config({"sources": [home_src], "rules": [
+        {"id": "r1", "source": "ha", "when": "a > "},
+        {"id": "r2", "source": "ha", "when": "a ~ 1"},
+        {"id": "r3", "source": "ha", "when": "a > 1"},
+    ]}, strict_rules=False)
+    check("sniff: runtime parse isolates a bad rule, keeps the good ones",
+          [r["id"] for r in many["rules"]] == ["r3"]
+          and set(many["rule_errors"]) == {"r1", "r2"}
+          and "rule 1 (r1):" in many["rule_errors"]["r1"],
+          str(many["rule_errors"]))
+    try:
+        sn.parse_config({"sources": [home_src], "rules": [
+            {"id": "r1", "source": "ha", "when": "a > "}]})
+        strict = "NOT REFUSED"
+    except sn.SniffError as e:
+        strict = str(e)
+    check("sniff: write-gate parse is strict about the same rule",
+          strict.startswith("rule 1 (r1):"), strict)
+
+    # ---------------- B. rule grammar (closed operator set, no eval) ------
+    ast_gt = sn.parse_when("sensor.temp > 30")
+    ast_and = sn.parse_when("a == 1 and b < 2.5 or c != 'off'")
+    ast_time = sn.parse_when("time > 23:00")
+    ast_for = sn.parse_when("door == 'on' for 10m")
+    ast_in = sn.parse_when("state in ['on', 'off']")
+    ast_chg = sn.parse_when("price changed")
+    check("sniff: comparisons, and/or, time literal and list parse",
+          ast_gt == ("cmp", ">", ("name", "sensor.temp"), ("lit", 30.0))
+          and ast_and[0] == "or" and ast_and[1][0] == "and"
+          and ast_time[3][1] == 1380
+          and ast_in[0] == "in" and ast_in[2] == ("on", "off")
+          and ast_chg == ("changed", "price"),
+          f"{ast_gt} | {ast_and} | {ast_time} | {ast_in} | {ast_chg}")
+    check("sniff: 'for' window parses with m/min/h units",
+          sn.parse_when("x > 1 for 10m")[1] == 600
+          and sn.parse_when("x > 1 for 10 min")[1] == 600
+          and sn.parse_when("x > 1 for 2h")[1] == 7200, str(ast_for))
+    rule_errs = [
+        ("a ~ b", "unexpected character"),
+        ("a >", "expected a value or reading name"),
+        ("x in []", "empty list"),
+        ("x in 'on'", "expected '[' after 'in'"),
+        ("__import__('os')", "unexpected character '('"),
+        ("a > b > c", "rules are a single condition"),
+        ("time changed", "cannot be used with 'changed'"),
+        ("door for 0m", "expected an operator"),
+        ("a > 1 for 0m", "positive whole number"),
+        ("a > 1 for 99999m", "at most 24 hours"),
+        ("a > 1 for 5 parsec", "unknown time unit"),
+        ("a and", "expected an operator"),
+        ("", "non-empty string"),
+        (None, "non-empty string"),
+        ("a > 1 " + "and b > 1 " * 90, "longer than 500 chars"),
+    ]
+    wrong = []
+    for raw, needle in rule_errs:
+        try:
+            sn.parse_when(raw)
+            wrong.append(("NOT REFUSED", raw))
+        except sn.SniffError as e:
+            if needle not in str(e):
+                wrong.append((needle, f"{raw!r}: {e}"))
+    check(f"sniff: {len(rule_errs)} malformed rules rejected at the first "
+          "error", not wrong, str(wrong)[:400])
+    sniff_src = (REPO / "mycore" / "sniff.py").read_text(encoding="utf-8")
+    check("sniff: rule text is never eval/exec'd",
+          re.search(r"(?<!\.)\b(eval|exec|compile)\s*\(", sniff_src) is None)
+    check("sniff: the grammar exposes only the documented operators",
+          set(sn._OPS) == {">=", "<=", "==", "!=", "<", ">"}
+          and set(sn._KEYWORDS) == {"and", "or", "in", "changed", "for"},
+          f"{sn._OPS} {sn._KEYWORDS}")
+
+    # ---------------- C. evaluation ---------------------------------------
+    ev = sn.parse_when("sensor.temp > 30")
+    check("sniff: numeric comparison over readings",
+          sn.evaluate(ev, readings={"sensor.temp": 31}, prev={}, now=0.0,
+                      now_min=0)[0] is True
+          and sn.evaluate(ev, readings={"sensor.temp": 30}, prev={}, now=0.0,
+                          now_min=0)[0] is False
+          and sn.evaluate(ev, readings={}, prev={}, now=0.0, now_min=0)[0]
+          is False)
+    check("sniff: a missing reading never matches (even for !=)",
+          sn.evaluate(sn.parse_when("x != 5"), readings={}, prev={}, now=0.0,
+                      now_min=0)[0] is False)
+    check("sniff: string equality is case/space insensitive",
+          sn.evaluate(sn.parse_when("state == 'ON'"),
+                      readings={"state": " on "}, prev={}, now=0.0,
+                      now_min=0)[0] is True)
+    check("sniff: ordering needs two numbers (no lexicographic surprise)",
+          sn.evaluate(sn.parse_when("a > 'b'"), readings={"a": "a"},
+                      prev={}, now=0.0, now_min=0)[0] is False
+          and sn.evaluate(sn.parse_when("a > 2"), readings={"a": "10"},
+                          prev={}, now=0.0, now_min=0)[0] is True)
+    check("sniff: time ident reads Beijing minutes-since-midnight",
+          sn.evaluate(sn.parse_when("time > 23:00"), readings={}, prev={},
+                      now=0.0, now_min=1421)[0] is True
+          and sn.evaluate(sn.parse_when("time > 23:00"), readings={}, prev={},
+                          now=0.0, now_min=600)[0] is False)
+    check("sniff: 'in' membership over literals",
+          sn.evaluate(ast_in, readings={"state": "off"}, prev={}, now=0.0,
+                      now_min=0)[0] is True
+          and sn.evaluate(ast_in, readings={"state": "half"}, prev={},
+                          now=0.0, now_min=0)[0] is False)
+    check("sniff: 'changed' needs a previous read (first sweep = baseline)",
+          sn.evaluate(ast_chg, readings={"price": 2}, prev={}, now=0.0,
+                      now_min=0)[0] is False
+          and sn.evaluate(ast_chg, readings={"price": 2},
+                          prev={"price": 2}, now=0.0, now_min=0)[0] is False
+          and sn.evaluate(ast_chg, readings={"price": 3},
+                          prev={"price": 2}, now=0.0, now_min=0)[0] is True)
+    check("sniff: and/or precedence (and binds tighter than or)",
+          sn.evaluate(ast_and,
+                      readings={"a": 1, "b": 9, "c": "on"}, prev={},
+                      now=0.0, now_min=0)[0] is True
+          and sn.evaluate(ast_and,
+                          readings={"a": 2, "b": 9, "c": "on"}, prev={},
+                          now=0.0, now_min=0)[0] is True
+          and sn.evaluate(ast_and,
+                          readings={"a": 2, "b": 9, "c": "off"}, prev={},
+                          now=0.0, now_min=0)[0] is False)
+    win = sn.parse_when("sensor.hr > 100 for 10m")
+    readings = {"sensor.hr": 120}
+    first = sn.evaluate(win, readings=readings, prev={}, now=1000.0,
+                        now_min=0)
+    hold1 = sn.evaluate(win, readings=readings, prev={}, now=1400.0,
+                        now_min=0, since=first[1])
+    hold2 = sn.evaluate(win, readings=readings, prev={}, now=1700.0,
+                        now_min=0, since=hold1[1])
+    broke = sn.evaluate(win, readings={"sensor.hr": 90}, prev={},
+                        now=1750.0, now_min=0, since=hold2[1])
+    check("sniff: 'for Nm' earns a match only after the window holds",
+          first == (False, 1000.0) and hold1 == (False, 1000.0)
+          and hold2 == (True, 1000.0) and broke == (False, None),
+          f"{first} {hold1} {hold2} {broke}")
+    check("sniff: rules without a window carry no sustain anchor",
+          sn.evaluate(ev, readings={"sensor.temp": 31}, prev={}, now=1.0,
+                      now_min=0) == (True, None))
+    check("sniff: payload whitelist = the readings the rule names",
+          sn.rule_names(sn.parse_when("a > 1 and time > 5 and b in [1]"))
+          == ("a", "b")
+          and sn.rule_names(sn.parse_when("price changed")) == ("price",))
+
+    # ---------------- D. findings (dedup, caps, persistence) --------------
+    rows: list[dict] = []
+    rows, created = sn.upsert_finding(
+        rows, source="ha", rule="r1", severity="info",
+        summary="sensor.temp > 30 -> sensor.temp=31", trigger="sensor.temp=31",
+        payload={"sensor.temp": 31}, now=1000.0)
+    row = rows[0]
+    check("sniff: a new finding carries provenance and honest counters",
+          created is True and len(rows) == 1 and row["first_seen"] == 1000.0
+          and row["last_seen"] == 1000.0 and row["count"] == 1
+          and row["ack"] is False and row["severity"] == "info"
+          and row["source"] == "ha" and row["rule"] == "r1"
+          and len(row["signature"]) == 16 and row["payload"]
+          == {"sensor.temp": 31}, _json.dumps(row))
+    rows, created2 = sn.upsert_finding(
+        rows, source="ha", rule="r1", severity="info",
+        summary="sensor.temp > 30 -> sensor.temp=31", trigger="sensor.temp=31",
+        payload={"sensor.temp": 31}, now=1600.0)
+    check("sniff: same source+rule+value dedups (first_seen kept, count up)",
+          created2 is False and len(rows) == 1 and rows[0]["count"] == 2
+          and rows[0]["first_seen"] == 1000.0
+          and rows[0]["last_seen"] == 1600.0, _json.dumps(rows))
+    rows, created3 = sn.upsert_finding(
+        rows, source="ha", rule="r1", severity="high",
+        summary="sensor.temp > 30 -> sensor.temp=31", trigger="sensor.temp=31",
+        payload={"sensor.temp": 31}, now=1800.0)
+    rows, created4 = sn.upsert_finding(
+        rows, source="ha", rule="r1", severity="info",
+        summary="sensor.temp > 30 -> sensor.temp=41", trigger="sensor.temp=41",
+        payload={"sensor.temp": 41}, now=2000.0)
+    check("sniff: severity escalates on a repeat; a new value is a new row",
+          created3 is False and rows[0]["severity"] == "high"
+          and rows[0]["count"] == 3 and created4 is True and len(rows) == 2
+          and rows[1]["severity"] == "info" and rows[1]["count"] == 1,
+          _json.dumps(rows))
+    big = {"nested": {"deep": [1, 2, 3]}, "num": 7, "flag": True,
+           "none": None}
+    big.update({f"k{i}": "x" * 400 for i in range(20)})
+    clean = sn.sanitize_payload(big)
+    check("sniff: payload is field-capped and value-truncated",
+          len(clean) == sn.MAX_PAYLOAD_FIELDS
+          and all(len(str(v)) <= sn.PAYLOAD_CAP for v in clean.values()),
+          f"{len(clean)} fields")
+    check("sniff: payload whitelist keeps scalars only (others stringified)",
+          isinstance(clean["num"], int) and isinstance(clean["flag"], bool)
+          and clean["none"] is None and isinstance(clean["nested"], str)
+          and "deep" in clean["nested"], str(clean)[:200])
+    many_rows: list[dict] = []
+    for i in range(sn.MAX_FINDINGS + 8):
+        many_rows, _ = sn.upsert_finding(
+            many_rows, source="ha", rule="r", severity="info",
+            summary="s", trigger=f"v{i}", payload={}, now=float(i))
+    check("sniff: findings log is bounded (oldest dropped)",
+          len(many_rows) == sn.MAX_FINDINGS
+          and many_rows[-1]["trigger"] == f"v{sn.MAX_FINDINGS + 7}"
+          and many_rows[0]["trigger"] == "v8", str(len(many_rows)))
+    check("sniff: signature is deterministic and value-sensitive",
+          sn.make_signature("a", "r", "v") == sn.make_signature("a", "r", "v")
+          and sn.make_signature("a", "r", "v")
+          != sn.make_signature("a", "r", "w")
+          and sn.make_signature("a", "r", "v")
+          != sn.make_signature("b", "r", "v"))
+    with tempfile.TemporaryDirectory() as tmp:
+        target = Path(tmp) / "findings.json"
+        sn.save_findings(rows, target)
+        back = sn.load_findings(target)
+        check("sniff: findings persist round-trip (atomic write)",
+              back == rows and target.exists()
+              and not list(target.parent.glob("*.tmp-*")),
+              str(len(back)))
+        bad = Path(tmp) / "bad.json"
+        bad.write_text("{not json", encoding="utf-8")
+        check("sniff: corrupt findings file fails soft to an empty log",
+              sn.load_findings(bad) == []
+              and sn.load_findings(Path(tmp) / "missing.json") == [])
+        check("sniff: ack marks one finding only",
+              sn.ack_finding(back, rows[0]["signature"]) is True
+              and back[0]["ack"] is True
+              and sn.ack_finding(back, "nope") is False)
+
+    # ---------------- E. sources (hermetic transports) --------------------
+    captured: list[dict] = []
+
+    def ha_doc(n: int = 3) -> str:
+        rows_ = [{"entity_id": "sensor.living_room_temp", "state": "31.5"},
+                 {"entity_id": "binary_sensor.front_door", "state": "on"},
+                 {"entity_id": "light.kitchen", "state": "off"}]
+        return _json.dumps(rows_)
+
+    def ok_transport(url, headers, payload, timeout):
+        captured.append({"url": url, "headers": headers, "payload": payload,
+                         "timeout": timeout})
+        return ha_doc()
+
+    home = {"id": "ha", "kind": "home", "url": "http://ha.local:8123",
+            "token": "HA_TOKEN", "entities": ["sensor.*", "binary_sensor.*"],
+            "enabled": True, "rate_cap_per_min": 30}
+    reads, status, err = sn._sweep_home(
+        home, transport=ok_transport,
+        slot=lambda n: "SENTINEL-TOKEN-000" if n == "HA_TOKEN" else "")
+    check("sniff: home sweep filters by glob and coerces numeric states",
+          status == "reachable" and err == ""
+          and reads == {"sensor.living_room_temp": 31.5,
+                        "binary_sensor.front_door": "on"}
+          and "light.kitchen" not in reads, str(reads))
+    check("sniff: home sweep is a bodyless GET with the Bearer slot",
+          captured[0]["payload"] == b""
+          and captured[0]["url"] == "http://ha.local:8123/api/states"
+          and captured[0]["headers"]["Authorization"]
+          == "Bearer SENTINEL-TOKEN-000"
+          and set(captured[0]["headers"]) == {"Authorization", "Accept"},
+          str(captured[0]["headers"]))
+    captured.clear()
+    never, status2, err2 = sn._sweep_home(home, transport=ok_transport,
+                                          slot=lambda n: "")
+    check("sniff: a missing slot is never-configured and never calls out",
+          status2 == "never-configured" and never == {} and err2 == ""
+          and captured == [], str(status2))
+
+    def echo_token(url, headers, payload, timeout):
+        raise RuntimeError("upstream rejected Bearer SENTINEL-TOKEN-000 now")
+
+    reads, status3, err3 = sn._sweep_home(
+        home, transport=echo_token,
+        slot=lambda n: "SENTINEL-TOKEN-000" if n == "HA_TOKEN" else "")
+    check("sniff: transport failure -> honest bounded error, token scrubbed",
+          status3 == "error" and reads == {}
+          and "SENTINEL-TOKEN-000" not in err3 and "***" in err3
+          and len(err3) <= sn.ERR_SNIPPET, err3)
+
+    def bad_shape(url, headers, payload, timeout):
+        return _json.dumps({"states": []})
+
+    reads, status4, err4 = sn._sweep_home(home, transport=bad_shape,
+                                          slot=lambda n: "TOK")
+    check("sniff: unexpected response shape is an error, not readings",
+          status4 == "error" and reads == {}
+          and "unexpected response shape" in err4, err4)
+
+    many_entities = [{"entity_id": f"sensor.s_{i}", "state": str(i)}
+                     for i in range(sn.MAX_READINGS + 60)]
+    reads, status5, _ = sn._sweep_home(
+        {**home, "entities": ["sensor.*"]},
+        transport=lambda u, h, p, t: _json.dumps(many_entities),
+        slot=lambda n: "TOK")
+    check("sniff: per-sweep readings are bounded",
+          status5 == "reachable" and len(reads) == sn.MAX_READINGS,
+          str(len(reads)))
+
+    web = {"id": "watch", "kind": "web", "url": "https://example.org/p",
+           "regex": r"price>(\d+)", "field": "price", "enabled": True,
+           "rate_cap_per_min": 30}
+    captured.clear()
+    reads, wstatus, werr = sn._sweep_web(
+        web, transport=lambda u, h, p, t: (captured.append({"payload": p}),
+                                           "<b>price>42</b>")[1])
+    check("sniff: web sweep extracts the regex and always reads a page hash",
+          wstatus == "reachable" and werr == ""
+          and reads["price"] == 42.0 and len(reads["page_hash"]) == 12
+          and captured[0]["payload"] == b"", str(reads))
+    reads, wstatus2, _ = sn._sweep_web(
+        web, transport=lambda u, h, p, t: "no marker here")
+    check("sniff: an unmatched page yields the hash only (never a guess)",
+          wstatus2 == "reachable" and list(reads) == ["page_hash"],
+          str(reads))
+    reads, wstatus3, werr3 = sn._sweep_web(
+        web, transport=lambda u, h, p, t: (_ for _ in ()).throw(
+            OSError("connection refused")))
+    check("sniff: a dead page is an honest error status",
+          wstatus3 == "error" and reads == {} and "connection refused" in werr3,
+          werr3)
+
+    # ---------------- E2. mcp lane (read-side only) ------------------------
+    bridge_raw = _json.dumps([
+        {"name": "ha-mcp", "transport": "http",
+         "url": "http://127.0.0.1:3000/mcp",
+         "headers": {"Authorization": "$MCP_TOKEN"},
+         "tools": ["get_*"], "deny": ["*write*"]},
+        {"name": "gh", "transport": "stdio", "command": "python3 x.py"},
+    ])
+    mcp_src = {"id": "br", "kind": "mcp", "server": "ha-mcp",
+               "enabled": True}
+
+    class _Bridge:                    # stands in for a live session (no spawn)
+        def __init__(self, tools: int) -> None:
+            self.cfg = type("cfg", (), {"name": "ha-mcp"})()
+            self.tools = [{} for _ in range(tools)]
+
+    reads, mstat, merr = sn._sweep_mcp(mcp_src, raw=bridge_raw,
+                                       sessions=lambda n: [_Bridge(3)])
+    check("sniff: mcp sweep reads registry + session status, no tool called",
+          mstat == "reachable" and merr == ""
+          and reads == {"servers": 2, "transport": "http", "sessions": 1,
+                        "tools": 3, "filters": 2, "slots": 1},
+          f"{mstat} {reads} {merr}")
+    reads, dstat, derr = sn._sweep_mcp(mcp_src, raw=bridge_raw,
+                                       sessions=lambda n: [])
+    check("sniff: a declared but unattached bridge is honestly detached",
+          dstat == sn.ST_DETACHED and derr == "" and reads["sessions"] == 0
+          and reads["filters"] == 2 and reads["slots"] == 1,
+          f"{dstat} {reads}")
+    reads, nstat, nerr = sn._sweep_mcp({**mcp_src, "server": "ghost"},
+                                       raw=bridge_raw, sessions=lambda n: [])
+    check("sniff: an undeclared bridge is never-configured and silent",
+          nstat == sn.ST_NEVER and reads == {} and nerr == "", str(nstat))
+    reads, estat, eerr = sn._sweep_mcp(mcp_src, raw="{bad",
+                                       sessions=lambda n: [])
+    check("sniff: a broken bridge registry is an honest bounded error",
+          estat == sn.ST_ERROR and reads == {}
+          and len(eerr) <= sn.ERR_SNIPPET, eerr)
+    reads, zstat, zerr = sn._sweep_mcp(mcp_src, raw="   ",
+                                       sessions=lambda n: [])
+    check("sniff: no registry at all -> never-configured",
+          zstat == sn.ST_NEVER and reads == {} and zerr == "", str(zstat))
+    check("sniff: mcp server grammar is byte-for-byte mycore.mcp's name grammar",
+          all(bool(sn._SERVER_RE.fullmatch(n))
+              == bool(mcp_mod._NAME_RE.match(n))
+              for n in ("ha-mcp", "gh.bridge_1", "-bad", "a b", "",
+                        "x" * 33, "A.B-c_d", "9")),
+          str([n for n in ("ha-mcp", "-bad", "a b", "x" * 33)
+               if bool(sn._SERVER_RE.fullmatch(n))
+               != bool(mcp_mod._NAME_RE.match(n))]))
+
+    # the lane through tick: the detached reading earns a finding and the
+    # injected transport never sees one request.
+    mstate = sn.default_state()
+    mfind: list[dict] = []
+    mseen: list[object] = []
+    mreport = sn.tick(2000.0,
+                      block={"interval_s": 10,
+                             "sources": [{"id": "br", "kind": "mcp",
+                                          "server": "ha-mcp"}],
+                             "rules": [{"id": "down", "source": "br",
+                                        "when": "sessions == 0",
+                                        "severity": "warn", "speak": True}]},
+                      transport=lambda u, h, p, t: (mseen.append(p), "{}")[1],
+                      slot=lambda n: "", state=mstate, findings=mfind,
+                      mcp_raw=bridge_raw)
+    check("sniff: a detached bridge fires a finding with zero outbound calls",
+          mseen == [] and mreport["skipped"] == ""
+          and mreport["sources"]["br"]["status"] == sn.ST_DETACHED
+          and mreport["findings_new"] == 1
+          and mreport["rules_matched"] == 1,
+          _json.dumps(mreport)[:400])
+
+    # ---------------- F. tick (ownership, gates, findings) -----------------
+    sn.state_path().unlink(missing_ok=True)
+    sn.findings_path().unlink(missing_ok=True)
+    block = {
+        "interval_s": 10,
+        "sources": [{"id": "ha", "kind": "home", "url": "http://ha.local:8123",
+                     "token": "HA_TOKEN",
+                     "entities": ["sensor.*", "binary_sensor.*"]}],
+        "rules": [{"id": "hot", "source": "ha",
+                   "when": "sensor.living_room_temp > 30", "severity": "warn",
+                   "speak": True}],
+    }
+    state = sn.default_state()
+    findings: list[dict] = []
+    seen: list[int] = []
+
+    def transport(url, headers, payload, timeout):
+        seen.append(payload)
+        return ha_doc()
+
+    slot = lambda n: "SENTINEL-TOKEN-000" if n == "HA_TOKEN" else ""  # noqa: E731
+    off = sn.tick(1000.0, block={**block, "enabled": False},
+                  transport=transport, slot=slot, state=state,
+                  findings=findings)
+    paused = sn.tick(1000.0, block={**block, "pause": True},
+                     transport=transport, slot=slot, state=state,
+                     findings=findings)
+    bad_cfg = sn.tick(1000.0, block={"sources": [{"id": "a", "kind": "nope"}]},
+                      transport=transport, slot=slot, state=state,
+                      findings=findings)
+    check("sniff: disabled / paused / broken config all skip honestly",
+          off["skipped"] == "disabled" and paused["skipped"] == "paused"
+          and bad_cfg["skipped"] == "config" and bad_cfg["error"]
+          and seen == [], f"{off['skipped']} {paused['skipped']} "
+          f"{bad_cfg['skipped']}")
+    first = sn.tick(1000.0, block=block, transport=transport, slot=slot,
+                    state=state, findings=findings)
+    check("sniff: one sweep reads the source, evaluates and records",
+          first["skipped"] == "" and first["sources"]["ha"]["status"]
+          == "reachable" and first["sources"]["ha"]["readings"] == 2
+          and first["rules_checked"] == 1 and first["rules_matched"] == 1
+          and first["findings_new"] == 1 and first["findings_total"] == 1
+          and all(p == b"" for p in seen) and state["last_swept"] == 1000.0,
+          _json.dumps(first))
+    again = sn.tick(1005.0, block=block, transport=transport, slot=slot,
+                    state=state, findings=findings)
+    check("sniff: the interval gate stops an early second sweep",
+          again["skipped"] == "interval" and len(seen) == 1,
+          str(again["skipped"]))
+    third = sn.tick(1100.0, block=block, transport=transport, slot=slot,
+                    state=state, findings=findings)
+    check("sniff: a repeated condition dedups instead of re-firing",
+          third["findings_new"] == 0 and third["findings_dup"] == 1
+          and findings[0]["count"] == 2 and findings[0]["ack"] is False,
+          _json.dumps(third))
+    forced = sn.tick(1150.0, block=block, transport=transport, slot=slot,
+                     state=state, findings=findings, force=True)
+    check("sniff: force beats the interval gate (console sweep-now)",
+          forced["skipped"] == "" and len(seen) == 3
+          and forced["findings_dup"] == 1 and findings[0]["count"] == 3,
+          f"{forced['skipped']} seen={len(seen)}")
+    check("sniff: caller-owned state/findings are never written to disk",
+          not sn.state_path().exists() and not sn.findings_path().exists())
+    sn.tick(1100.0, block=block, transport=transport, slot=slot)
+    check("sniff: passing no state means load + persist from the state files",
+          sn.state_path().exists() and sn.findings_path().exists()
+          and sn.load_state()["last_swept"] == 1100.0
+          and sn.load_findings()[0]["signature"]
+          == findings[0]["signature"], str(sn.state_path()))
+
+    dead = sn.tick(3000.0, block=block,
+                   transport=lambda u, h, p, t: (_ for _ in ()).throw(
+                       OSError("down")),
+                   slot=slot, state=state, findings=findings)
+    check("sniff: a failing source yields no readings and fires no rule",
+          dead["sources"]["ha"]["status"] == "error"
+          and "down" in dead["sources"]["ha"]["error"]
+          and dead["rules_matched"] == 0 and dead["findings_new"] == 0
+          and len(findings) == 1, _json.dumps(dead))
+    starved = sn.tick(4000.0, block=block, transport=transport,
+                      slot=lambda n: "", state=state, findings=findings)
+    check("sniff: never-configured source is reported and stays silent",
+          starved["sources"]["ha"]["status"] == "never-configured"
+          and starved["rules_matched"] == 0 and starved["findings_new"] == 0,
+          _json.dumps(starved))
+
+    cap_block = {"interval_s": 10, "sources": [
+        {"id": "ha", "kind": "home", "url": "http://ha.local:8123",
+         "token": "HA_TOKEN", "entities": ["sensor.*"],
+         "rate_cap_per_min": 1}], "rules": []}
+    cap_state = sn.default_state()
+    calls = [0]
+
+    def counting(url, headers, payload, timeout):
+        calls[0] += 1
+        return ha_doc()
+
+    sn.tick(1000.0, block=cap_block, transport=counting, slot=slot,
+            state=cap_state, findings=[])
+    after_first = calls[0]
+    capped = sn.tick(1010.0, block=cap_block, transport=counting, slot=slot,
+                     state=cap_state, findings=[])
+    after_capped = calls[0]
+    later = sn.tick(2000.0, block=cap_block, transport=counting, slot=slot,
+                    state=cap_state, findings=[])
+    check("sniff: per-source rate cap is a sliding one-minute window",
+          after_first == 1 and after_capped == 1
+          and capped["sources"]["ha"]["status"] == "rate-capped"
+          and later["sources"]["ha"]["status"] == "reachable"
+          and calls[0] == 2,
+          f"first={after_first} capped={after_capped} later={calls[0]} "
+          f"{capped['sources']['ha']['status']}")
+
+    broken_rule = sn.tick(5000.0,
+                          block={**block, "rules": [
+                              {"id": "bad", "source": "ha",
+                               "when": "a ~ 1"}]},
+                          transport=transport, slot=slot, state=state,
+                          findings=findings)
+    check("sniff: a bad rule never takes the sweep down (honest note)",
+          broken_rule["skipped"] == ""
+          and "rule 1 (bad):" in broken_rule["rule_errors"]["bad"]
+          and broken_rule["rules_checked"] == 0,
+          _json.dumps(broken_rule))
+
+    # a failed persist must come back as a report key, never as an exception
+    real_save = sn.save_findings
+    sn.save_findings = lambda *a, **k: (_ for _ in ()).throw(  # noqa: E731
+        OSError("disk full"))
+    try:
+        diskfail = sn.tick(9000.0, block=block, transport=transport,
+                           slot=slot)
+    finally:
+        sn.save_findings = real_save
+    check("sniff: a failed persist is reported, never raised",
+          diskfail["skipped"] == "" and "persist findings failed: OSError"
+          in diskfail["error"] and diskfail["findings_new"] >= 0,
+          _json.dumps(diskfail))
+
+    # ---------------- G. statuses, settings reader, read-only absence ------
+    now = 10_000.0
+    src = {"id": "ha", "kind": "home", "enabled": True}
+    check("sniff: source status vocabulary is honest",
+          sn.source_status({**src, "enabled": False}, None, now)["status"]
+          == "disabled"
+          and sn.source_status(src, None, now)["status"] == "pending"
+          and sn.source_status(src, {"status": "reachable", "last_ok": now - 5},
+                               now)["status"] == "reachable"
+          and sn.source_status(src, {"status": "reachable",
+                                     "last_ok": now - sn.STALE_AFTER_S - 1},
+                               now)["status"] == "stale"
+          and sn.source_status(src, {"status": "never-configured"},
+                               now)["status"] == "never-configured"
+          and sn.source_status(src, {"status": "detached", "last_ok": now - 5},
+                               now)["status"] == "detached"
+          and sn.source_status(src, {"status": "error", "last_ok": 0.0,
+                                     "last_error": "x" * 400}, now)["error"]
+          == "x" * sn.ERR_SNIPPET
+          and sn.source_status(src, {"status": "reachable",
+                                     "last_ok": now - 5},
+                               now)["age_s"] == 5.0)
+
+    saved_profile = os.environ.pop("AIDOG_PROFILE", None)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            check("sniff: settings reader fails closed on absence/garbage",
+                  sn.settings_block(root) == {})
+            (root / "web").mkdir()
+            (root / "web" / "settings.json").write_text("{broken",
+                                                         encoding="utf-8")
+            check("sniff: settings reader fails closed on a corrupt file",
+                  sn.settings_block(root) == {})
+            (root / "web" / "settings.json").write_text(_json.dumps(
+                {"mycore": {"budget": 100}}), encoding="utf-8")
+            check("sniff: settings reader returns {} without the partition",
+                  sn.settings_block(root) == {})
+            (root / "web" / "settings.json").write_text(_json.dumps(
+                {"mycore": {"sniff": {"enabled": False}}}),
+                encoding="utf-8")
+            check("sniff: settings reader returns the raw sniff partition",
+                  sn.settings_block(root) == {"enabled": False})
+    finally:
+        if saved_profile is not None:
+            os.environ["AIDOG_PROFILE"] = saved_profile
+
+    banned_literals = ("/api/services", "/api/config", "/api/webhook",
+                        "call_service", "turn_on", "turn_off", "set_state",
+                        "actuate", "send_command", "publish", "mqtt",
+                        'method="POST"', '"POST"', "'POST'")
+    hits = [b for b in banned_literals if b in sniff_src]
+    check("sniff: source carries no actuation endpoint or verb",
+          not hits, str(hits))
+    check("sniff: the mcp lane stays read-side (no process, no tool call)",
+          "subprocess" not in sniff_src and "call_tool" not in sniff_src
+          and "mcp.live_sessions" in sniff_src,
+          str([w for w in ("subprocess", "call_tool") if w in sniff_src]))
+    fn_names = re.findall(r"^def (\w+)", sniff_src, re.M)
+    write_shaped = [n for n in fn_names if re.search(
+        r"(call_service|turn_on|turn_off|actuate|control|toggle|write_state|"
+        r"set_state|send_command|publish)", n)]
+    check("sniff: no actuation-shaped function is defined",
+          not write_shaped, str(write_shaped))
+    check("sniff: default transport sends no body (GET only)",
+          'data=None, method="GET"' in sniff_src
+          and sniff_src.count("method=") == 1, str(sniff_src.count("method=")))
+    check("sniff: state files live under the runtime state root only",
+          sn.state_path().parent == Path(os.environ["AIDOG_MC_STATE"])
+          and sn.findings_path().parent
+          == Path(os.environ["AIDOG_MC_STATE"]), str(sn.state_path()))
+
+    # ---------------- H. delivery seam (speak / quiet / cap) ---------------
+    from datetime import datetime as _dtm
+    from datetime import timedelta as _td
+    from datetime import timezone as _tz
+    bj = _tz(_td(hours=8))                       # owner timezone, +08:00
+    noon = _dtm(2026, 6, 1, 12, 0, tzinfo=bj).timestamp()
+    night = _dtm(2026, 6, 1, 23, 30, tzinfo=bj).timestamp()
+    pre_dawn = _dtm(2026, 6, 2, 6, 0, tzinfo=bj).timestamp()
+    morning = _dtm(2026, 6, 2, 8, 0, tzinfo=bj).timestamp()
+    dsrc = {"id": "ha", "kind": "home", "url": "http://ha.local:8123",
+            "token": "HA_TOKEN"}
+    dcfg = sn.parse_config({
+        "quiet_hours": "23:00-07:30", "digest_cap": 1,
+        "sources": [dsrc],
+        "rules": [
+            {"id": "hot", "source": "ha", "when": "a > 1",
+             "severity": "high", "speak": True},
+            {"id": "hush", "source": "ha", "when": "b > 1",
+             "severity": "info", "speak": False},
+            {"id": "warm", "source": "ha", "when": "c > 1",
+             "severity": "warn", "speak": True}],
+    })
+    dlog: list[dict] = []
+    for rid, sev, summand, t0 in (("hot", "high", "a > 1 -> a=2", 100.0),
+                                  ("hush", "info", "b > 1 -> b=2", 110.0),
+                                  ("warm", "warn", "c > 1 -> c=9", 120.0)):
+        dlog, _ = sn.upsert_finding(dlog, source="ha", rule=rid, severity=sev,
+                                    summary=summand,
+                                    trigger=summand.split(" -> ")[1],
+                                    payload={"x": 1}, now=t0)
+    check("sniff: a new finding starts undelivered",
+          len(dlog) == 3 and all(r.get("delivered") is False for r in dlog),
+          str([r.get("delivered") for r in dlog]))
+    take = sn.delivery_take(dcfg, now=noon, findings=dlog)
+    check("sniff: delivery speaks only `speak` rules, oldest first, capped",
+          take["held"] == "" and take["count"] == 1 and take["more"] == 1
+          and take["lines"][0].startswith("[high] ha — a > 1")
+          and [r["delivered"] for r in dlog].count(True) == 1
+          and dlog[1]["delivered"] is False,       # speak: false stays silent
+          _json.dumps(take)[:300])
+    take_q = sn.delivery_take(dcfg, now=night, findings=dlog)
+    check("sniff: quiet hours hold the batch (pending reported, nothing marked)",
+          take_q["held"] == "quiet" and take_q["count"] == 0
+          and take_q["more"] == 1
+          and [r["delivered"] for r in dlog].count(True) == 1,
+          _json.dumps(take_q))
+    check("sniff: quiet-now mirrors the shared mission/cron window grammar",
+          sn.quiet_now("23:00-07:30", night) is True
+          and sn.quiet_now("23:00-07:30", pre_dawn) is True
+          and sn.quiet_now("23:00-07:30", noon) is False
+          and sn.quiet_now("", noon) is False
+          and sn.quiet_now("25:00-07:00", noon) is False
+          and sn.quiet_now("09:00-09:00", noon) is False
+          and sn.quiet_now("12:00-13:00", noon) is True,
+          str([sn.quiet_now(w, noon) for w in
+               ("23:00-07:30", "", "25:00-07:00", "09:00-09:00",
+                "12:00-13:00")]))
+    take2 = sn.delivery_take(dcfg, now=morning, findings=dlog)
+    check("sniff: the first non-quiet window flushes the queued batch",
+          take2["held"] == "" and take2["count"] == 1 and take2["more"] == 0
+          and take2["lines"][0].startswith("[warn] ha — c > 1")
+          and dlog[0]["delivered"] and dlog[2]["delivered"]
+          and not dlog[1]["delivered"],      # speak: false is board-only
+          _json.dumps(take2))
+    take3 = sn.delivery_take(dcfg, now=noon, findings=dlog)
+    check("sniff: a delivered finding never speaks again",
+          take3 == {"lines": [], "count": 0, "more": 0, "held": "",
+                    "error": ""}, _json.dumps(take3))
+
+    # persist path: findings=None loads the log AND persists the marks
+    fresh, _ = sn.upsert_finding([], source="ha", rule="hot", severity="high",
+                                 summary="a > 1 -> a=7", trigger="a=7",
+                                 payload={"a": 7}, now=200.0)
+    sn.save_findings(fresh)
+    take_p = sn.delivery_take(dcfg, now=noon)
+    reloaded = sn.load_findings()
+    check("sniff: the taken batch is persisted before any send",
+          take_p["count"] == 1 and take_p["held"] == ""
+          and len(reloaded) == 1 and reloaded[0].get("delivered") is True,
+          _json.dumps(take_p))
+    sn.findings_path().unlink(missing_ok=True)
+
+    # batch bound: 40 speak findings, a generous cap — rows AND characters
+    many: list[dict] = []
+    for i in range(40):
+        many, _ = sn.upsert_finding(many, source="ha", rule="hot",
+                                    severity="info", summary=f"a > {i} -> a={i}",
+                                    trigger=f"a={i}", payload={"a": i},
+                                    now=1000.0 + i)
+    bigcfg = sn.parse_config({
+        "digest_cap": 50, "sources": [dsrc],
+        "rules": [{"id": "hot", "source": "ha", "when": "a > 1",
+                   "severity": "info", "speak": True}]})
+    take_b = sn.delivery_take(bigcfg, now=noon, findings=many)
+    check("sniff: a spoken batch is bounded (rows and characters)",
+          take_b["count"] == sn.BATCH_ROW_CAP
+          and take_b["more"] == 40 - sn.BATCH_ROW_CAP
+          and sum(len(x) for x in take_b["lines"]) + len(take_b["lines"])
+          <= sn.MAX_DELIVERY_CHARS,
+          _json.dumps({k: take_b[k] for k in ("count", "more")}))
+    long_line = sn.delivery_lines([{"severity": "high", "source": "ha",
+                                     "summary": "x" * 500}])[0]
+    check("sniff: one spoken line is bounded",
+          len(long_line) == sn.DELIVERY_LINE_CAP, str(len(long_line)))
+
+    # ---------------- I. the service SENSE leg (sweep + delivery) ---------
+    import os as _os
+    from mycore.tg import POLL_BOT_ENV
+    from mycore.service import ChatService
+    saved_wd = _os.environ.get("MYCORE_WD_CHAT")
+    saved_poll = _os.environ.get(POLL_BOT_ENV)
+    _os.environ["MYCORE_WD_CHAT"] = "777111"
+    _os.environ[POLL_BOT_ENV] = "sniff-leg-TEST-token"
+    sn.state_path().unlink(missing_ok=True)
+    sn.findings_path().unlink(missing_ok=True)
+    try:
+        clock3 = [2_000_000_000.0]                # 11:33 Beijing, no DST
+        fake3 = FakeTgTransport()
+        with tempfile.TemporaryDirectory() as td3:
+            leg_doc = {"mycore": {"sniff": {
+                "enabled": True, "pause": False, "interval_s": 60,
+                "quiet_hours": "", "digest_cap": 5,
+                # a home source WITHOUT a slot: honest never-configured and
+                # ZERO outbound calls (the leg must stay offline in tests)
+                "sources": [{"id": "ha", "kind": "home",
+                             "url": "http://ha.local:8123"}],
+                "rules": [{"id": "hot", "source": "ha", "when": "a > 1",
+                           "severity": "high", "speak": True}]}}}
+            svc3 = ChatService(Path(td3), frozenset({111}), transport=fake3,
+                               chat=lambda messages=None, tools=None, **kw:
+                               fake_response(text="pong"),
+                               now=lambda: clock3[0])
+            svc3._settings_doc = lambda: leg_doc   # hermetic settings seam
+            rows, _ = sn.upsert_finding([], source="ha", rule="hot",
+                                        severity="high",
+                                        summary="a > 1 -> a=2", trigger="a=2",
+                                        payload={"a": 2}, now=clock3[0] - 60)
+            sn.save_findings(rows)
+            svc3._sniff_check = 0.0
+            svc3._maybe_sniff()
+            check("sniff leg: one spoken batch through the cron chain",
+                  [s[0] for s in fake3.sends] == ["777111"]
+                  and "[high] ha — a > 1 -> a=2" in fake3.sends[0][1]
+                  and "1" in fake3.sends[0][1]
+                  and "SNIFF_SAY" in svc3.log.read_text()
+                  and "delivered=wd" in svc3.log.read_text(),
+                  str(fake3.sends)[:300])
+            check("sniff leg: the sweep ran and stayed offline",
+                  sn.load_state().get("last_swept") == clock3[0],
+                  str(sn.load_state().get("last_swept")))
+            svc3._sniff_check = 0.0
+            svc3._maybe_sniff()
+            check("sniff leg: a delivered finding is never spoken twice",
+                  len(fake3.sends) == 1, str(len(fake3.sends)))
+            svc3._sniff_check = clock3[0]         # evaluated just now
+            fake3.sends.clear()
+            svc3._maybe_sniff()
+            check("sniff leg: throttled to its cadence", fake3.sends == [],
+                  str(fake3.sends))
+
+            # quiet hours: a fresh finding is HELD, then flushed at 11:33+2h
+            rows2, _ = sn.upsert_finding(sn.load_findings(), source="ha",
+                                         rule="hot", severity="high",
+                                         summary="a > 1 -> a=99", trigger="a=99",
+                                         payload={"a": 99}, now=clock3[0] - 5)
+            sn.save_findings(rows2)
+            leg_doc["mycore"]["sniff"]["quiet_hours"] = "11:00-13:00"
+            svc3._sniff_check = 0.0
+            svc3._maybe_sniff()
+            check("sniff leg: quiet hours hold the batch (SNIFF_HELD logged)",
+                  fake3.sends == []
+                  and "SNIFF_HELD" in svc3.log.read_text()
+                  and "reason=quiet" in svc3.log.read_text(),
+                  svc3.log.read_text()[-200:])
+            leg_doc["mycore"]["sniff"]["quiet_hours"] = ""
+            svc3._sniff_check = 0.0
+            svc3._maybe_sniff()
+            check("sniff leg: the first non-quiet window speaks the queued batch",
+                  len(fake3.sends) == 1 and "a=99" in fake3.sends[0][1],
+                  str(fake3.sends))
+
+            # PAUSE: neither sweep nor speech, and the pending row survives
+            clock3[0] += 120
+            rows3, _ = sn.upsert_finding(sn.load_findings(), source="ha",
+                                         rule="hot", severity="high",
+                                         summary="a > 1 -> a=5", trigger="a=5",
+                                         payload={"a": 5}, now=clock3[0])
+            sn.save_findings(rows3)
+            fake3.sends.clear()
+            leg_doc["mycore"]["sniff"]["pause"] = True
+            svc3._sniff_check = 0.0
+            svc3._maybe_sniff()
+            check("sniff leg: PAUSE stops the sweep and the speech",
+                  fake3.sends == []
+                  and sn.load_state().get("last_swept") < clock3[0]
+                  and [r.get("delivered") for r in sn.load_findings()]
+                  .count(False) == 1,
+                  str(fake3.sends) + str(sn.load_state().get("last_swept")))
+            leg_doc["mycore"]["sniff"]["pause"] = False
+    finally:
+        sn.state_path().unlink(missing_ok=True)
+        sn.findings_path().unlink(missing_ok=True)
+        if saved_wd is None:
+            _os.environ.pop("MYCORE_WD_CHAT", None)
+        else:
+            _os.environ["MYCORE_WD_CHAT"] = saved_wd
+        if saved_poll is None:
+            _os.environ.pop(POLL_BOT_ENV, None)
+        else:
+            _os.environ[POLL_BOT_ENV] = saved_poll
+
+
 
 def main() -> int:
     test_model()
@@ -12728,6 +13689,7 @@ def main() -> int:
     test_checkpoint()
     test_modeltier()
     test_model_gateway()
+    test_sniff()
     test_skill_dirs_chain()
     test_loop_budget()
     test_cli_precedence()

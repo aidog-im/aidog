@@ -3,6 +3,8 @@
   "policy": "Publish manifest — deny-by-default. Every tracked file must match allow or deny; deny wins. Public placement requires Owner's case-by-case adjudication on top of this tool passing (AGENTS.md: PUBLIC-REPO GATE).",
   "allow": [
     "AGENTS.md",
+    "AGENTS.public.md",
+    "LICENSE",
     "README.md",
     "README_cn.md",
     "VERSION",
@@ -35,7 +37,17 @@
     "docs/model_access_tier.md": "internal channel/credential analysis",
     "docs/pain_points_and_migration.md": "internal pain-point history",
     "deploy/*.local": "machine-local runtime config (chat id / memory sources)",
-    "profiles/*": "per-profile runtime (own secrets.env/settings/state) — never exported"
+    "profiles/*": "per-profile runtime (own secrets.env/settings/state) — never exported",
+    "AGENTS.md": "owner decree book: private rulings, repo wiring and the publication gate rules — the public snapshot ships AGENTS.public.md as AGENTS.md instead (desensitization car 2026-10-28)",
+    "docs/handover/*": "internal handover records: owner rulings, competitive comparisons, machine wiring",
+    "tests/runs/*": "archived A/B run transcripts: owner dialogue and private persona material",
+    "deploy/check_publish.py": "gate tooling — embeds the leak signatures by design (self-excluded scanner)",
+    "deploy/export_public.py": "the only public-repo writer — embeds the leak signatures by design",
+    "deploy/pre_release_audit.py": "development-only pre-release audit — imports the two tools above and scans the development history",
+    "docs/publish_iron_rules.md": "specification of the development-side publication gate (the tools it documents are not shipped)",
+    "deploy/publish_transform.json": "desensitization rule table — states exactly what is being hidden",
+    "deploy/githooks/*": "push-blocking hooks wired to the private development remote",
+    "docs/p5/swap_gap_assessment.md": "internal migration-gap assessment: point-in-time engineering notes citing the private AGENTS.md and its line numbers; no value to a product user (ruling 2026-10-29)"
   },
   "required_deny": [
     "secrets.env",

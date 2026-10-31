@@ -38,8 +38,14 @@ SCAN_SUFFIXES = (".py", ".sh", ".js")
 INLINE_MARKER = "i18n-allow"
 
 # Directory names never scanned (runtime state, caches, vendored blobs).
+# Nested sibling repos moved into this directory (owner decree 2026-10-28) hold
+# their own CJK and upstream-brand material BY DESIGN — they are independent git
+# repos and must stay invisible to this lint exactly as .gitignore keeps them
+# out of git; without these entries the lint would walk into them.
 SKIP_DIR_NAMES = {".git", "__pycache__", "node_modules", ".venv", "venv",
-                  "data", "tmp", ".screenshots", ".voice", ".pi"}
+                  "data", "tmp", ".screenshots", ".voice", ".pi",
+                  "aidog-internal", "aidog-skills", "aidog-public",
+                  "_public_meta"}
 # Path prefixes exempt from the scan (relative, POSIX-style).
 ALLOW_PREFIXES = ("overlay/locales/", "tests/runs/", "docs/")
 # Data files named explicitly for documentation (outside SCAN_SUFFIXES today,

@@ -122,6 +122,7 @@ from . import evolution
 from . import hooks as hooks_mod
 from . import mission as mission_mod
 from . import scheduler
+from . import sniff
 from .assembly import build_system_stack, resolve_context_dirs
 from .loop import run_turn
 from .model import ChatClient
@@ -154,6 +155,7 @@ DENY_WARN_THROTTLE = 60.0              # seconds between WARN lines per chat
 MAX_POLL_ERRORS = 20                   # bounded backoff, then give up (tg.py parity)
 DEFAULT_POLL_TIMEOUT = 30              # long-poll seconds (0 in --once mode)
 REFLECT_CHECK_SEC = 60.0               # evolution cron evaluation cadence
+SNIFF_CHECK_SEC = 60.0                 # SENSE leg cadence (sweep + delivery)
 MISSION_TICK_SEC = 5.0                 # mission leg cadence (design 3.2: ~5s)
 MISSION_CATCHUP_SEC = 600.0            # leg absence worth one honest CATCHUP line
 TYPING_INTERVAL_SEC = 4.0               # TG typing heartbeat (5s Telegram TTL)
@@ -397,6 +399,7 @@ class ChatService:
         self._cron_check = 0.0          # last scheduler evaluation (clock)
         self._mission_check = 0.0       # last mission tick evaluation (clock)
         self._chan_check = 0.0          # last channel inbound poll (clock)
+        self._sniff_check = 0.0         # last SENSE sweep/delivery evaluation
         self.log = ServiceLog(self.state / LOG_NAME, now=now)
         self.lang = self._load_lang()
         # HARD token gate (tg.py): dedicated MYCORE_TG_TOKEN required here too.
@@ -491,6 +494,7 @@ class ChatService:
                 self._maybe_reflect()          # evolution cron leg (no-op when off)
                 self._maybe_fire_cron()        # scheduler leg (no-op with no due jobs)
                 self._maybe_tick_missions()    # mission leg (0.5.44; no-op without an active mission)
+                self._maybe_sniff()            # SENSE leg (SNIFF car; no-op when off/paused)
                 self._maybe_poll_channels()    # channel leg (throttled, fail-soft)
                 if once and not updates:
                     break                          # nothing pending: exit 0
@@ -1230,6 +1234,57 @@ class ChatService:
                                f"delivered={label}", f"preview={preview}")
         except Exception as e:  # noqa: BLE001 — a fire failure never kills the loop
             self.log.write("CRON_ERR", f"err={type(e).__name__}")
+
+    # ------------------------------------------------------------- SENSE ---
+    def _maybe_sniff(self) -> None:
+        """SENSE leg (SNIFF car): throttled sweep + the ONE delivery chain.
+
+        Sweep half: `mycore.sniff.tick` with the settings document this leg
+        just read (interval / disabled / PAUSE gates live there; the leg
+        itself returns before both halves while the board is off or paused,
+        so a paused board never sweeps AND never speaks).
+
+        Speak half: findings are selected by quiet hours + digest_cap + the
+        per-rule `speak` flag inside `sniff.delivery_take`, which marks them
+        delivered and persists BEFORE this send (cron/mission mark-first
+        philosophy — a crash loses one batch, never duplicates one), then
+        the text goes through the SAME fallback chain the cron leg owns
+        (origin -> route:target -> MYCORE_WD_CHAT -> log-only; a finding
+        carries no chat origin, so it lands on the fallback chat or the log).
+        One fire failure never kills the poll loop."""
+        nowt = self._now()
+        if nowt - self._sniff_check < SNIFF_CHECK_SEC:
+            return
+        self._sniff_check = nowt
+        try:
+            mc = self._settings_doc().get("mycore")
+            raw = mc.get("sniff") if isinstance(mc, dict) else None
+            if not isinstance(raw, dict):
+                return                     # absent partition = nothing to do
+            cfg = sniff.parse_config(raw, strict_rules=False)
+            if not cfg["enabled"] or cfg["pause"]:
+                return                     # PAUSE: no sweep and nothing spoken
+            report = sniff.tick(now=nowt, block=raw)
+            if report.get("error"):
+                self.log.write("SNIFF_ERR", "phase=sweep",
+                               f"err={str(report['error'])[:120]}")
+            take = sniff.delivery_take(cfg, now=nowt)
+            if take.get("held"):
+                self.log.write("SNIFF_HELD", f"reason={take['held']}",
+                               f"pending={take.get('more', 0)}",
+                               f"err={take.get('error', '')[:80]}")
+                return
+            if not take["count"]:
+                return
+            parts = [self._t("sniff.say.head", n=take["count"]),
+                     *take["lines"]]
+            if take["more"]:
+                parts.append(self._t("sniff.say.more", n=take["more"]))
+            label = self._origin_deliver(None, _scrub_paths("\n".join(parts)))
+            self.log.write("SNIFF_SAY", f"n={take['count']}",
+                           f"more={take['more']}", f"delivered={label}")
+        except Exception as e:  # noqa: BLE001 — a fire failure never kills the loop
+            self.log.write("SNIFF_ERR", f"err={type(e).__name__}")
 
     # ------------------------------------------------------------- missions --
     def _mission_deliver(self, mission_rec: dict, text: str) -> str:

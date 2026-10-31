@@ -1348,3 +1348,88 @@ a.comm-title:hover { text-decoration: underline; }
 [data-slot]:not([data-editing="1"]):not(.cred-presence) .cred-more-wrap {
   margin-left: auto;
 }
+
+/* ------------------------------------------------------------- SNIFF ---- */
+/* SENSE board (SNIFF car): rows, honest status badges, the two composer
+   forms. The board is read-only — these styles describe state, they never
+   imply an action the server does not offer. */
+.sniff-note.ok { color: var(--ok); }
+.sniff-note.err { color: var(--red); }
+
+.sniff-row {
+  display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline;
+  padding: 9px 0; border-top: 1px solid var(--line-solid);
+}
+.sniff-row:first-child { border-top: 0; padding-top: 2px; }
+.sniff-row-main {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  min-width: 0; flex: 1 1 240px;
+}
+.sniff-row-sub {
+  flex: 1 1 100%; font-family: var(--mono); font-size: 12px;
+  color: var(--muted); overflow-wrap: anywhere;
+}
+.sniff-row-acts { display: flex; gap: 6px; margin-left: auto; }
+.sniff-row-err .sniff-meta { color: var(--red); }
+.sniff-id { font-family: var(--mono); font-size: 13px; font-weight: 650; color: var(--text); }
+.sniff-kind {
+  font-size: 11px; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--muted);
+}
+.sniff-meta { font-size: 12px; color: var(--muted); }
+.sniff-err {
+  flex: 1 1 100%; font-size: 12px; color: var(--red);
+  overflow-wrap: anywhere;
+}
+.sniff-empty { font-size: 13px; color: var(--muted); font-style: italic; padding: 6px 0; }
+.sniff-when code {
+  font-family: var(--mono); font-size: 12px; color: var(--blue-ink);
+  background: var(--blue-wash); padding: 1px 6px; border-radius: 4px;
+}
+.sniff-speak { font-size: 11px; color: var(--blue-ink); }
+.sniff-sum { font-weight: 600; color: var(--text); }
+.sniff-acked { font-size: 12px; color: var(--ok); }
+
+/* three-step onboarding strip: expanded while the board is empty, one line
+   once a source exists; the header click is a pure local toggle */
+.sniff-howto {
+  border: 1px solid var(--line); border-radius: 10px;
+  background: var(--blue-wash); margin-bottom: 12px; overflow: hidden;
+}
+.sniff-howto-head {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 8px 10px; border: 0; background: none; cursor: pointer;
+  font: inherit; text-align: left; color: var(--text);
+}
+.sniff-howto-title {
+  font-size: 11px; font-weight: 700; letter-spacing: .08em;
+  color: var(--blue-ink); text-transform: uppercase; white-space: nowrap;
+}
+.sniff-howto-line { font-size: 12px; color: var(--muted); }
+.sniff-howto-caret { margin-left: auto; color: var(--muted); font-size: 11px; }
+.sniff-howto-caret::after { content: "▾"; }
+.sniff-howto.is-open .sniff-howto-caret::after { content: "▴"; }
+.sniff-howto-steps {
+  margin: 0; padding: 0 12px 10px 30px; display: none;
+  font-size: 12.5px; color: var(--text); line-height: 1.6;
+}
+.sniff-howto.is-open .sniff-howto-steps { display: block; }
+.sniff-howto.is-open .sniff-howto-line { display: none; }
+
+.sniff-badge {
+  font-size: 11px; letter-spacing: .05em; text-transform: uppercase;
+  padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line);
+  color: var(--muted); white-space: nowrap;
+}
+.sniff-badge.reachable { color: var(--ok); border-color: rgba(10, 122, 82, .4); }
+.sniff-badge.detached { border-style: dashed; }   /* mcp: declared, not attached */
+.sniff-badge.stale { color: var(--amber); border-color: rgba(160, 90, 4, .4); }
+.sniff-badge.error { color: var(--red); border-color: rgba(208, 42, 68, .4); }
+.sniff-badge.sev-info { color: var(--blue-ink); border-color: var(--blue-dim); }
+.sniff-badge.sev-warn { color: var(--amber); border-color: rgba(160, 90, 4, .4); }
+.sniff-badge.sev-high { color: var(--red); border-color: rgba(208, 42, 68, .45); }
+
+.sniff-add { border-top: 1px dashed var(--line); margin-top: 10px; padding-top: 10px; }
+.sniff-add[hidden] { display: none; }
+.sniff-ro { font-family: var(--mono); font-size: 13px; color: var(--text); }
+.btn.tiny { font-size: 11px; padding: 2px 8px; border-radius: 5px; }

@@ -1,341 +1,452 @@
-# Feature spec — 守夜任务（mission / autonomous ops）
+# Feature spec — night-watch missions (mission / autonomous ops)
 
-Status: **implemented**（2026-10-26，随 v0.5.44 发布车 1 最小闭环；同日
-v0.5.45 车 2「编排与看板」增量落地，见 §7；同日 v0.5.46 车 3「守夜加固」
-增量落地，见 §8）。
-设计锚点：`docs/design/autonomous_ops_design.md` §3（操作流）与 §5 车 1/
-车 2 验收闸。本页是第 32 份能力文档，覆盖 mission 的生命周期、三档汇报、
-预算护栏、API/设置面与红线关系。
+Status: **implemented** (2026-10-26, shipped with the v0.5.44 release train 1
+minimal closed loop; the same day the v0.5.45 train 2 "orchestration and
+board" increments landed, see §7; the same day the v0.5.46 train 3
+"night-watch hardening" increments landed, see §8).
+Design anchors: `docs/design/autonomous_ops_design.md` §3 (operation flow)
+and §5 train 1 / train 2 acceptance gates. This page is the 32nd capability
+document, covering the mission lifecycle, the three reporting tiers, the
+budget guardrails, the API/settings surface, and the red-line relations.
 
-**边界**：车 1 = 最小闭环（立标 → 串行子任务逐分片执行 → 三档汇报 → 完成/
-封存）；车 2 = 编排与看板（里程碑拆解、delegate 并行、`degraded` **入边**、
-预算可配化与固化、`GET ?id=` 详情、控制台看板 + 只读编排视图，§7）；
-**车 3 = 守夜加固**（`paused_approve` 入边与 web3 审批门联动、watchdog
-心跳告警、`mission_tick` hook、静默期与最小间隔、A 面三约束，§8）。
-没有通道也永不停摆：汇报
-四级回退的最后一级是「仅写日志」。
+**Scope**: train 1 = minimal closed loop (set the goal → serial subtasks
+executed slice by slice → three-tier reporting → done/sealed); train 2 =
+orchestration and board (milestone decomposition, delegate parallelism,
+`degraded` **inbound edge**, configurable and frozen budgets, `GET ?id=`
+details, console board + read-only orchestration view, §7);
+**train 3 = night-watch hardening** (`paused_approve` inbound edge wired to
+the web3 approval gate, watchdog heartbeat alerts, `mission_tick` hook, quiet
+hours and minimum interval, the three side-A constraints, §8).
+No channel and never stalled: the last level of the four-level report
+delivery fallback is "log only".
 
-Companion pages: [capabilities.md](capabilities.md)（能力目录契约）、
-[natural_language_cron.md](natural_language_cron.md)（同源的定时腿与投递回退）、
-[evolution_loop.md](evolution_loop.md)（同级的服务腿）、
-[console_chat.md](console_chat.md)（分片执行复用的 run_turn）、
-[event_hooks.md](event_hooks.md)（含车 3 新增的 `mission_tick` 事件）、
-[frontend_coverage.md](frontend_coverage.md)（控制台设置面总矩阵）。
+Companion pages: [capabilities.md](capabilities.md) (capability catalog
+contract), [natural_language_cron.md](natural_language_cron.md) (the
+same-origin timer leg and delivery fallback),
+[evolution_loop.md](evolution_loop.md) (the sibling service leg),
+[console_chat.md](console_chat.md) (the run_turn reused by slice execution),
+[event_hooks.md](event_hooks.md) (including the train 3 `mission_tick`
+event), [frontend_coverage.md](frontend_coverage.md) (the console settings
+surface master matrix).
 
-## 1. 生命周期（五态状态机）
+## 1. Lifecycle (five-state state machine)
 
-Registry：`<state>/missions.json`（原子写 tmp + `os.replace`，历史 cap 50，
-**同时至多一个 active**）；事件流：`<state>/mission_events.jsonl`
-（append-only，kind ∈ `state` / `slice` / `report` / `sealed`）。
+Registry: `<state>/missions.json` (atomic write via tmp + `os.replace`,
+history capped at 50, **at most one active at a time**); event stream:
+`<state>/mission_events.jsonl` (append-only, kind ∈ `state` / `slice` /
+`report` / `sealed`).
 
 ```
-planned → running ⇄ paused_user          （控制台暂停/恢复）
-             ├→ done                      （全部子任务完成或模型宣告完成）
-             ├→ degraded ⇄ running        （GAP 入边；下一子项启动/UNBLOCK
-             │                             回 running——车 2 开）
-             └→ sealed                    （证据性封存：停止、预算触顶）
-running → paused_approve ⇄ running        （web3 子项下单待批：该子项
-                                            awaiting_approval、其余子项继续；
-                                            审批清空自动回 running，车 3 开，§8）
+planned → running ⇄ paused_user          (console pause/resume)
+             ├→ done                      (all subtasks done, or the model declares done)
+             ├→ degraded ⇄ running        (GAP inbound edge; next subtask start / UNBLOCK
+             │                             returns to running — train 2 on)
+             └→ sealed                    (evidence-backed seal: stop, budget ceiling hit)
+running → paused_approve ⇄ running        (web3 subtask order awaiting approval: that subtask
+                                            is awaiting_approval, the rest keep running;
+                                            clearing approval auto-returns to running, train 3 on, §8)
 ```
 
-- `done` 与 `sealed` 是**唯二终态**；`sealed` 必须携带 evidence（至少一条），
-  永不空封。
-- 合法边之外一律 409（如 `paused_user → done` 非法：只能 resume 后由执行器
-  完成，或直接 stop 封存）。
-- `planned` 是 create 落点，控制台 start 立即推进到 `running`；执行器 tick
-  里还有一道防御性 promote。
-- **pause 允许的起点是 `running | degraded`**（车 2 放宽），resume 只从
-  `paused_user`；degraded 入边语义详见 §7；**`paused_approve` 态下
-  pause/resume 恒 409**（detail 报 allowed states，车 3，E2E L6）。
+- `done` and `sealed` are the **only two terminal states**; `sealed` must
+  carry evidence (at least one entry) and is never sealed empty.
+- Anything outside the legal edges returns 409 (e.g. `paused_user → done` is
+  illegal: it can only finish via the executor after a resume, or be stopped
+  and sealed directly).
+- `planned` is where create lands; a console start immediately advances to
+  `running`; the executor tick carries one more defensive promote.
+- **pause is allowed from `running | degraded`** (relaxed in train 2),
+  resume only from `paused_user`; the degraded inbound edge is detailed in
+  §7; **under `paused_approve`, pause/resume always return 409** (detail
+  reports the allowed states, train 3, E2E L6).
 
-## 2. 分片执行（守夜循环）
+## 2. Slice execution (the night-watch loop)
 
-服务新腿 `_maybe_tick_missions`（`mycore/service.py`，与 cron 腿并列，
-~5 s 节流）：
+A new service leg `_maybe_tick_missions` (`mycore/service.py`, sibling to
+the cron leg, ~5 s throttle):
 
-1. **先落 mark 再执行**：分片计数与 tick 戳先持久化，崩溃最多丢一次推进，
-   永不重复执行（cron 腿同款哲学）。
-2. **一分片 = 一次 `run_turn`**（`slice_iters` 默认 25）：分片 prompt 只带
-   目标 + 当前子任务 + 已登记 gaps + 能力 manifest + 方法穷举清单——
-   **不带全量历史**（上下文预算规则）。
-3. **计划片 → 里程碑 + 串行队列**：模型按 `MILESTONE:`/`SUBTASK:` 行拆解
-   （车 2 结构化 plan：无 MILESTONE = 单里程碑桶）；无标记则回退单任务 =
-   目标本身；计划片忽略 `MISSION DONE`。
-4. **断点续跑**：进度在 registry + checkpoint，不依赖内存；服务重启后按
-   `last_tick` 判定 catch-up（>600 s 记 `MISSION_CATCHUP` 一行）。
-5. 分片产出按标记协议折入状态机，事件流记录 `slice`（n/mode/stop/预览，
-   预览经出口 scrub）。
+1. **Persist the mark before executing**: slice counters and the tick
+   timestamp are persisted first, so a crash loses at most one advancement
+   and never re-executes (the same philosophy as the cron leg).
+2. **One slice = one `run_turn`** (`slice_iters` defaults to 25): the slice
+   prompt carries only the goal + current subtask + registered gaps +
+   capability manifest + method-exhaustion checklist — **never the full
+   history** (context budget rule).
+3. **Plan slice → milestones + serial queue**: the model decomposes on
+   `MILESTONE:`/`SUBTASK:` lines (train 2 structured plan: no MILESTONE =
+   single-milestone bucket); with no markers it falls back to a single task
+   = the goal itself; plan slices ignore `MISSION DONE`.
+4. **Resumable checkpoints**: progress lives in the registry + checkpoint,
+   never in memory; after a service restart, catch-up is decided by
+   `last_tick` (>600 s logs one `MISSION_CATCHUP` line).
+5. Slice output is folded into the state machine per the marker protocol,
+   and the event stream records `slice` (n/mode/stop/preview, with the
+   preview passing the exit scrub).
 
-**模型标记协议**（ASCII、行首、容忍 `- ` 项目符号，fail-soft —— 缺标记只是
-子项继续在飞，由预算护栏兜底）：
+**Model marker protocol** (ASCII, line-leading, tolerates `- ` bullets,
+fail-soft — a missing marker simply leaves the subtask in flight, with the
+budget guardrails as the backstop):
 
-| 标记 | 作用 |
+| Marker | Effect |
 |---|---|
-| `MILESTONE: <title>` | 计划片分组标题：其后的 `SUBTASK:` 归入该里程碑；首个里程碑之前的散子任务进默认 **Plan** 桶（车 2） |
-| `SUBTASK: <text>` | 计划片拆出一个串行子任务 |
-| `TASK DONE` / `MISSION DONE` | 当前子项完成 / 整个目标达成 |
-| `GAP: <text>` | 声明降级路径（触发 degraded 汇报） |
-| `METHOD: <text>` / `TRIED: <text>` | 方法穷举清单加条目 / 打标 |
-| `BLOCKER: <text>` | 卡点（all/milestones 档汇报，免节流保护之外） |
-| `NEED DECISION: <text>` | 仅 PAID/AUTHORIZED/DECISION 项：该子项挂起，**其余子项立即继续** |
-| `UNBLOCK: <tN>` | 解除挂起子项 |
+| `MILESTONE: <title>` | Plan-slice grouping header: following `SUBTASK:` lines belong to that milestone; stray subtasks before the first milestone go into the default **Plan** bucket (train 2) |
+| `SUBTASK: <text>` | The plan slice breaks out one serial subtask |
+| `TASK DONE` / `MISSION DONE` | Current subtask done / the whole goal achieved |
+| `GAP: <text>` | Declares a degraded path (triggers a degraded report) |
+| `METHOD: <text>` / `TRIED: <text>` | Adds an entry to / marks an item on the method-exhaustion checklist |
+| `BLOCKER: <text>` | A blocker (reported on the all/milestones tiers, beyond the no-throttle protection) |
+| `NEED DECISION: <text>` | PAID/AUTHORIZED/DECISION items only: that subtask suspends, **all other subtasks continue immediately** |
+| `UNBLOCK: <tN>` | Un-suspends a suspended subtask |
 
-### 意识层（宪法 + 提示层，双层）
+### Awareness layer (constitution + prompt layer, two layers)
 
-- **宪法**：`overlay/constitution/SOUL.md` 新增
-  `## Mission conduct (autonomous ops)` 六条款 C0-C5（穷举方法 / 中途不弃 /
-  中途不问 / 诚实汇报含降级 / 能力诚实衔接硬律 §9 / 升级面窄不停车），位于
-  Hard constitution 与 Stance 之间，9 条硬律一字未动。
-- **分片 prompt** 显式写入「你在本任务中无法获得任何回答、批准或反馈——
-  没有可问之人，不提问、不等待」（E2E 对**真实请求体**逐条断言）。
-- **层次不变**：宪法恒在 system 栈最前；mission 目标文本只进 user 层
-  （E2E 断言目标永不出现在 system 消息里）。
+- **Constitution**: `overlay/constitution/SOUL.md` gains a new
+  `## Mission conduct (autonomous ops)` section with six clauses C0-C5
+  (exhaust methods / never abandon midway / never ask midway / honest
+  reporting including degradation / the honest capability hand-off hard rule
+  §9 / a narrow escalation surface without stopping), placed between the
+  Hard constitution and the Stance; the 9 hard rules are untouched, word for
+  word.
+- The **slice prompt** explicitly states "in this task you cannot obtain any
+  answer, approval, or feedback — there is no one to ask; do not ask, do not
+  wait" (the E2E asserts this against the **real request body**, item by
+  item).
+- **Layering is unchanged**: the constitution always sits at the very front
+  of the system stack; mission goal text only enters the user layer (the E2E
+  asserts the goal never appears in a system message).
 
-## 3. 三档汇报（settings `mission.reporting`）
+## 3. Three-tier reporting (settings `mission.reporting`)
 
-| 档 | 触发（车 1 映射） | 节流（min_interval） |
+| Tier | Trigger (train 1 mapping) | Throttle (min_interval) |
 |---|---|---|
-| `all` | 每个子任务完成（`task_done`）+ 计划就绪 + 降级/卡点/异常 | 120 s，窗口内**合并**后一次发出 |
-| `milestones`（**默认**） | 计划就绪 `plan_ready`（车 2 起 plan 为多里程碑结构；里程碑完成不单发档，子任务完成仅 `all` 档）+ 降级/卡点/异常 | 900 s |
-| `final` | 仅终态（`done`/`sealed`）与需裁决 | 不限 |
+| `all` | every subtask completion (`task_done`) + plan ready + degradation/blocker/anomaly | 120 s, **merged** into a single send within the window |
+| `milestones` (**default**) | plan ready `plan_ready` (from train 2 on, the plan is a multi-milestone structure; milestone completion does not send on its own, subtask completion only on the `all` tier) + degradation/blocker/anomaly | 900 s |
+| `final` | terminal states only (`done`/`sealed`) and needs-a-decision | unlimited |
 
-- `decision` 与 `final` 事件**旁路节流**（永不被吞）；档外事件直接
-  suppressed，不进合并队列。
-- **消息格式**（复用谏言协议）：`[MISSION <id>] LEVEL 事实 → 影响 → 下一步`；
-  终报固定四段：**完成 / 降级 gaps / 未竟 / 建议**（sealed 的「未竟」段列
-  evidence）。
-- **投递四级回退**（与 cron 完全同一条链，`_origin_deliver` 唯一实现）：
-  `origin(route:target 或 chat id)` → env/槽 `MYCORE_WD_CHAT` → **仅写日志**
-  （`delivered=none`）。mission 报告不发 hook（观察事件 `mission_tick` 车 3 已增，§8）；
-  控制台 `stop` 的终报**不发 bot**（响应当场带回）。
-- **凭据零回显**：所有出站报告经 `mycore.mission.scrub()` 单出口——
-  token/bearer/`sk-` 形状与绝对机器路径替换为占位符（E2E 哨兵扫描零命中）。
+- `decision` and `final` events **bypass the throttle** (never swallowed);
+  off-tier events are suppressed outright and never enter the merge queue.
+- **Message format** (reusing the counsel protocol): `[MISSION <id>] LEVEL
+  fact → impact → next step`; the final report is fixed at four sections:
+  **Done / Degraded gaps / Not finished / Suggestions** (for a sealed
+  mission the "Not finished" section lists the evidence).
+- **Four-level delivery fallback** (exactly the same chain as cron, with
+  `_origin_deliver` as the single implementation): `origin(route:target or
+  chat id)` → env/slot `MYCORE_WD_CHAT` → **log only** (`delivered=none`).
+  Mission reports send no hooks (the observation event `mission_tick` was
+  added in train 3, §8); a console `stop` final report **is not sent to the
+  bot** (the response carries it back inline).
+- **Zero credential echo**: all outbound reports pass through the single
+  exit `mycore.mission.scrub()` — token/bearer/`sk-` shapes and absolute
+  machine paths are replaced with placeholders (E2E sentinel scans find zero
+  hits).
 
-## 4. 预算护栏（任一触顶 → 自动封存 + 汇报，永不静默）
+## 4. Budget guardrails (any one ceiling hit → automatic seal + report, never silent)
 
-| 护栏 | 默认 | 范围 |
+| Guardrail | Default | Range |
 |---|---|---|
 | `max_slices` | 40 | 1..10000 |
-| `max_wall_hours` | 24 | 0.1..8760（≤1 位小数） |
-| `max_daily_model_calls` | 200（按北京日历滚动） | 1..100000 |
+| `max_wall_hours` | 24 | 0.1..8760 (≤1 decimal place) |
+| `max_daily_model_calls` | 200 (rolling on the Beijing calendar day) | 1..100000 |
 
-- **settings 六键（车 2 可配化 + 车 3 两键）**：settings `mission` 块 =
+- **Six settings keys (train 2 configurability + train 3's two keys)**: the
+  settings `mission` block =
   `{reporting, max_slices, max_wall_hours, max_daily_model_calls,
-  quiet_hours, min_interval}`，
-  `mission.DEFAULT_SETTINGS` 常驻、`/api/settings` 正常读写，范围校验同源
-  `mission.validate_mission_settings` / `mission.BUDGET_BOUNDS`。
-- **start 可带 `budget{...}` 覆盖**：缺省取 settings 当时值，body 覆盖后做
-  同源范围校验；**解析后的值固化进任务记录**——启动后再改 settings 不影响
-  已启任务（E2E L5 对 30/2 两个冻结值分别断言）。
+  quiet_hours, min_interval}`;
+  `mission.DEFAULT_SETTINGS` is resident, `/api/settings` reads and writes it
+  normally, and range validation shares the source
+  `mission.validate_mission_settings` / `mission.BUDGET_BOUNDS`.
+- **start may carry a `budget{...}` override**: by default it takes the
+  settings value at that moment; after the body override it passes the same
+  source range validation; **the parsed values are frozen into the mission
+  record** — changing settings after launch does not affect an
+  already-started mission (E2E L5 asserts both frozen values 30 and 2
+  individually).
 
-触顶时：封存先落盘（evidence 一行
-`budget guard <guard> reached (<used>/<limit>)`）→ 事件流 `sealed` 记 guard
-→ 免节流终报发出。sealed 之后**永不再跑分片**。
+On hitting a ceiling: the seal is persisted first (one evidence line
+`budget guard <guard> reached (<used>/<limit>)`) → the event stream `sealed`
+records the guard → the no-throttle final report goes out. After sealed,
+**slices never run again**.
 
-## 5. API 与设置面
+## 5. API and settings surface
 
-| 端点 | 认证 | 契约 |
+| Endpoint | Auth | Contract |
 |---|---|---|
-| `GET /api/mission` | loopback，无 auth | `{reporting, active: null\|row, recent[≤10], count}`；损坏/缺失 → 空结构，绝不 500；**无 id 行为即旧列表 4 键形状**（前端兼容，E2E 断言） |
-| `GET /api/mission?id=<mid>` | loopback，无 auth | `{mission: {row, plan, events[≤20 升序], budget, budget_used}}`；row 带车 3 字段 `deadline/redlines/deliverable\|null` + `approvals:[{task, plans}]`，awaiting 子项行带 `plans`（审批深链）；未知 id → 404；车 2 前的旧 mission → `plan: null`（看板诚实显示“尚无计划”，车 2） |
-| `POST /api/mission` | `Bearer WEB_TOKEN` | `{action: start\|stop\|pause\|resume, goal?, id?, reporting?, budget?, deadline?, redlines?, deliverable?}` → 200 行；400 校验 · 401 · 404 未知 id · 409 冲突（已有 active 再 start / 历史满 50 / 状态机不合法），409 带 `mission_id` 或原因；pause 接受 `running \| degraded`（车 2）；**`paused_approve` 下 pause/resume 恒 409 并在 detail 报 allowed states**（车 3）；三约束校验单一语法在 `mission.create`，非法 400 detail 以字段名开头 |
-| `POST /api/settings {"mission": {...}}` | `Bearer WEB_TOKEN` | `mission.reporting ∈ all\|milestones\|final`（默认 `milestones`）+ 车 3 两键：`quiet_hours`（`""` 或 `HH:MM-HH:MM`，起≠止、可跨午夜）+ `min_interval`（0..86400，0=档默认），未知键/非法值 400 点名键；与写验证同源 `mission.validate_mission_settings` |
-| `GET /api/capabilities` → `mission` | 无 auth | `{active, running, total, reporting}` 摘要——目标文本不上无认证目录 |
+| `GET /api/mission` | loopback, no auth | `{reporting, active: null\|row, recent[≤10], count}`; corrupted/missing → empty structure, never 500; **no-id behavior keeps the old 4-key list shape** (frontend compatibility, E2E asserted) |
+| `GET /api/mission?id=<mid>` | loopback, no auth | `{mission: {row, plan, events[≤20 ascending], budget, budget_used}}`; the row carries train 3 fields `deadline/redlines/deliverable\|null` + `approvals:[{task, plans}]`, awaiting subtask rows carry `plans` (approval deep links); unknown id → 404; pre-train-2 legacy missions → `plan: null` (the board honestly shows "no plan yet", train 2) |
+| `POST /api/mission` | `Bearer WEB_TOKEN` | `{action: start\|stop\|pause\|resume, goal?, id?, reporting?, budget?, deadline?, redlines?, deliverable?}` → 200 row; 400 validation · 401 · 404 unknown id · 409 conflict (start while one is already active / history at 50 / illegal state-machine transition), 409 carries `mission_id` or the reason; pause accepts `running \| degraded` (train 2); **under `paused_approve`, pause/resume always return 409 and detail reports the allowed states** (train 3); the three constraints are validated by a single grammar in `mission.create`, an illegal 400 detail starts with the field name |
+| `POST /api/settings {"mission": {...}}` | `Bearer WEB_TOKEN` | `mission.reporting ∈ all\|milestones\|final` (default `milestones`) + train 3's two keys: `quiet_hours` (`""` or `HH:MM-HH:MM`, start ≠ end, may cross midnight) + `min_interval` (0..86400, 0 = tier default), unknown key / illegal value → 400 naming the key; validation shares the source with writes, `mission.validate_mission_settings` |
+| `GET /api/capabilities` → `mission` | no auth | `{active, running, total, reporting}` summary — goal text never appears on the unauthenticated catalog |
 
-- start 语义：`goal` ≤4000 字符非空；`reporting` 参数**只覆盖该任务的档**，
-  不写全局；F1 能力 manifest 在 start 时冻结（工具名 + 凭据键名 + **存在
-  bool**、web3 `order_gate`/`withdrawals:false`/`paid_actions:false`、
-  `mcp: disabled`）。
-- 行字段走 `public_row` 固定白名单：id/goal/state/reporting/时间戳/
-  progress/slices/daily_calls/gaps/blocked/budget/evidence——**无 origin、
-  无 manifest、无内部路径、无凭据**；`goal` 是用户输入，原样回显。
-- 任务看板卡（Lane F 设置面）读写以上同一对端点；detail 与看板同享
-  `public_row` 白名单纪律（E2E 对 detail payload 做哨兵扫描）。
+- start semantics: `goal` is ≤4000 characters and non-empty; the
+  `reporting` parameter **only overrides that mission's tier**, never the
+  global setting; the F1 capability manifest is frozen at start (tool names
+  + credential key names + **existence booleans**, web3
+  `order_gate`/`withdrawals:false`/`paid_actions:false`, `mcp: disabled`).
+- Row fields go through the fixed `public_row` allow-list:
+  id/goal/state/reporting/timestamps/progress/slices/daily_calls/gaps/
+  blocked/budget/evidence — **no origin, no manifest, no internal paths, no
+  credentials**; `goal` is user input and is echoed verbatim.
+- The mission board card (Lane F settings surface) reads and writes the same
+  pair of endpoints above; detail and board share the `public_row`
+  allow-list discipline (the E2E sentinel-scans the detail payload).
 
-## 6. 红线关系（设计书 §6 精简）
+## 6. Red-line relations (condensed from design doc §6)
 
-- **提现/链上转账零代码**：mission 不新增任何资金出向工具——既有源码断言
-  继续生效。
-- **web3 审批门 fail-closed**：mission 仍只推进到 prepare/plan；下单类子项
-  挂起进 `paused_approve`（0.5.46 车 3 已接入，E2E 红线断言 **execute 无
-  审批仍被拒**），审批入口与 Bearer 闸形态不变。
-- **社区 MCP 永久禁用**：manifest 生成期即写死 `mcp: disabled`，穷举方法
-  不等于找野路子（C3：缺能力 = 降级登记）。
-- **写盘范围**：分片复用 `execute_code` allowed-roots 与 checkpoint 写前
-  快照；破坏性动作是声明，不是执行。
-- **永久免费铁律**：能力面无任何付费工具（manifest `paid_actions:false`）。
-- **永不静默**：三护栏触顶、封存、需裁决都必须有汇报（最低到日志级）。
+- **Zero withdrawal / on-chain transfer code**: mission adds no
+  funds-outbound tool — the existing source assertions remain in force.
+- **The web3 approval gate is fail-closed**: mission still only advances to
+  prepare/plan; order-type subtasks suspend into `paused_approve` (wired in
+  0.5.46 train 3; the E2E red-line assertion still **rejects execute without
+  approval**), and the approval entry point and Bearer gate shape are
+  unchanged.
+- **Community MCP is permanently disabled**: `mcp: disabled` is hard-coded
+  at manifest generation time; exhausting methods does not mean finding back
+  doors (C3: a missing capability = a registered degradation).
+- **Disk write scope**: slices reuse `execute_code` allowed-roots and the
+  pre-write checkpoint snapshot; destructive actions are declarations, not
+  executions.
+- **Permanently free iron rule**: the capability surface has no paid tool
+  (manifest `paid_actions:false`).
+- **Never silent**: hitting any of the three guardrails, sealing, and
+  needing a decision must all produce a report (down to log level at
+  minimum).
 
-## 7. 车 2 增量（0.5.45）：编排与看板
+## 7. Train 2 increments (0.5.45): orchestration and board
 
-**（1）里程碑拆解（plan 结构化）**：计划片接受 `MILESTONE:` 分组行，
-registry 落 `plan = {milestones: [{id, title, subtasks: [tN…]}],
-generated_at}`，扁平 `tasks[]` 仍是状态唯一真值（detail 投影时把
-`in_progress` 映射为看板词 `running`）；里程碑前的散子任务进 **Plan** 桶，
-无 MILESTONE 的旧协议退化为单里程碑（车 1 兼容）。`METHOD:`/`TRIED:`
-同片折入方法穷举清单，detail 里以 `methods[{text, marked}]` + `blockers[]`
-回读。
+**(1) Milestone decomposition (structured plan)**: plan slices accept
+`MILESTONE:` grouping lines; the registry stores
+`plan = {milestones: [{id, title, subtasks: [tN…]}], generated_at}`, while
+the flat `tasks[]` remains the single source of truth for state (the detail
+projection maps `in_progress` to the board word `running`); stray subtasks
+before any milestone go into the **Plan** bucket, and the old protocol
+without MILESTONE degrades to a single milestone (train 1 compatible).
+`METHOD:`/`TRIED:` in the same slice fold into the method-exhaustion
+checklist and are read back in detail as `methods[{text, marked}]` +
+`blockers[]`.
 
-**（2）delegate 并行**：mission 分片保留全工具集（含 `delegate` ≤3、隔离
-上下文、递归护栏——`mycore/subagent.py` 不动）；`run_turn` 把本片 chat
-绑定进 registry，一个分片可发起 ≥2 次 delegate 调用推进多个子任务；
-slice 事件新增 `delegate` 计数字段（`mission.delegate_count(tool_log)`），
-看板据此展示并行分发而无需解析预览。
+**(2) Delegate parallelism**: mission slices keep the full toolset
+(including `delegate` ≤3, isolated context, recursion guardrails —
+`mycore/subagent.py` untouched); `run_turn` binds this slice's chat into the
+registry, so one slice can issue ≥2 delegate calls to advance multiple
+subtasks; slice events gain a `delegate` counter field
+(`mission.delegate_count(tool_log)`), which the board uses to display
+parallel dispatch without parsing previews.
 
-**（3）degraded 入边（车 1 只留了出边）**：`running → degraded` 当前子项
-未完成时出现新 `GAP:`；**单点降级不停摆（F4）**——队列与执行腿照走，下一
-子项启动（`set_current`）或 `UNBLOCK:` 即 `degraded → running`，degraded
-子项保留为“记录”不回炉；pause 自 degraded 合法（→ `paused_user`），
-resume 后 gaps 原样保留；`degraded` 态分片照常执行。
+**(3) The degraded inbound edge (train 1 only kept the outbound edge)**:
+`running → degraded` occurs when a new `GAP:` appears while the current
+subtask is unfinished; **a single-point degradation does not stall (F4)** —
+the queue and the execution leg proceed as usual; the next subtask start
+(`set_current`) or an `UNBLOCK:` immediately returns `degraded → running`,
+and the degraded subtask stays on record without being reworked; pause from
+degraded is legal (→ `paused_user`), and after resume the gaps are preserved
+as-is; slices execute normally in the `degraded` state.
 
-**（4）预算固化**：settings 四键 + start `budget{...}` 覆盖（§4）；解析
-值冻结进任务记录，之后改 settings 不再影响已启任务。
+**(4) Budget freezing**: the four settings keys + a start `budget{...}`
+override (§4); parsed values are frozen into the mission record, after which
+changing settings no longer affects already-started missions.
 
-**（5）看板 + 编排视图（控制台，Lane I）**：Missions 卡的 recent/active 行
-可点开详情区（里程碑分组、子任务五态符号、方法穷举 details、事件尾窗、
-预算占用与警示、状态徽章含 degraded）；missionCard 新增预算三输入
-（start 时只提交填写项，留空 = 取 settings）；新增只读 `#orchCard` 编排卡
-（工具/渠道/web3/槽位/skills 五源汇总 + 深链到现有控件，**不建第二套开
-关**，数据源 = `/api/capabilities` 等既有端点）；locales 新增
-`mission.*`/`orch.*` 32 键 → packs **594/594**（车 3 再 +20 → **614/614**，
-见 §8（6））。
+**(5) Board + orchestration view (console, Lane I)**: the recent/active rows
+of the Missions card open a detail area (milestone groupings, five-state
+subtask symbols, method-exhaustion details, event tail window, budget usage
+and warnings, state badges including degraded); missionCard gains three
+budget inputs (at start only the filled-in fields are submitted, left blank
+= take settings); a new read-only `#orchCard` orchestration card
+(five-source summary of tools/channels/web3/slots/skills + deep links to
+existing controls, **no second set of switches**, data source =
+`/api/capabilities` and other existing endpoints); locales gain
+`mission.*`/`orch.*` 32 keys → packs **594/594** (train 3 adds 20 more →
+**614/614**, see §8 (6)).
 
-**（6）车 2 验收闸证据**：`tmp/e2e_mission_orch.py` 四态 E2E（§9）——
-拆解 → 并行 → 降级 → 封存全链真跑。
+**(6) Train 2 acceptance gate evidence**: `tmp/e2e_mission_orch.py`
+four-state E2E (§9) — decomposition → parallelism → degradation → sealing,
+the full chain runs for real.
 
-## 8. 车 3 增量（0.5.46）：守夜加固
+## 8. Train 3 increments (0.5.46): night-watch hardening
 
-**（1）web3 `paused_approve` 联动（后端 Lane K）**：分片中成功的
-`exchange_prepare_order` 预览出 `pl_<12hex>` 且计划仍 `pending` 时，该
-子项挂起为 `awaiting_approval`（记录 plan ids），`running → paused_approve`
-入边打开（同窗第二单只记录、不重复转移；degraded/paused_user/planned 入边
-恒非法）；`paused_approve` 照常执行分片，`set_current` 跳过挂起子项——
-**其余子项逐 tick 继续推进**（F4）。服务腿每 tick 先 `observe_approvals`
-（approved/executed → 子项回 pending 重新排队；rejected/expired/cancelled →
-子项 degraded + gap + 汇报，不停摆；pending/未知/读取异常 → 继续等，读失败
-绝不编造裁决；全部落定 → `paused_approve → running`，事件 `via=approval`）。
-**审批门形态零改动**（prepare→approve→execute、Bearer、当日 ledger 全不
-动），`execute` 无审批仍被拒；`paused_approve` 态 pause/resume 恒 409
-（detail 报 allowed states）。detail 新增 `deadline/redlines/deliverable|null`
-+ `approvals:[{task, plans}]`，awaiting 子项行带 `plans`（深链数据）。
+**(1) web3 `paused_approve` wiring (backend Lane K)**: when a successful
+`exchange_prepare_order` inside a slice previews `pl_<12hex>` and the plan
+is still `pending`, that subtask suspends as `awaiting_approval` (plan ids
+recorded) and the `running → paused_approve` inbound edge opens (a second
+order in the same window is only recorded, with no repeated transition;
+inbound edges from degraded/paused_user/planned are always illegal);
+`paused_approve` keeps executing slices as usual, with `set_current`
+skipping suspended subtasks — **all other subtasks keep advancing tick by
+tick** (F4). The service leg runs `observe_approvals` first on every tick
+(approved/executed → the subtask returns to pending and is re-queued;
+rejected/expired/cancelled → subtask degraded + gap + report, no stall;
+pending/unknown/read error → keep waiting, a read failure never fabricates a
+verdict; everything settled → `paused_approve → running`, event
+`via=approval`). **The approval gate's shape is unchanged**
+(prepare→approve→execute, Bearer, and the day's ledger all untouched);
+`execute` without approval is still rejected; under `paused_approve`,
+pause/resume always return 409 (detail reports the allowed states). Detail
+gains `deadline/redlines/deliverable|null` +
+`approvals:[{task, plans}]`, with awaiting subtask rows carrying `plans`
+(deep-link data).
 
-**（2）watchdog 心跳告警**：`MISSION_STALE_SEC=900`，active 态
-（running/degraded/paused_approve）的 `last_progress_at`（旧行回退
-updated_at/created_at）超阈 → `⚠️ [MISSION HEARTBEAT] 任务 {id} 已 {N} 分钟
-无进展（{state}）· {goal}` 走既有 notify 路径（goal 经 scrub、零凭据；
-dry_run 只闸重启、不抑告警）；内存节流按 `throttle_sec` 重报（never-
-silent，重启即重报），恢复进度/进入终态即静默；registry 读失败 fail-soft。
+**(2) Watchdog heartbeat alerts**: `MISSION_STALE_SEC=900`; when an
+active-state mission (running/degraded/paused_approve) has a
+`last_progress_at` (legacy rows fall back to updated_at/created_at) older
+than the threshold →
+`⚠️ [MISSION HEARTBEAT] mission {id} has made no progress for {N} minutes ({state}) · {goal}`
+goes through the existing notify path (the goal passes scrub, zero
+credentials; dry_run only gates restarts, it does not suppress alerts);
+in-memory throttling re-reports on `throttle_sec` (never-silent: a restart
+re-reports immediately); resumed progress or entering a terminal state
+silences it; a registry read failure is fail-soft.
 
-**（3）`mission_tick` hook**：白名单 +1 事件；每个 active mission 每 tick
-恰好一次（无 active 不发，paused_user 也算 active——观察腿不观察模型），
-子进程 env 仅 `AIDOG_HOOK_MISSION`（净化 id≤32）/ `_MISSION_STATE`（枚举）/
-`_MISSION_PROGRESS`（`d/t`）+ PATH/HOME——零回显、不阻塞、不超时即丢弃
-非法值（E2E L6 对真实脚本捕获的 env 逐键断言）。
+**(3) `mission_tick` hook**: whitelist +1 event; exactly once per tick per
+active mission (nothing sent when no mission is active; paused_user also
+counts as active — the observation leg does not observe the model); the
+child-process env carries only `AIDOG_HOOK_MISSION` (sanitized id≤32) /
+`_MISSION_STATE` (enum) / `_MISSION_PROGRESS` (`d/t`) plus PATH/HOME — zero
+echo, non-blocking, never times out, and illegal values are dropped
+immediately (E2E L6 asserts the env captured from a real script key by key).
 
-**（4）静默期与最小间隔（settings 两键）**：`mission.quiet_hours`（`""` =
-关，或 `HH:MM-HH:MM`，起≠止、可跨午夜）——窗内只放行 decision/final
-（旁路且**单独**发出、合并队列保留），其余进队列、窗后首个非静默点**合并**
-发出；`mission.min_interval`（0..86400，0 = 档默认 120/900/∞）与窗口都
-逐 tick 活读（save = effective）；非法值 400 detail 点名键，坏窗口绝不静默
-（fail-soft 退回关）。
+**(4) Quiet hours and minimum interval (two settings keys)**:
+`mission.quiet_hours` (`""` = off, or `HH:MM-HH:MM`, start ≠ end, may cross
+midnight) — inside the window only decision/final are let through (they
+bypass and are sent **individually**, with the merge queue preserved);
+everything else enters the queue and is **merged** and sent at the first
+non-quiet point after the window; `mission.min_interval` (0..86400, 0 =
+tier default 120/900/∞) and the window are both read live on every tick
+(save = effective); an illegal value → 400 detail naming the key, and a
+broken window is never silent (fail-soft falls back to off).
 
-**（5）A 面三约束**：start 可选 `deadline`（ISO8601 且须在未来，naive 按
-+08:00）/ `redlines`（≤500 纯文本）/ `deliverable`（≤200 纯文本），空/空白
-= 不传；校验单一语法在 `mission.create`（所有 start 路径同源），非法 400
-detail 以字段名开头；三约束注入**计划片与执行片** prompt（`Owner constraints`
-段，F2 展示不等待），detail/row 回显、缺省 null。
+**(5) The three side-A constraints**: start optionally takes `deadline`
+(ISO8601 and must be in the future; a naive time is read as +08:00) /
+`redlines` (≤500 plain text) / `deliverable` (≤200 plain text); empty or
+whitespace = not passed; validation lives in a single grammar in
+`mission.create` (all start paths share the source), an illegal 400 detail
+starts with the field name; the three constraints are injected into **both
+the plan slice and the execution slice** prompts (the `Owner constraints`
+section, F2 displays without waiting), detail/row echo them, default null.
 
-**（6）控制台（Lane K2）**：Missions 卡新增可折叠约束区（datetime-local →
-ISO8601 传参、redlines textarea ≤500 实时计数、deliverable ≤200，只传填写
-项，不挤爆主表单）；详情区显示三约束（deadline 相对时间 + 过期红字、
-redlines/deliverable 文本块）与 **APPROVALS 区**（`paused_approve` 待批红
-徽章 + 每项 `{task, plans[]}` 列表、plan id 点击深链到既有 Web3 面板并高亮
-对应卡片 + 「在 Web3 面板完成审批后自动恢复，无需在此操作」文案，审批完成
-控制台零操作、下 tick 自动回 running）；档位旁新增 quiet_hours / min_interval
-控件（change 即写 `/api/settings` 同款机制，400 detail 原样显示）；五态徽章
-补全（paused_approve 红 vs degraded 琥珀）+ awaiting_approval 子项符号；
-locales 新增 20 个 `mission.*` 键 → packs **614/614**；既有
-`mission_card_verify` / `mission_board_verify` 两探针 0 FAILED（
-`#missionCard` 内 `<button>` 恒 4、三档 select、五符号集均不破）。
+**(6) Console (Lane K2)**: the Missions card gains a collapsible constraints
+area (datetime-local → ISO8601 parameter, redlines textarea ≤500 with a
+live counter, deliverable ≤200; only filled-in fields are sent, so the main
+form is never crowded out); the detail area shows the three constraints
+(deadline as relative time + red expiry text, redlines/deliverable text
+blocks) and an **APPROVALS section** (a red `paused_approve` pending badge +
+a list of each `{task, plans[]}`; clicking a plan id deep-links to the
+existing Web3 panel and highlights the corresponding card, plus the copy
+"approval resumes automatically after you finish in the Web3 panel; nothing
+to do here" — zero console action after approval, the next tick auto-returns
+to running); next to the tier, quiet_hours / min_interval controls appear
+(change writes immediately via the same `/api/settings` mechanism, a 400
+detail is displayed verbatim); the five state badges are completed
+(paused_approve red vs degraded amber) + the awaiting_approval subtask
+symbol; locales gain 20 `mission.*` keys → packs **614/614**; the existing
+`mission_card_verify` / `mission_board_verify` probes both show 0 FAILED
+(`<button>` inside `#missionCard` always 4, the three-tier select, and the
+five-symbol set all unbroken).
 
-**（7）车 3 验收闸证据**：`tmp/e2e_mission_pause.py` — **E2E 73/73 PASS ·
-7 legs (L1–L7)**：L1 审批挂起/恢复（prepare → paused_approve +
-approvals 深链数据 + decision 上线 + 其余子项继续推进；console approve →
-下 tick 回 running → 推进到 done + 终报；红线：execute 无审批被拒、模型
-工具集无 approve 路径、本地 mock 收到 0 次 order POST）· L2 心跳（900s+
-陈旧 → notify 路径告警一次 → 节流窗内不重复 → 越窗重报 → 恢复进度即
-静默，dry_run 全程开、告警零机器路径）· L3 quiet hours（窗内
-plan_ready/task_done 排队零上线、decision 单独放行且队列保留、窗后首个
-非静默点合并发出；min_interval 3600 与档默认 120 两档实测：60s 间隔排队 /
-4000s、200s 间隔发出）· L4 三约束（4 种非法 400 点名字段、缺省 null、
-合法回显三字段、计划片请求体含 `Owner constraints` 三值）· L5 checkpoint
-续跑压测（新进程 `MISSION_CATCHUP`、进度与计划结构不丢、分片号连续不重
-置、事件流严格 append-only、重启后终报照发）· L6 暂停窗（pause/resume
-409 报 allowed states + mission_tick env 逐键断言每 tick 恰一次、零回显）·
-L7 生产 `secrets.env`/`web/settings.json` 字节恒等 + 全程哨兵/机器路径清扫
-+ 目标文本永在 user 层。隔离姿势同车 1/2（throwaway profile + stub 模型
-+ stub TG + 本地 OKX book mock、无订单端点）。另有 `tmp/lane_k_probe.py`
-**19/19**（静默期合并/三约束注入/心跳三探）。Run:
-`python3 tmp/e2e_mission_pause.py`（rc 0 = 0 fail）。
+**(7) Train 3 acceptance gate evidence**: `tmp/e2e_mission_pause.py` —
+**E2E 73/73 PASS · 7 legs (L1–L7)**: L1 approval suspend/resume (prepare →
+paused_approve + approvals deep-link data + decision goes live + other
+subtasks keep advancing; console approve → next tick back to running →
+advances to done + final report; red lines: execute without approval
+rejected, the model's toolset has no approve path, the local mock received 0
+order POSTs) · L2 heartbeat (900s+ stale → one alert via the notify path →
+no repeat inside the throttle window → re-report after the window →
+silenced as soon as progress resumes; dry_run on the whole time, zero
+machine paths in the alert) · L3 quiet hours (inside the window
+plan_ready/task_done queue with zero going live, decision let through
+individually with the queue preserved, merged and sent at the first
+non-quiet point after the window; both tiers tested live: min_interval 3600
+and the tier default 120 — a 60s interval queues / 4000s, a 200s interval
+sends) · L4 the three constraints (4 kinds of illegal 400s naming the field,
+defaults null, legal values echoing all three fields, plan-slice request
+body containing the three `Owner constraints` values) · L5 checkpoint resume
+stress test (new process `MISSION_CATCHUP`, progress and plan structure not
+lost, slice numbers continuous without reset, event stream strictly
+append-only, final report still sent after restart) · L6 pause window
+(pause/resume 409 reporting allowed states + mission_tick env asserted key
+by key, exactly once per tick, zero echo) · L7 production
+`secrets.env`/`web/settings.json` byte-identical + a full-run
+sentinel/machine-path sweep + goal text always in the user layer. Isolation
+posture same as train 1/2 (throwaway profile + stub model + stub TG + local
+OKX book mock, no order endpoint). Also `tmp/lane_k_probe.py` **19/19**
+(quiet-hours merging / three-constraint injection / heartbeat, three
+probes). Run: `python3 tmp/e2e_mission_pause.py` (rc 0 = 0 fail).
 
-## 9. 证据（gates & tests）
+## 9. Evidence (gates & tests)
 
-- `python3 -m mycore.tests.run` → `test_mission`：**285 个运行时 check**
-  （状态机合法/非法边含 degraded 入边与车 3 挂起/恢复、registry 原子与
-  cap、标记协议折入含 MILESTONE 分组、reporter 三档 + 节流 + 合并 + 旁路
-  + 静默窗 + min_interval、预算三护栏封存、scrub、manifest、settings 校验
-  含六键、`public_row` 白名单含三约束与 approvals、detail 投影与事件尾 20
-  行截断）；全套件 **1477/1477**。
-- **`tmp/e2e_mission.py`（本车验收闸，Lane G）— `E2E 54/54 PASS` ·
-  8 legs (L1–L8)**：L1 立标（三档 settings 回读 + 非法档 400 + start/
-  409/capabilities 摘要）· L2 真实分片（事件流 state+slice + 看板进度）·
-  L3 三档汇报各一例 + 120 s 窗口 queued→合并发出 · L4 done 四段报告 +
-  stop 封存 evidence（且 stop 对线路静默）· L5 `max_slices=2` 触顶封存 +
-  evidence + 终报 · L6 逐请求断言 system 栈含 Mission conduct、prompt 含
-  「无法获得任何回答」、目标只在 user 层 · L7 出口哨兵扫描（报告/看板/
-  事件流/模型请求体零凭据零机器路径）· L8 生产 `secrets.env` +
-  `web/settings.json` 字节恒等。隔离姿势：独立 throwaway profile + 独立
-  端口控制台子进程 + 本地 stub 模型端点（真 HTTP 分片）+ stub TG 传输捕获
-  报告。Run: `python3 tmp/e2e_mission.py`（rc 0 = 0 fail）。
-- **`tmp/e2e_mission_orch.py`（车 2 验收闸，Lane J）— `E2E 63/63 PASS` ·
-  6 legs (L1–L6)**：L1 拆解（settings 四键写读 + start 冻结 settings 预算
-  30 + `GET ?id=` 断言三里程碑分组/Plan 桶/METHOD·TRIED 打标/plan_ready
-  已发）· L2 并行（同一 exec 片 2 次 `delegate` 分发真跑 3 个子代理回
-  stub、分片工具集含 delegate、扇出覆盖 ≥2 个排队子任务且当前子项同片
-  完成，slice 事件 `delegate=2`）· L3 降级（GAP → state/subtask 双
-  degraded 且队列完好 → 下一片穿行 degraded 推进下一子项回 running（F4）
-  → 二次 GAP 再入 → 自 degraded pause 合法 / 暂停态零执行 / resume 后
-  gaps 保留，并把事件流推过 20 行）· L4 封存（`budget{max_slices:2}` 触顶
-  → sealed + evidence 带计数 + 封存报发出永不静默；POST stop →
-  `stopped via the console` 且对线路静默）· L5 detail（形状 row+plan/
-  events/budget/budget_used、事件尾 = 流末 20 行升序、settings 改
-  7 不动已启预算 30/覆盖 2、未知 id 404、无 id 4 键旧形状、detail 哨兵
-  扫描）· L6 生产 `secrets.env` + `web/settings.json` 字节恒等 + 全进程
-  哨兵/机器路径清扫 + 目标文本永在 user 层。隔离姿势与车 1 完全同款。
-  Run: `python3 tmp/e2e_mission_orch.py`（rc 0 = 0 fail）。
-- **`tmp/e2e_mission_pause.py`（车 3 验收闸，Lane K2）— `E2E 73/73 PASS` ·
-  7 legs (L1–L7)**：详见 §8（7）（审批挂起/恢复主线 + 心跳告警 + 静默期/
-  最小间隔两档实测 + 三约束 + checkpoint 续跑压测 + 409/hook env + 生产
-  字节恒等与哨兵清扫）。Run: `python3 tmp/e2e_mission_pause.py`（rc 0 = 0
-  fail）；辅以 `tmp/lane_k_probe.py` **19/19**。
-- `python3 deploy/check_publish.py` → READY(0)（本页在 allow 域，无机器
-  路径/凭据/品牌词）；`python3 tests/source_lang_check.py` → 源码零 CJK
-  （本页 docs 豁免，中文按仓库文档惯例）。
+- `python3 -m mycore.tests.run` → `test_mission`: **285 runtime checks**
+  (legal/illegal state-machine edges including the degraded inbound edge and
+  train 3 suspend/resume, registry atomicity and cap, marker-protocol
+  folding including MILESTONE grouping, reporter three tiers + throttle +
+  merge + bypass + quiet window + min_interval, the three budget guardrail
+  seals, scrub, manifest, settings validation including the six keys,
+  `public_row` allow-list including the three constraints and approvals,
+  detail projection and the event tail truncated to the last 20 lines);
+  full suite **1477/1477**.
+- **`tmp/e2e_mission.py` (this train's acceptance gate, Lane G) — `E2E
+  54/54 PASS` · 8 legs (L1–L8)**: L1 goal setting (three-tier settings
+  read-back + illegal tier 400 + start/409/capabilities summary) · L2 real
+  slices (event stream state+slice + board progress) · L3 one example each
+  of the three reporting tiers + a 120 s window queued→merged send · L4 the
+  done four-section report + stop sealing with evidence (and stop is silent
+  on the wire) · L5 `max_slices=2` ceiling hit → sealed + evidence + final
+  report · L6 per-request assertion that the system stack contains Mission
+  conduct, the prompt contains "cannot obtain any answer", the goal only in
+  the user layer · L7 exit sentinel scan (reports/board/event stream/model
+  request body: zero credentials, zero machine paths) · L8 production
+  `secrets.env` + `web/settings.json` byte-identical. Isolation posture: a
+  separate throwaway profile + a separate console subprocess on its own
+  port + a local stub model endpoint (real HTTP slices) + a stub TG
+  transport capturing reports. Run: `python3 tmp/e2e_mission.py` (rc 0 = 0
+  fail).
+- **`tmp/e2e_mission_orch.py` (train 2 acceptance gate, Lane J) — `E2E
+  63/63 PASS` · 6 legs (L1–L6)**: L1 decomposition (four settings keys
+  written and read + start freezing the settings budget 30 + `GET ?id=`
+  asserting three milestone groupings / Plan bucket / METHOD·TRIED marking /
+  plan_ready already sent) · L2 parallelism (2 `delegate` dispatches in one
+  exec slice really running 3 subagents against the stub, slice toolset
+  includes delegate, fan-out covering ≥2 queued subtasks with the current
+  subtask finishing in the same slice, slice event `delegate=2`) · L3
+  degradation (GAP → state/subtask both degraded with the queue intact → the
+  next slice passes through degraded, advances the next subtask, returns to
+  running (F4) → a second GAP re-enters → pause from degraded legal / zero
+  execution while paused / gaps preserved after resume, also pushing the
+  event stream past 20 lines) · L4 sealing (`budget{max_slices:2}` ceiling
+  hit → sealed + evidence carrying the counts + seal report sent, never
+  silent; POST stop → `stopped via the console` and silent on the wire) ·
+  L5 detail (shape row+plan/events/budget/budget_used, event tail = last 20
+  lines of the stream ascending, changing settings to 7 leaves the started
+  budget 30 untouched / override 2, unknown id 404, no-id 4-key legacy
+  shape, detail sentinel scan) · L6 production `secrets.env` +
+  `web/settings.json` byte-identical + a whole-run sentinel/machine-path
+  sweep + goal text always in the user layer. Isolation posture exactly the
+  same as train 1. Run: `python3 tmp/e2e_mission_orch.py` (rc 0 = 0 fail).
+- **`tmp/e2e_mission_pause.py` (train 3 acceptance gate, Lane K2) — `E2E
+  73/73 PASS` · 7 legs (L1–L7)**: see §8 (7) (the approval suspend/resume
+  main line + heartbeat alerts + quiet hours/minimum interval both tested
+  live + the three constraints + checkpoint resume stress test + 409/hook
+  env + production byte-identity and sentinel sweep). Run:
+  `python3 tmp/e2e_mission_pause.py` (rc 0 = 0 fail); assisted by
+  `tmp/lane_k_probe.py` **19/19**.
+*Development-repository only: `deploy/check_publish.py` is release tooling of
+the development checkout, never part of a user install.*
 
-## 10. 文件索引
+- `python3 deploy/check_publish.py` → READY(0) (this page is in the allow
+  domain: no machine paths/credentials/brand words);
+  `python3 tests/source_lang_check.py` → zero CJK in the source code (this
+  page sits outside the source-language gate, which scans `.py`/`.sh`/`.js`;
+  repository docs are maintained in English per the i18n policy).
 
-| 文件 | 职责 |
+## 10. File index
+
+| File | Responsibility |
 |---|---|
-| `mycore/mission.py` | 状态机、registry、串行队列、标记协议、预算护栏、reporter（节流/合并/旁路）、`scrub`、`public_row`、settings 校验 |
-| `mycore/service.py` | `_maybe_tick_missions` / `_tick_one_mission` 推进腿 + `_mission_deliver`（复用 `_origin_deliver` 四级回退） |
-| `web/server.py` | `GET/POST /api/mission`、settings `mission` 分区、`capabilities.mission` |
+| `mycore/mission.py` | state machine, registry, serial queue, marker protocol, budget guardrails, reporter (throttle/merge/bypass), `scrub`, `public_row`, settings validation |
+| `mycore/service.py` | `_maybe_tick_missions` / `_tick_one_mission` advancement leg + `_mission_deliver` (reusing `_origin_deliver`'s four-level fallback) |
+| `web/server.py` | `GET/POST /api/mission`, the settings `mission` section, `capabilities.mission` |
 | `overlay/constitution/SOUL.md` | `## Mission conduct (autonomous ops)` C0-C5 |
-| `mycore/tests/run.py` | `test_mission` 单测 |
-| `tmp/e2e_mission.py` | 车 1 验收闸（本页 §9） |
-| `tmp/e2e_mission_orch.py` | 车 2 四态验收闸（本页 §9） |
-| `tmp/e2e_mission_pause.py` | 车 3 审批挂起/恢复 + 守夜加固验收闸（本页 §9） |
-| `tmp/lane_k_probe.py` | 车 3 三探（静默期/三约束/心跳） |
-| `mycore/watchdog.py` | 车 3 心跳告警（`MISSION_STALE_SEC` / 节流重报） |
-| `mycore/hooks.py` | 事件白名单 + `mission_tick` env（零回显） |
-| `docs/design/autonomous_ops_design.md` | 设计书（车 1–5 分期、红线全表） |
+| `mycore/tests/run.py` | `test_mission` unit tests |
+| `tmp/e2e_mission.py` | train 1 acceptance gate (this page §9) |
+| `tmp/e2e_mission_orch.py` | train 2 four-state acceptance gate (this page §9) |
+| `tmp/e2e_mission_pause.py` | train 3 approval suspend/resume + night-watch hardening acceptance gate (this page §9) |
+| `tmp/lane_k_probe.py` | train 3 three probes (quiet hours / three constraints / heartbeat) |
+| `mycore/watchdog.py` | train 3 heartbeat alerts (`MISSION_STALE_SEC` / throttled re-report) |
+| `mycore/hooks.py` | event whitelist + `mission_tick` env (zero echo) |
+| `docs/design/autonomous_ops_design.md` | design doc (trains 1–5 phasing, full red-line table) |

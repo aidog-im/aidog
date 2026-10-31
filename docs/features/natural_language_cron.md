@@ -2,7 +2,7 @@
 
 Status: **implemented** (2026-10-20, ships in v0.5.20). Design anchor:
 `docs/design/im_aidog_product_design.md` line 27 (prior art checklist —
-"自然语言 cron") and the task-2 roadmap slice owner-approved 2026-10-20.
+"natural-language cron") and the task-2 roadmap slice owner-approved 2026-10-20.
 
 **Honest boundary:** this is a scheduler, not a semantics engine. Plain
 speech is translated by the **model** into one canonical spec string (the
@@ -124,6 +124,9 @@ line, detail to the log only). Dry-run evaluates + marks + logs, never sends.
   speech → tool → job end-to-end with origin stamping; registry count 9.
 - `python3 tests/source_lang_check.py` → locale parity for the `cmd.cron.*`
   keys (packs 194 → 204).
+*Development-repository only: `deploy/check_publish.py` is release tooling of
+the development checkout, never part of a user install.*
+
 - `python3 deploy/check_publish.py` → `data/` is runtime state (gitignored),
   nothing new tracked; leak scan unchanged.
 - **Console coverage (frontend car, 0.5.39)**: the registry became READABLE

@@ -68,7 +68,7 @@ Re-run `bash deploy/install.sh` afterwards — target rc=`0`.
 ## 2. Health gates (30 seconds)
 
 ```bash
-python3 deploy/aidog_doctor.py        # expect: 9 checks · 0 FAIL · 0 WARN*
+python3 deploy/aidog_doctor.py        # expect: 12 checks · 0 FAIL · 0 WARN*
 bash deploy/boot_services.sh status   # expect: console + service + watchdog green
 bash deploy/run_service.sh --check    # expect: rc=0
 ```

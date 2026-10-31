@@ -126,9 +126,9 @@ untouched — two sources, each honest about its own availability.
 
 ## 5. Gates (0.5.55)
 
-`python3 -m mycore.tests.run` **1686/1686** (the `gw:` lane: grammar,
+`python3 -m mycore.tests.run` **1773/1773** (the `gw:` lane: grammar,
 rotation, rate windows, meter rows/aggregation/cost, config precedence,
-ChatClient gating) · `tests/web_console_p3.py` **310/310** (validation
+ChatClient gating) · `tests/web_console_p3.py` **334/334** (validation
 matrix, mutex, secrets group, both new routes) · `tmp/e2e_gateway_ui.js`
 **25/25** (manager round trips, knob persistence, pool write + DOM grep,
 remove, self block, zh repaint, zero pageerror).

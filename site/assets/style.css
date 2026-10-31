@@ -950,7 +950,7 @@ h1, h2, h3, h4, .serif {
 /* ------------------------------------------------ CJK readability --- */
 /* Chinese needs neither negative display tracking nor synthetic italics,
    and reads better with a looser leading; small uppercase labels keep a
-   tight tracking so 中英 mixed lines stay on one row. */
+   tight tracking so mixed CJK/Latin lines stay on one row. */
 html[lang="zh-Hans"] body { line-height: 1.75; }
 html[lang="zh-Hans"] h1, html[lang="zh-Hans"] h2,
 html[lang="zh-Hans"] h3, html[lang="zh-Hans"] h4,

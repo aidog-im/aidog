@@ -695,6 +695,15 @@ def close_all() -> None:
         s.close()
 
 
+def live_sessions(name: str = "") -> list["Session"]:
+    """Read-side introspection for the SNIFF mcp lane: the sessions this
+    process currently holds — all of them, or just one named bridge's.
+    Closed sessions already leave `_SESSIONS`, so this never observes a
+    dead channel. It connects nothing and calls nothing.
+    Keep the name in sync with the SNIFF `server` grammar (same pattern)."""
+    return [s for s in _SESSIONS if not name or s.cfg.name == name]
+
+
 atexit.register(close_all)
 
 

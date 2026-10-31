@@ -111,3 +111,43 @@ only when edited; the Overview `#capGrid` renders the configured server
 names. Evidence: `tmp/e2e_frontend_coverage.py` `L3` (write →
 `capabilities.mycore.mcp_servers.names`) and `tmp/e2e_frontend_ui.js` `U5`
 (system card) — see [frontend_coverage.md](frontend_coverage.md).
+
+## SNIFF lane: sensing a bridge, read-side only (SNIFF car)
+
+The SENSE board's `mcp` source kind borrows this registry instead of
+bringing a protocol client of its own. One source names one bridge:
+
+```jsonc
+{ "id": "bridges", "kind": "mcp", "server": "ha-mcp", "enabled": true }
+```
+
+A sweep parses the registry and counts this process's live sessions for that
+name — configuration and status only. It calls no tool, spawns no process
+and opens no connection of its own (the core suite asserts all three).
+
+Readings a rule may reference: `servers` (bridges declared overall),
+`transport` (`stdio` | `http`), `sessions` (live sessions right now),
+`tools` (tools such a session exposes), `filters` (allow + deny patterns),
+`slots` (`$SLOT` credential references in env/headers — names counted,
+never resolved). Status stays honest: `never-configured` (no such bridge in
+the registry), `detached` (declared, no live session), `reachable` (a
+session is open); `sessions == 0 for 30m` is the finding that says a
+declared bridge went away.
+
+### The three bridges (health / vehicle / devices)
+
+We never install a third-party bridge for you: you run whatever you trust,
+declare it in `mycore.mcp`, and the board watches it. Their **data** reaches
+a P0 sweep through the `home` source (whatever Home Assistant aggregates) or
+a `web` source (a local REST endpoint); calling a bridge's tools from a
+sweep is a later, approval-gated phase. Typical hookups:
+
+| Domain | Bridge you run (third-party, your choice) | Data route into a sweep |
+|---|---|---|
+| Health | a Google Health / Garmin / Withings / Huawei health bridge MCP | HA health integrations (`home`) or the provider REST API (`web`) |
+| Vehicle | a TeslaMate MCP, an OBD-II MCP | TeslaMate or HA (`home`), TeslaMate API (`web`) |
+| Devices | ha-mcp, a Zigbee2MQTT bridge, a 3D-printer bridge | Home Assistant (`home`) or the device's local API (`web`) |
+
+Trust model applies unchanged: borrowed tools are not sandboxed, the
+bridge's own rights bound it — which is exactly why this lane only reads
+configuration and connection status.
