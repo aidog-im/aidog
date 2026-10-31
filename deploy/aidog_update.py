@@ -3,9 +3,10 @@
 every release; users are notified in-console and upgrade with one command).
 
 Mechanism (two-stage, confidential -> public):
-  - NOW (pre-mycore): origin is a PRIVATE GitHub repo; the release manifest is
+  - NOW (private repo): origin is a PRIVATE GitHub repo; the release manifest is
     read from `GET /repos/{owner}/{repo}/contents/release.json` with the
-    GITHUB_PAT credential (value never echoed, never put in argv).
+    repo's own PAT (slot `AIDOG_GH_PAT`, legacy fallback `GITHUB_PAT`) —
+    value never echoed, never put in argv).
   - POST-mycore: the same repo flips to public; the exact same code works
     without credentials (GitHub allows anonymous contents reads).
   - owner/repo is derived from `git remote get-url origin` — no config to edit
@@ -84,7 +85,7 @@ def fetch_manifest() -> dict:
     url = f"https://api.github.com/repos/{owner}/{name}/contents/{MANIFEST_PATH}"
     req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json",
                                                "User-Agent": "aidog-update"})
-    pat = env_slot("GITHUB_PAT")
+    pat = env_slot("AIDOG_GH_PAT") or env_slot("GITHUB_PAT")
     if pat:
         req.add_header("Authorization", f"Bearer {pat}")
     last: Exception | None = None
@@ -144,7 +145,7 @@ def apply() -> int:
     # helper body references $AIDOG_GH_PAT (no value in argv, no helper bypass
     # from gh — GIT_CONFIG_* neutralized per pitfall log).
     env = dict(os.environ)
-    pat = env_slot("GITHUB_PAT")
+    pat = env_slot("AIDOG_GH_PAT") or env_slot("GITHUB_PAT")
     if pat:
         env["AIDOG_GH_PAT"] = pat
     env["GIT_CONFIG_GLOBAL"] = "/dev/null"

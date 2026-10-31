@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>I'm AiDog — a personal embodied AI</title>
+<meta name="description" content="I'm AiDog (aidog.im) — a personal embodied AI, grown for one, built for anyone. Permanently free. Self-developed core, local-first console, Telegram bot.">
+<link rel="icon" type="image/png" href="assets/favicon.png">
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+
+<div class="fx-scanlines" aria-hidden="true"></div>
+<div class="fx-vignette" aria-hidden="true"></div>
+
+<header class="nav" id="nav">
+  <a class="brand" href="#home">
+    <img src="assets/logo.jpg" alt="I'm AiDog logo" width="30" height="30" data-i18n-alt="brand.logoAlt">
+    <span class="brand-name">AIDOG<span class="brand-dot">.IM</span></span>
+  </a>
+  <button class="burger" id="burger" aria-label="menu" aria-expanded="false"><span></span><span></span><span></span></button>
+  <nav class="nav-links" id="navLinks">
+    <a href="#home" class="nav-link active" data-i18n="nav.home">Home</a>
+    <a href="#skills" class="nav-link" data-i18n="nav.skills">Skills</a>
+    <a href="#console" class="nav-link" data-i18n="nav.console">Console</a>
+    <a href="#models" class="nav-link" data-i18n="nav.models">Models</a>
+  </nav>
+  <div class="nav-right">
+    <button class="lang-btn" id="langBtn" aria-label="switch language"><span id="langLabel">中文</span></button>
+    <a class="btn btn-ghost nav-gh" href="https://github.com/aidog-im/aidog" target="_blank" rel="noopener" data-i18n="nav.github">GitHub</a>
+  </div>
+</header>
+
+<main>
+
+<!-- ============================================ HERO -->
+<section class="hero" id="home">
+  <canvas class="hero-stars" id="stars" aria-hidden="true"></canvas>
+  <div class="hero-glow" aria-hidden="true"></div>
+  <div class="hero-inner">
+    <div class="hero-orb reveal">
+      <span class="orb-ring orb-ring-a" aria-hidden="true"></span>
+      <span class="orb-ring orb-ring-b" aria-hidden="true"></span>
+      <img src="assets/logo.jpg" alt="I'm AiDog logo" class="orb-img" data-i18n-alt="brand.logoAlt">
+    </div>
+    <p class="hero-kicker reveal" data-i18n="hero.kicker">PERSONAL · EMBODIED · LOCAL-FIRST</p>
+    <h1 class="hero-title reveal"><span data-i18n="hero.title1">I'm AiDog</span><span class="grad" data-i18n="hero.title2">grown for one, built for anyone</span></h1>
+    <p class="hero-sub reveal" data-i18n="hero.sub">A personal embodied AI — a constitution for a personality, curated memory for a life, and a self-developed core that answers to you alone. Not a platform. Not an assistant farm. One companion, grown for one person, engineered so anyone can run it.</p>
+    <div class="hero-badges reveal">
+      <span class="badge badge-free"><span class="pulse-dot" aria-hidden="true"></span><span data-i18n="hero.badgeFree">PERMANENTLY FREE — forever, no exceptions</span></span>
+      <span class="badge badge-core" data-i18n="hero.badgeCore">Self-developed core · 10 modules · 174/174 tests</span>
+      <span class="badge badge-local" data-i18n="hero.badgeLocal">Runs on your machine · loopback by default</span>
+    </div>
+    <div class="hero-cta reveal">
+      <a class="btn btn-primary" href="https://github.com/aidog-im/aidog" target="_blank" rel="noopener" data-i18n="hero.ctaGithub">View on GitHub</a>
+      <button class="btn btn-ghost" disabled title="coming soon" data-i18n="hero.ctaDownload">Download — soon</button>
+      <button class="btn btn-ghost" disabled title="coming soon" data-i18n="hero.ctaDocs">Docs — soon</button>
+    </div>
+  </div>
+  <div class="fact-strip" aria-label="verified facts">
+    <div class="fact-strip-track" id="factTrack">
+      <span class="fact"><b>174/174</b> <span data-i18n="facts.core">core tests</span></span>
+      <span class="fact"><b>10</b> <span data-i18n="facts.modules">self-developed modules</span></span>
+      <span class="fact"><b>39/39</b> <span data-i18n="facts.smoke">console smoke</span></span>
+      <span class="fact"><b>15/15</b> <span data-i18n="facts.router">skill router</span></span>
+      <span class="fact"><b>58/58</b> <span data-i18n="facts.memory">memory suite</span></span>
+      <span class="fact"><b>0F/0W</b> <span data-i18n="facts.doctor">doctor check</span></span>
+      <span class="fact"><b>en / zh</b> <span data-i18n="facts.i18n">locale packs</span></span>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================ SKILLS -->
+<section class="section" id="skills">
+  <div class="section-head reveal">
+    <span class="section-index">01</span>
+    <h2 data-i18n="skills.title">Skills</h2>
+    <p class="section-sub" data-i18n="skills.sub">A small, curated capability layer. Skills are screened deterministically before they ever reach the model, and only trusted, reviewed entries are recommended — no open marketplace, no supply-chain surprises.</p>
+  </div>
+
+  <div class="empty-card reveal">
+    <div class="empty-frame" aria-hidden="true">
+      <span class="empty-slot"></span><span class="empty-slot"></span><span class="empty-slot"></span>
+    </div>
+    <h3 class="empty-title" data-i18n="skills.emptyTitle">Curation in progress</h3>
+    <p class="empty-body" data-i18n="skills.emptyBody">No recommended skills are listed yet. We would rather show an honest empty shelf than fill it with names we cannot vouch for. Recommendations land here one by one as they pass review.</p>
+    <a class="btn btn-ghost" href="https://github.com/aidog-im/aidog/issues" target="_blank" rel="noopener" data-i18n="skills.emptyCta">Propose a skill on GitHub Issues</a>
+  </div>
+
+  <div class="steps reveal">
+    <div class="step">
+      <span class="step-num">1</span>
+      <h4 data-i18n="skills.step1Title">Submit</h4>
+      <p data-i18n="skills.step1Body">Publish your skill repository on GitHub and open an issue with the link and a short description of what it does.</p>
+    </div>
+    <div class="step-arrow" aria-hidden="true">▸</div>
+    <div class="step">
+      <span class="step-num">2</span>
+      <h4 data-i18n="skills.step2Title">Review</h4>
+      <p data-i18n="skills.step2Body">We read the code: permissions, network behaviour, data handling. Skills must pass the deterministic router checks and our security review.</p>
+    </div>
+    <div class="step-arrow" aria-hidden="true">▸</div>
+    <div class="step">
+      <span class="step-num">3</span>
+      <h4 data-i18n="skills.step3Title">Listed</h4>
+      <p data-i18n="skills.step3Body">Approved skills appear in the recommended shelf above and mount into your local install — read-only sources, revocable at any time.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================ CONSOLE -->
+<section class="section" id="console">
+  <div class="section-head reveal">
+    <span class="section-index">02</span>
+    <h2 data-i18n="console.title">Console</h2>
+    <p class="section-sub" data-i18n="console.sub">Local Web Console Preview — see the panel you get after installing, before you download anything.</p>
+  </div>
+
+  <div class="mock-frame reveal">
+    <div class="mock-tag"><span class="pulse-dot" aria-hidden="true"></span><span data-i18n="console.tag">STATIC PREVIEW — live values render locally on your machine after install</span></div>
+
+    <!-- static high-fidelity mockup of the local console -->
+    <div class="mock" aria-label="console preview">
+      <div class="mock-head">
+        <div class="mock-brand">
+          <img src="assets/logo.jpg" alt="" width="28" height="28">
+          <b>I'M AIDOG</b><span class="mock-sub" data-i18n="console.brandSub">situational console</span>
+        </div>
+        <div class="mock-chips">
+          <span class="chip" data-i18n="console.chipBoot">BOOT --:-- · UP --</span>
+          <span class="chip chip-info">INFO</span>
+        </div>
+        <div class="mock-clock"><span class="chip-mock-lang">EN</span><span class="clock" id="mockClock">--:--:--</span></div>
+      </div>
+
+      <div class="mock-tools">
+        <span class="tool">BJ --:--:--</span><span class="tool">UTC --:--</span><span class="tool">UP –</span>
+        <span class="tool" data-i18n="console.toolHb">HB –</span><span class="tool" data-i18n="console.toolToday">TODAY –</span>
+      </div>
+
+      <div class="mock-grid">
+        <!-- left rail -->
+        <div class="mock-col">
+          <div class="mcard">
+            <h3 data-i18n="console.secAdvisory">ADVISORY</h3>
+            <div class="voice-row">
+              <span class="voice-orb" aria-hidden="true"><span class="orb-core"></span></span>
+              <div class="voice-meta"><div class="voice-state" data-i18n="console.voiceLocked">VOICE LOCKED</div><div class="voice-sub" data-i18n="console.voiceLockSub">tap the orb to unlock voice</div></div>
+            </div>
+            <div class="ticker"><span class="ticker-dot"></span><span data-i18n="console.ticker">—</span></div>
+          </div>
+          <div class="mcard">
+            <h3 data-i18n="console.secMemory">MEMORY CORE</h3>
+            <div class="bar-block"><label data-i18n="console.memCurated">Curated memory</label><div class="bar"><i style="width:0%"></i></div><span class="num">–</span></div>
+            <div class="bar-block"><label data-i18n="console.memUser">User profile</label><div class="bar bar-warm"><i style="width:0%"></i></div><span class="num">–</span></div>
+          </div>
+          <div class="mcard">
+            <h3 data-i18n="console.secSettings">CONSOLE</h3>
+            <div class="ctl-row"><label data-i18n="console.ctlSound">UI sound</label><span class="toggle"><i></i></span></div>
+            <div class="ctl-row"><label data-i18n="console.ctlAlert">Alert state</label><span class="fake-select">off ▾</span></div>
+            <div class="ctl-row"><label data-i18n="console.ctlRefresh">Refresh (s)</label><span class="fake-select">10 ▾</span></div>
+            <div class="ctl-row"><label data-i18n="console.ctlToken">Access token</label><span class="fake-input">••••••••</span></div>
+            <div class="ctl-actions"><span class="btn-mock primary" data-i18n="console.ctlSave">SAVE</span></div>
+          </div>
+        </div>
+
+        <!-- center ring -->
+        <div class="mock-col mock-center">
+          <svg class="ring" viewBox="0 0 420 420" role="img" aria-label="status ring preview">
+            <defs>
+              <filter id="ringGlow" x="-50%" y="-50%" width="200%" height="200%">
+                <feGaussianBlur stdDeviation="4" result="b"/>
+                <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+              </filter>
+              <radialGradient id="coreGrad" cx="50%" cy="50%" r="50%">
+                <stop offset="0%" stop-color="#8febff" stop-opacity=".5"/>
+                <stop offset="60%" stop-color="#6da1c9" stop-opacity=".12"/>
+                <stop offset="100%" stop-color="#6da1c9" stop-opacity="0"/>
+              </radialGradient>
+              <linearGradient id="scanGrad" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0%" stop-color="#8febff" stop-opacity=".8"/>
+                <stop offset="100%" stop-color="#8febff" stop-opacity="0"/>
+              </linearGradient>
+            </defs>
+            <circle class="ring-track" cx="210" cy="210" r="168"/>
+            <circle class="ring-track ring-track-in" cx="210" cy="210" r="120"/>
+            <g class="ring-scan">
+              <path d="M210 210 L210 42 A168 168 0 0 1 294 66 Z" fill="url(#scanGrad)" opacity=".25"/>
+              <line x1="210" y1="210" x2="210" y2="34" class="scan-beam"/>
+            </g>
+            <g class="ring-ticks" id="ringTicks" aria-hidden="true"></g>
+            <circle class="ring-core" cx="210" cy="210" r="96" fill="url(#coreGrad)"/>
+            <circle class="ring-node" cx="210" cy="42" r="5"/>
+            <circle class="ring-node" cx="368" cy="210" r="5"/>
+            <circle class="ring-node" cx="210" cy="378" r="5"/>
+            <circle class="ring-node" cx="52" cy="210" r="5"/>
+            <text class="ring-state" x="210" y="204">PREVIEW</text>
+            <text class="ring-sub" x="210" y="234" data-i18n="console.ringSub">live state after install</text>
+          </svg>
+          <div class="panel-row">
+            <span class="panel">kernel</span><span class="panel">watchdog</span><span class="panel">model</span>
+            <span class="panel">telegram</span><span class="panel">console</span><span class="panel">system</span>
+          </div>
+        </div>
+
+        <!-- right -->
+        <div class="mock-col">
+          <div class="mcard reactor">
+            <h3 data-i18n="console.secReactor">ARC REACTOR // USAGE</h3>
+            <svg class="reactor-svg" viewBox="0 0 220 220" aria-hidden="true">
+              <circle class="r-outer" cx="110" cy="110" r="96"/>
+              <circle class="r-tick" cx="110" cy="110" r="86"/>
+              <circle class="r-arcbg" cx="110" cy="110" r="74"/>
+              <circle class="r-arc" cx="110" cy="110" r="74" transform="rotate(-90 110 110)"/>
+              <circle class="r-mid" cx="110" cy="110" r="54"/>
+              <circle class="r-core" cx="110" cy="110" r="34"/>
+              <text class="r-num" x="110" y="106">–</text>
+              <text class="r-unit" x="110" y="128" data-i18n="console.reactorUnit">TODAY</text>
+            </svg>
+            <div class="stat-note" data-i18n="console.reactorNote">usage tallies locally — nothing is uploaded</div>
+          </div>
+          <div class="mcard">
+            <h3 data-i18n="console.secChannel">CHANNEL</h3>
+            <table class="kv">
+              <tr><td data-i18n="console.kvTelegram">telegram</td><td>–</td></tr>
+              <tr><td data-i18n="console.kvConsole">console</td><td>127.0.0.1</td></tr>
+              <tr><td data-i18n="console.kvModel">model</td><td>–</td></tr>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="mcard gallery">
+        <h3><span data-i18n="console.secGallery">SKILL ARMORY</span><span class="gal-count">0</span></h3>
+        <div class="gal-empty" data-i18n="console.galEmpty">no skills mounted</div>
+      </div>
+
+      <div class="mcard stream">
+        <h3><span data-i18n="console.secStream">LIVE STREAM</span><span class="stream-caret"></span></h3>
+        <div class="stream-body">
+          <p><span class="ts">--:--:--</span> <span data-i18n="console.stream1">boot · console up (loopback)</span></p>
+          <p><span class="ts">--:--:--</span> <span data-i18n="console.stream2">locale loaded · en</span></p>
+          <p><span class="ts">--:--:--</span> <span data-i18n="console.stream3">waiting for local service…</span></p>
+        </div>
+      </div>
+
+      <div class="mock-foot"><span data-i18n="console.foot">loopback · free forever</span><span>--:--:--</span></div>
+    </div>
+  </div>
+
+  <div class="feature-grid reveal">
+    <div class="feature"><h4 data-i18n="console.f1T">Five panels, one glance</h4><p data-i18n="console.f1B">Status, settings, usage, events and voice — a situational console, not a admin warehouse.</p></div>
+    <div class="feature"><h4 data-i18n="console.f2T">Zero-dependency local server</h4><p data-i18n="console.f2B">Serves on 127.0.0.1 with plain standard library code; write operations require your local access token.</p></div>
+    <div class="feature"><h4 data-i18n="console.f3T">Telegram + console, en/zh</h4><p data-i18n="console.f3B">Chat where you already are, inspect where it runs. Both faces speak English and Chinese.</p></div>
+  </div>
+</section>
+
+<!-- ============================================ MODELS -->
+<section class="section" id="models">
+  <div class="section-head reveal">
+    <span class="section-index">03</span>
+    <h2 data-i18n="models.title">Models &amp; Transparency</h2>
+    <p class="section-sub" data-i18n="models.sub">We will publish how this product actually runs — which models serve it and how much compute it consumes. No estimates, no marketing charts: only what the software itself reports.</p>
+  </div>
+
+  <div class="status-banner reveal">
+    <span class="status-pill"><span class="pulse-dot pulse-amber" aria-hidden="true"></span><span data-i18n="models.status">COMING ONLINE — statistics service not yet live</span></span>
+    <p data-i18n="models.statusBody">The aggregation service is being built. Until it ships, this page shows the pipeline design — and nothing else. Any number here before launch would be a lie, so there are none.</p>
+  </div>
+
+  <div class="chart-frame reveal" role="img" aria-label="placeholder chart">
+    <div class="chart-gridlines" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+    <div class="chart-bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    <div class="chart-message">
+      <span class="chart-icon" aria-hidden="true">◔</span>
+      <span data-i18n="models.chartNote">Data will appear here once the stats API goes live</span>
+    </div>
+    <div class="chart-axis" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+  </div>
+
+  <div class="pipeline reveal">
+    <div class="pnode">
+      <span class="pnode-ic" aria-hidden="true">▣</span>
+      <h4 data-i18n="models.p1T">1 · Your install</h4>
+      <p data-i18n="models.p1B">The local app optionally reports just two things: the model name in use and cumulative token counts — anonymously, and only if you opt in.</p>
+    </div>
+    <div class="parrow" aria-hidden="true">⟶</div>
+    <div class="pnode">
+      <span class="pnode-ic" aria-hidden="true">◈</span>
+      <h4 data-i18n="models.p2T">2 · Edge aggregation</h4>
+      <p data-i18n="models.p2B">A free-tier edge worker receives the reports and writes them into a free-tier edge database. Free-tier only, consistent with the free constitution.</p>
+    </div>
+    <div class="parrow" aria-hidden="true">⟶</div>
+    <div class="pnode">
+      <span class="pnode-ic" aria-hidden="true">◉</span>
+      <h4 data-i18n="models.p3T">3 · This page</h4>
+      <p data-i18n="models.p3B">The chart above reads a public JSON endpoint from that database and renders aggregate model usage — published totals only, never per-user records.</p>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="footer">
+  <div class="footer-inner">
+    <div class="footer-brand">
+      <img src="assets/logo.jpg" alt="" width="26" height="26">
+      <span>© <span id="year">2026</span> I'm AiDog</span>
+    </div>
+    <div class="footer-links">
+      <span class="footer-free" data-i18n="footer.free">permanently free</span>
+      <a href="https://github.com/aidog-im/aidog" target="_blank" rel="noopener">GitHub</a>
+      <span class="footer-dim" data-i18n="footer.aidogim">aidog.im</span>
+    </div>
+  </div>
+</footer>
+
+<script src="assets/main.js"></script>
+</body>
+</html>

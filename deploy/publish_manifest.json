@@ -16,6 +16,7 @@
     "overlay/**",
     "tests/**",
     "web/**",
+    "site/**",
     "aidog"
   ],
   "deny": {

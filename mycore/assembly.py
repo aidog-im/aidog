@@ -62,7 +62,9 @@ def build_system_stack(constitution_path: Path = CONSTITUTION,
     stack.append({"role": "system",
                   "content": "[body layer] Skills: call the skill_route tool BEFORE reading "
                              "any SKILL.md file; load TOP1 only, max 2 bodies per turn. "
-                             "Reply to the owner in Simplified Chinese; code/logs stay English."})
+                             "Mirror the user's language in conversation; user-facing "
+                             "strings follow the active locale pack (default en); "
+                             "code/logs stay English."})
     return stack
 
 
