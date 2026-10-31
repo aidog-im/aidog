@@ -11,6 +11,7 @@ __pycache__/
 .state/
 *.log
 node_modules/
+desktop/dist/
 
 # Memory bundles are transport artifacts — they belong in the PRIVATE memory
 # repo, never in the product repo (credential gate + publish gate still apply).

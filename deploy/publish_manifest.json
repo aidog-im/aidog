@@ -10,6 +10,7 @@
     "secrets.env.example",
     "adapters/**",
     "deploy/**",
+    "desktop/**",
     "docs/**",
     "lib/**",
     "mycore/**",

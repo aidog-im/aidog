@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>I'm AiDog — HUD</title>
+<link rel="icon" href="/static/favicon.png" type="image/png">
+<!-- Standalone HUD control bar (desktop shell window, ~460x64 frameless
+     transparent). White #fcfcfa surface + logo blue #2892ff water-drop motif
+     (style.css tokens, compact copy). No app.js / style.css link on purpose —
+     the console must NOT boot inside this tiny window. -->
+<style>
+  :root {
+    --bg: #fcfcfa;
+    --panel: #ffffff;
+    --line: rgba(165, 183, 202, .5);
+    --line-solid: #e2eaf3;
+    --blue: #2892ff;
+    --blue-wash: rgba(40, 146, 255, .09);
+    --cyan: #70e4fd;
+    --text: #133659;
+    --muted: #4c6684;
+    --font: "Segoe UI", system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: transparent;            /* unfilled area = window transparency hole */
+    color: var(--text);
+    font-family: var(--font);
+    font-size: 12px;
+    line-height: 1.35;
+    overflow: hidden;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .hud-bar {
+    display: flex; flex-direction: column; justify-content: center; gap: 5px;
+    height: 100%; margin: 3px; padding: 6px 10px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: 0 6px 16px rgba(0, 22, 51, .12);
+  }
+  .hud-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  /* droplet glyph — style.css motif: rounded square rotated 45deg, point up */
+  .hud-drop {
+    width: 11px; height: 11px; flex: none;
+    background: linear-gradient(135deg, var(--cyan), var(--blue));
+    border-radius: 0 50% 50% 50%;
+    transform: rotate(45deg);
+    box-shadow: 0 0 6px rgba(40, 146, 255, .35);
+  }
+  .hud-title { font-weight: 600; letter-spacing: .02em; white-space: nowrap; }
+  .hud-val { margin-left: auto; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .hud-op { color: var(--muted); flex: none; }
+  .hud-range { flex: 1; min-width: 60px; height: 16px; accent-color: var(--blue); cursor: pointer; }
+  .hud-btn {
+    flex: none; display: inline-flex; align-items: center; justify-content: center; gap: 5px;
+    height: 24px; padding: 0 8px;
+    border: 1px solid var(--line-solid); border-radius: 7px;
+    background: var(--panel); color: var(--muted);
+    font: inherit; white-space: nowrap; cursor: pointer;
+    transition: color .15s ease, border-color .15s ease, background .15s ease;
+  }
+  .hud-btn:hover { border-color: var(--blue); color: var(--blue); }
+  .hud-btn.is-on, .hud-btn[aria-pressed="true"] {
+    background: var(--blue-wash); border-color: var(--blue); color: var(--blue);
+  }
+  .hud-btn svg { width: 13px; height: 13px; flex: none; }
+  .hud-ico { width: 26px; padding: 0; }
+  .hud-notice {
+    display: flex; align-items: center; justify-content: center; text-align: center;
+    height: 100%; margin: 3px; padding: 0 14px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    color: var(--muted);
+    box-shadow: 0 6px 16px rgba(0, 22, 51, .12);
+  }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+
+<div class="hud-bar" id="hudBar">
+  <div class="hud-row">
+    <span class="hud-drop" aria-hidden="true"></span>
+    <span class="hud-title" data-i18n="hud.title">HUD controls</span>
+    <span class="hud-val" id="hudVal">100%</span>
+  </div>
+  <div class="hud-row" id="hudControls">
+    <label class="hud-op" for="hudOpacity" data-i18n="hud.opacity">Opacity</label>
+    <input class="hud-range" id="hudOpacity" type="range" min="20" max="100" step="1"
+           value="100" data-i18n-t="hud.opacity" title="Opacity">
+    <button class="hud-btn hud-ico" id="hudPin" type="button" aria-pressed="false"
+            data-i18n-t="hud.pin" title="Always on top" aria-label="Always on top">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M6.2 2.2h3.6l-.5 3.3 2.3 2.2H4.4l2.3-2.2z"/>
+        <path d="M8 7.7v6.1"/>
+      </svg>
+    </button>
+    <button class="hud-btn hud-ico" id="hudPass" type="button" aria-pressed="false"
+            data-i18n-t="hud.clickThrough" title="Click-through" aria-label="Click-through">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="8" cy="8" r="4.4"/>
+        <path d="M8 1.6v2.1M8 12.3v2.1M1.6 8h2.1M12.3 8h2.1"/>
+      </svg>
+    </button>
+    <button class="hud-btn" id="hudOpen" type="button"
+            data-i18n-t="hud.openConsole" title="Open console" aria-label="Open console">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"
+           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <rect x="1.8" y="3" width="12.4" height="10" rx="1.6"/>
+        <path d="M1.8 6.2h12.4"/>
+      </svg>
+      <span data-i18n="hud.openConsole">Open console</span>
+    </button>
+  </div>
+</div>
+
+<!-- Shown when window.aidogShell is missing (plain browser) or incomplete;
+     the control bar above is hidden in that case. -->
+<div class="hud-notice" id="hudNotice" hidden
+     data-i18n="hud.unsupported">Open this page from the desktop shell to use HUD controls.</div>
+
+<script src="/static/hud.js"></script>
+</body>
+</html>

@@ -275,5 +275,13 @@
   "ctl.wake": "唤醒词（逗号分隔）",
   "ctl.offPh": "留空 = 内核端点",
   "ctl.ttsModelPh": "留空 = 引擎默认",
-  "ctl.wakePh": "hey aidog, 你好艾多"
+  "ctl.wakePh": "hey aidog, 你好艾多",
+  "hud.title": "HUD 控制",
+  "hud.opacity": "透明度",
+  "hud.pin": "置顶",
+  "hud.clickThrough": "鼠标穿透",
+  "hud.openConsole": "打开控制台",
+  "hud.exit": "退出",
+  "hud.unsupported": "请从桌面壳打开本页以使用 HUD 控制。",
+  "hud.bridgeMissing": "桌面壳桥接不可用。"
 }

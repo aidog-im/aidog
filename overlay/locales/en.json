@@ -275,5 +275,13 @@
   "ctl.wake": "Wake phrases (comma separated)",
   "ctl.offPh": "empty = kernel endpoint",
   "ctl.ttsModelPh": "empty = engine default",
-  "ctl.wakePh": "hey aidog, 你好艾多"
+  "ctl.wakePh": "hey aidog, 你好艾多",
+  "hud.title": "HUD controls",
+  "hud.opacity": "Opacity",
+  "hud.pin": "Always on top",
+  "hud.clickThrough": "Click-through",
+  "hud.openConsole": "Open console",
+  "hud.exit": "Quit",
+  "hud.unsupported": "Open this page from the desktop shell to use HUD controls.",
+  "hud.bridgeMissing": "Desktop shell bridge unavailable."
 }
