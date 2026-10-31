@@ -1,12 +1,35 @@
 {
-  "_note": "mycore watchdog config (P4-1c). Copy to watchdog.mycore.local (gitignored) for machine values: process patterns may contain machine-local facts that belong in deploy/*.local (gitignored) only. dry_run=true = shadow mode: probe + log + TG alerts, NEVER restarts. Set --execute or dry_run=false explicitly for live restarts. Notifications: env MYCORE_WD_CHAT (chat id) + TELEGRAM_BOT_TOKEN (send-only).",
+  "_note": "mycore watchdog config (post-swap P5-5 view). Copy to watchdog.mycore.local (gitignored) for machine values. dry_run=true = shadow mode: probe + log + TG alerts, NEVER restarts. Set --execute or dry_run=false explicitly for live restarts. Notifications: env MYCORE_WD_CHAT (chat id) + TELEGRAM_BOT_TOKEN (send-only); without them the watchdog stays log-only.",
   "dry_run": true,
   "interval_sec": 60,
   "throttle_sec": 300,
   "heartbeat_bj": "09:00",
   "targets": [
-    {"name": "gateway", "kind": "process", "value": "<transition gateway command — target RETIRED at P5-5; drop this entry post-swap>"},
-    {"name": "console", "kind": "http", "value": "http://127.0.0.1:8790/api/health"},
-    {"name": "model-a", "kind": "http", "value": "http://127.0.0.1:3456/v1/models"}
+    {
+      "name": "service",
+      "kind": "process",
+      "value": "python3 -m mycore.service",
+      "enabled": true,
+      "pending_if": ["bash", "deploy/run_service.sh", "--check"],
+      "restart": [
+        "bash",
+        "deploy/boot_services.sh"
+      ]
+    },
+    {
+      "name": "console",
+      "kind": "http",
+      "value": "http://127.0.0.1:8790/api/health",
+      "restart": [
+        "bash",
+        "-c",
+        "tmux kill-session -t aidog_web 2>/dev/null; bash deploy/boot_services.sh"
+      ]
+    },
+    {
+      "name": "model-e",
+      "kind": "http",
+      "value": "http://127.0.0.1:3460/v1/models"
+    }
   ]
 }

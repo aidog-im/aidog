@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
-"""aidog_persist — cross-machine memory portability (export / import / list).
+"""aidog_persist — I'm AiDog CLI: one-command setup + memory portability.
 
-Bundles the authoritative memory source (+ optional persona references) into a
-manifest-based tarball for transport through the PRIVATE memory repository
-(single source of truth across machines), then restores it on a fresh machine:
-
+  ./aidog setup                # provision machine-local files, install CLI,
+                               # boot and verify (idempotent fresh-install/repair)
   ./aidog export [--src DIR] [--persona DIR] [--out DIR] [--tag NAME]
   ./aidog import <tarball> [--dest-profile DIR] [--source-home DIR] [--persona-home DIR]
   ./aidog list [--dir DIR]
 
-Source resolution (export): --src > env AIDOG_MEMORY_SRC > MEMORY_SRC in
+export bundles the authoritative memory source (+ optional persona) into a
+tarball for transport through the PRIVATE memory repo; import restores it on
+a fresh machine. Source resolution (export): --src > env AIDOG_MEMORY_SRC > MEMORY_SRC in
 deploy/memory_sources.local > portable default $HOME/.aidog/memory (materialized
 by a previous `aidog import`) > the portable memory-home chain (same 4-step
 chain as aidog_memory.py: env AIDOG_MEMORY_HOME > local MEMORY_HOME >
@@ -542,12 +542,23 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 # ---------------------------------------------------------------------------
 
+def cmd_setup(_args: argparse.Namespace) -> int:
+    """One-command install/repair: run deploy/install.sh (idempotent)."""
+    import subprocess
+    script = Path(__file__).resolve().parent / "install.sh"
+    return subprocess.call(["bash", str(script)])
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="aidog",
-        description="I'm AiDog memory portability CLI: export / import / list "
-                    "manifest-based memory bundles (private memory repo transport).")
+        description="I'm AiDog CLI: setup (one-command install/verify) plus "
+                    "memory portability — export / import / list manifest-based "
+                    "memory bundles (private memory repo transport).")
     sub = ap.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("setup", help="provision machine-local files, install the CLI, boot and verify (idempotent)")
+    s.set_defaults(func=cmd_setup)
 
     e = sub.add_parser("export", help="bundle memory (+persona) into a manifest tarball")
     e.add_argument("--src", help="memory source dir (highest precedence)")

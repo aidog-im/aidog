@@ -14,6 +14,20 @@ by this repo / business layer). Authoritative design document:
 - **Phase 2**: custom intelligent-agent substrate for the chain public chain
 - **Endgame**: `mycore` self-developed kernel — swap the core, never swap "me"
 
+## Install
+
+```bash
+git clone <product-repo-url> aidog && cd aidog   # private repo
+bash deploy/install.sh                           # one command: provision + boot + verify
+$EDITOR secrets.env                              # fill the slots it lists (by name)
+aidog setup                                      # re-run until it prints READY
+```
+
+The installer creates every machine-local file (all gitignored) from sanitized
+templates, installs the `aidog` command, boots the runtime, and reports exactly
+which credential slots remain — by name, never by value. Full guide:
+[`docs/installation.md`](docs/installation.md).
+
 ## Language / i18n
 
 - Source code, comments, and markdown docs: **English** (international route).

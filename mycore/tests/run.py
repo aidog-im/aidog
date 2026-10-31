@@ -608,7 +608,8 @@ def test_tg() -> None:
 
 def test_watchdog() -> None:
     import os
-    from mycore.watchdog import Watchdog, WatchConfig, WatchConfigError, TargetState
+    from mycore.watchdog import (Watchdog, WatchConfig, WatchConfigError,
+                                 TargetState, pending_expected)
 
     with tempfile.TemporaryDirectory() as td:
         tdp = Path(td)
@@ -732,6 +733,42 @@ def test_watchdog() -> None:
               str(shadow))
         check("wd: dry-run still never restarts", "x" not in restarts, str(restarts))
         cfg.dry_run = False
+
+        # --- pending_if: fail-closed provisioning is NOT an outage ---
+        # (fresh install: service unprovisioned -> state "pending", no restart
+        #  loop, no alert spam; readiness returns rc 3/4)
+        cfg_path.write_text(json.dumps(good), encoding="utf-8")
+        pcfg = WatchConfig.load(cfg_path)
+        pcfg.dry_run = False  # LIVE: a mis-classified down WOULD restart here
+        pend_logs, pend_notes, pend_restarts = [], [], []
+        clock[0] += 1000
+        wdp = Watchdog(pcfg, tdp / "state_pend.json",
+                       log=pend_logs.append,
+                       probe=lambda t: False,
+                       restart=lambda t: pend_restarts.append(t["name"]) or (True, "ok"),
+                       pending=lambda t: True,
+                       now=lambda: clock[0])
+        wdp.notify = pend_notes.append
+        rp = wdp.check_once()
+        check("wd: pending_if marks pending (not down)",
+              all(v == "pending" for v in rp.values()), rp)
+        check("wd: pending never restarts", pend_restarts == [], str(pend_restarts))
+        check("wd: pending never alerts",
+              not any("DOWN" in a for a in pend_logs + pend_notes),
+              str(pend_logs + pend_notes)[:200])
+        # provisioning done: probe healthy -> up (state transition logged,
+        # no 'recovered' alert storm for a state that was never down)
+        wdp._probe = lambda t: True
+        ru = wdp.check_once()
+        check("wd: pending -> up once provisioned", all(v == "up" for v in ru.values()), ru)
+        # real executor semantics: rc 3/4 = pending; rc 0/1/invalid = down
+        check("wd: pending_expected honors readiness rc",
+              pending_expected({"pending_if": ["bash", "-c", "exit 3"]}) is True and
+              pending_expected({"pending_if": ["bash", "-c", "exit 4"]}) is True and
+              pending_expected({"pending_if": ["bash", "-c", "exit 0"]}) is False and
+              pending_expected({"pending_if": ["bash", "-c", "exit 1"]}) is False and
+              pending_expected({}) is False and
+              pending_expected({"pending_if": "not-a-list"}) is False)
 
         # --- state persistence roundtrip ---
         wd.states["gw"].restart_attempts = 7

@@ -14,7 +14,11 @@ Design (owner authorized process switches, 2026-10-18):
 Config file (JSON): {"dry_run": bool, "interval_sec": int, "throttle_sec": int,
   "targets": [{"name", "kind": "process"|"http", "value",
                "enabled": bool (optional, default true — false = staged until cutover),
-               "restart": ["shell", "argv"...] (optional)}]}
+               "restart": ["shell", "argv"...] (optional),
+               "pending_if": ["argv"...] (optional — readiness command run when the
+                   probe fails; rc 3/4 = fail-closed provisioning pending (fresh
+                   install): state "pending", NO restart, NO alert; any other rc =
+                   regular down)}]}
 State: JSON file next to config (or --state), gitignored runtime only.
 English comments per repo i18n policy.
 """
@@ -43,7 +47,7 @@ class WatchConfigError(ValueError):
 
 @dataclass
 class TargetState:
-    state: str = "unknown"            # up | down | unknown
+    state: str = "unknown"            # up | down | pending | unknown
     since: float = 0.0
     last_restart: float = 0.0
     restart_attempts: int = 0
@@ -118,6 +122,21 @@ def probe_target(t: dict) -> bool:
         return False
 
 
+def pending_expected(t: dict) -> bool:
+    """Readiness gate for a failing probe: run the target's `pending_if`
+    command (argv list, shell=False). rc 3/4 = fail-closed provisioning is
+    pending (expected on a fresh install — not an outage). Missing/invalid
+    command, timeout or spawn error = not pending (regular down path)."""
+    cmd = t.get("pending_if")
+    if not isinstance(cmd, list) or not cmd or not all(isinstance(c, str) for c in cmd):
+        return False
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=10)
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return proc.returncode in (3, 4)
+
+
 def run_restart(t: dict, timeout: int = RESTART_TIMEOUT) -> tuple[bool, str]:
     """Execute a target's restart command (argv list, shell=False).
     Returns (ok, detail). Only called when dry_run is off."""
@@ -143,6 +162,7 @@ class Watchdog:
                  log: Callable[[str], None] | None = None,
                  probe: Callable[[dict], bool] = probe_target,
                  restart: Callable[[dict], tuple[bool, str]] = run_restart,
+                 pending: Callable[[dict], bool] = pending_expected,
                  now: Callable[[], float] = time.time) -> None:
         self.cfg = cfg
         self.state_path = Path(state_path)
@@ -150,6 +170,7 @@ class Watchdog:
         self._log = log or (lambda line: print(line, flush=True))
         self._probe = probe
         self._restart = restart
+        self._pending = pending
         self._now = now
         self.states: dict[str, TargetState] = {t["name"]: TargetState() for t in cfg.targets}
         self._load_state()
@@ -205,10 +226,16 @@ class Watchdog:
             name = t["name"]
             st = self.states[name]
             healthy = self._probe(t)
-            cur = "up" if healthy else "down"
+            if healthy:
+                cur = "up"
+            else:
+                # A target that is merely not provisioned yet (fail-closed
+                # fresh install) is PENDING — never an outage: no restart
+                # loop, no alert spam (install.sh verifies this path).
+                cur = "pending" if self._pending(t) else "down"
             if st.state != cur:
                 self._log(f"[wd] {name}: {st.state or 'unknown'} -> {cur}")
-            if healthy:
+            if cur == "up":
                 if st.state == "down":
                     self.notify(f"🟢 mycore wd · {name} recovered "
                                 f"(attempts={st.restart_attempts})")
@@ -216,6 +243,12 @@ class Watchdog:
                 st.restart_attempts = 0
                 st.since = now
                 results[name] = "up"
+                continue
+            if cur == "pending":
+                st.state = "pending"
+                st.restart_attempts = 0
+                st.since = now
+                results[name] = "pending"
                 continue
 
             # ---- down path ----
