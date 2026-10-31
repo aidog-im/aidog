@@ -5570,13 +5570,19 @@ function renderSessions(q) {
         `data-sess-exp="${escapeHtml(sid)}" data-sess-fmt="${fmt}" ` +
         `aria-label="${escapeHtml("export session " + sid + " as " + fmt)}" ` +
         `style="padding:2px 9px;font-size:12px;">${fmt.toUpperCase()}</button>`;
+      // X20: make THIS row the live chat session (the server answers an
+      // honest no-op when it already is one).
+      const open = `<button class="btn" type="button" ` +
+        `data-sess-open="${escapeHtml(sid)}" ` +
+        `aria-label="${escapeHtml("open session " + sid + " as the live chat session")}" ` +
+        `style="padding:2px 9px;font-size:12px;">OPEN</button>`;
       return `<div class="ctl-row">` +
         `<label style="flex:1;min-width:0;overflow-wrap:anywhere;">` +
         `${escapeHtml(bits.filter(Boolean).join(" · "))}` +
         `${escapeHtml(hits + partial)}</label>` +
         `<span class="stat-note" style="margin-top:0;overflow-wrap:anywhere;">` +
         `${escapeHtml(s.summary || "")}</span>` +
-        exp("json") + exp("md") + `</div>`;
+        open + exp("json") + exp("md") + `</div>`;
     }).join("");
     if (sessData.search) {
       const m = sessData.search;
@@ -5603,6 +5609,65 @@ function renderSessions(q) {
     pruneEl.textContent = txt;
     pruneEl.className = pr.advisory ? "stat-note warn" : "stat-note";
     pruneEl.hidden = false;
+  }
+}
+
+/* X20 live session switch: OPEN a listed session as the live chat session.
+   The server does the crash-safe rotation (old live -> archive/, target ->
+   live); on success the transcript and the X14 context line repaint from the
+   NEW live file, and the list refetches (the opened row is gone — it became
+   the live session). */
+async function chatReload() {
+  const log = document.getElementById("chatLog");
+  if (log) {
+    log.innerHTML = `<div class="chat-empty" id="chatEmpty">` +
+      `${escapeHtml(t("chat.empty", "no messages yet"))}</div>`;
+  }
+  const meta = document.getElementById("chatMeta");
+  if (meta) meta.textContent = "";
+  await loadChatHistory();          // history + context ride one fetch
+}
+
+async function sessionResume(id) {
+  const msg = document.getElementById("sessMsg");
+  const say = (kind, text) => {
+    if (msg) { msg.className = "save-state " + kind; msg.textContent = text; }
+  };
+  if (chatBusy) {                   // never swap the file under a live turn
+    say("err", t("chat.qBusy", "wait for the current turn"));
+    return;
+  }
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    say("err", t("chat.needToken", "access token required (set it in Settings)"));
+    return;
+  }
+  try {
+    const r = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify({ action: "resume", id }) });
+    const body = await r.json().catch(() => ({}));
+    if (r.status === 401) {
+      say("err", t("chat.badToken", "401 · unauthorized")); return;
+    }
+    if (!r.ok) {
+      say("err", String((body.details || [body.error || "error"])[0] || ""));
+      return;
+    }
+    if (body.resumed === false) {           // honest server no-op
+      say("", t("sess.live", "already the live session"));
+      return;
+    }
+    await chatReload();
+    const q = ((document.getElementById("sessSearch") || {}).value || "").trim();
+    refreshSessions(q);                     // the opened row is now live
+    say("", t("sess.opened", "session opened ✓"));
+    chatNote("ok", t("sess.opened", "session opened ✓"));
+  } catch (e) {
+    say("err", t("cron.fail", "request failed — ") +
+      String((e && e.message) || e).slice(0, 80));
   }
 }
 
@@ -5670,6 +5735,73 @@ async function chatImgPrepare(file) {
            dataUrl: cv.toDataURL("image/jpeg", 0.85) };
 }
 
+function chatImgNote(text, warn) {
+  /* X16/X21: ONE chip element for every intake path. `warn` colours the note
+     (honest hint), otherwise it is the ready state. */
+  const el = document.getElementById("chatImgNote");
+  if (!el) return;
+  el.hidden = false;
+  el.className = warn ? "stat-note warn" : "stat-note";
+  el.textContent = text;
+}
+
+async function chatImgSet(file, inputEl) {
+  /* X21: the single preparation pipeline shared by the file input, a
+     clipboard paste and a drag-and-drop: image/* SINGLE file -> FileReader ->
+     canvas thumbnail (≤1024px JPEG) -> one-shot `pendingImage` chip that
+     rides the next message (X16 contract, unchanged). Anything else answers
+     honestly and leaves the composer TEXT untouched — a rejected paste never
+     clears what the user was typing. `inputEl` (the file input, when that is
+     the source) is reset on a read failure so the same file can be retried. */
+  if (!file) {
+    pendingImage = null;
+    const noteEl = document.getElementById("chatImgNote");
+    if (noteEl) noteEl.hidden = true;
+    return false;
+  }
+  if (!String(file.type || "").startsWith("image/")) {
+    // non-image file (paste/drop bypasses the input's accept list)
+    chatImgNote(t("chat.imgOnly", "only images can be attached"), true);
+    return false;
+  }
+  try {
+    pendingImage = await chatImgPrepare(file);
+    chatImgNote(t("chat.imgReady", "image ready: ") + pendingImage.name +
+      t("chat.imgRides", " — goes with your next message"), false);
+    return true;
+  } catch (e) {
+    pendingImage = null;
+    if (inputEl) inputEl.value = "";
+    chatImgNote(t("chat.imgBad",
+      "could not read that image — pick a PNG/JPEG/WEBP"), true);
+    return false;
+  }
+}
+
+function chatImgFiles(dt) {
+  /* X21: files out of a DataTransfer (paste clipboardData / drop
+     dataTransfer), via .files first and the item list as fallback. */
+  if (!dt) return [];
+  if (dt.files && dt.files.length) return Array.from(dt.files);
+  const out = [];
+  for (const it of Array.from(dt.items || [])) {
+    if (it.kind === "file") {
+      const f = it.getAsFile();
+      if (f) out.push(f);
+    }
+  }
+  return out;
+}
+
+async function chatImgIntake(dt) {
+  const files = chatImgFiles(dt);
+  if (files.length === 1) return chatImgSet(files[0], null);
+  chatImgNote(files.length
+    ? t("chat.imgOne", "only one image can be attached at a time")
+    : t("chat.imgOnly", "only images can be attached"), true);
+  return false;
+}
+
 /* --- wiring (every listener guarded: an absent element is a no-op) --- */
 const sessGoEl = document.getElementById("sessGo");
 if (sessGoEl) sessGoEl.addEventListener("click", () => {
@@ -5691,40 +5823,49 @@ if (sessAllEl) sessAllEl.addEventListener("click", () => {
 });
 const sessListEl = document.getElementById("sessList");
 if (sessListEl) sessListEl.addEventListener("click", e => {
-  const b = e.target && e.target.closest
-    ? e.target.closest("[data-sess-exp]") : null;
+  if (!e.target || !e.target.closest) return;
+  const o = e.target.closest("[data-sess-open]");       // X20 resume
+  if (o) { sessionResume(o.getAttribute("data-sess-open")); return; }
+  const b = e.target.closest("[data-sess-exp]");
   if (b) sessionExport(b.getAttribute("data-sess-exp"),
                        b.getAttribute("data-sess-fmt"));
 });
 const chatImgEl = document.getElementById("chatImg");
-if (chatImgEl) chatImgEl.addEventListener("change", async () => {
-  const noteEl = document.getElementById("chatImgNote");
+if (chatImgEl) chatImgEl.addEventListener("change", () => {
+  // X16 intake (file picker) — same chatImgSet pipeline as paste/drop (X21)
   const file = chatImgEl.files && chatImgEl.files[0];
-  if (!file) {
-    pendingImage = null;
-    if (noteEl) noteEl.hidden = true;
-    return;
-  }
-  try {
-    pendingImage = await chatImgPrepare(file);
-    if (noteEl) {
-      noteEl.hidden = false;
-      noteEl.className = "stat-note";
-      noteEl.textContent = t("chat.imgReady", "image ready: ") +
-        pendingImage.name +
-        t("chat.imgRides", " — goes with your next message");
-    }
-  } catch (e) {
-    pendingImage = null;
-    chatImgEl.value = "";
-    if (noteEl) {
-      noteEl.hidden = false;
-      noteEl.className = "stat-note warn";
-      noteEl.textContent = t("chat.imgBad",
-        "could not read that image — pick a PNG/JPEG/WEBP");
-    }
-  }
+  chatImgSet(file, chatImgEl);
 });
+
+/* X21 paste: image files from the clipboard enter the SAME pipeline; a text
+   paste is left completely alone (no preventDefault, composer untouched). */
+const chatInputEl = document.getElementById("chatInput");
+if (chatInputEl) chatInputEl.addEventListener("paste", e => {
+  const dt = e.clipboardData || (typeof window !== "undefined"
+    ? window.clipboardData : null);
+  const files = chatImgFiles(dt);
+  if (!files.length) return;              // ordinary text paste — default
+  e.preventDefault();                     // a file must never corrupt text
+  chatImgIntake(dt);
+});
+
+/* X21 drag-and-drop over the CHAT card: Files-only drag is accepted, the
+   drop feeds the same pipeline; anything else falls through to the browser. */
+const chatDropZone = document.querySelector("#view-chat .card.chat");
+if (chatDropZone) {
+  const filesOver = e => !!(e && e.dataTransfer &&
+    Array.from(e.dataTransfer.types || []).indexOf("Files") >= 0);
+  chatDropZone.addEventListener("dragover", e => {
+    if (!filesOver(e)) return;
+    e.preventDefault();
+    try { e.dataTransfer.dropEffect = "copy"; } catch (err) { /* read-only */ }
+  });
+  chatDropZone.addEventListener("drop", e => {
+    if (!filesOver(e)) return;
+    e.preventDefault();
+    chatImgIntake(e.dataTransfer);
+  });
+}
 
 function setView(name, fromUser) {
   if (!VIEWS.includes(name)) name = "overview";

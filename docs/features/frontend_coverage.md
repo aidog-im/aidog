@@ -150,6 +150,7 @@ Everything below is additive; the security contract of §3 is unchanged
 | `POST /api/checkpoints {action:"restore", id}` (0.5.51, X10) | `Bearer WEB_TOKEN` | 200 restore · **404** unknown id · **409** missing/corrupt snapshot (mycore's own message in `details[0]`) · 401; one stderr audit line per attempt |
 | `GET /api/profiles` (0.5.51, X11) | loopback read (no auth) | read-only rows `{name, default, presence counts, port}` — **zero value echo** |
 | `POST /api/profiles {action:"create"\|"rm", name}` (0.5.51, X11) | `Bearer WEB_TOKEN` | spawns `aidog_persist.py profile <action> <name>` (CLI = single source of truth); 400 reserved `default`/bad name (checked before spawn) · CLI refusal → non-200 with its **first line verbatim in `details[0]`** (rm has **no `--force`**: non-empty state refuses) · 401; every refusal writes an audit line |
+| `POST /api/chat {action:"resume", id}` (0.5.52, X20) | `Bearer WEB_TOKEN` (inherited chat gate) | 200 `{ok, resumed, id, archived}` · honest no-op `resumed:false+reason` when already active · **400** missing/invalid/traversal id · **404** unknown · **500** class-level reason with the active path left intact (copy → rotate → atomic rename → drop source is crash-safe); one sanitized stderr audit line per request |
 
 **Schema + bug fixes**
 

@@ -212,7 +212,7 @@ from mycore.loop import run_turn  # noqa: E402
 from mycore.model import ChatClient  # noqa: E402
 from mycore.service import state_dir as mycore_state_dir  # noqa: E402
 from mycore.session import (Session, export_session, list_sessions,  # noqa: E402
-                             prune_old)
+                             prune_old, session_file)
 from mycore.tools import (KNOWN_TOOL_NAMES, build_registry,  # noqa: E402
                           resolve_disabled_tools)
 HOST, PORT = "127.0.0.1", int(os.environ.get("AIDOG_WEB_PORT", "8790"))
@@ -2466,12 +2466,13 @@ def chat_model_whitelist() -> list[str]:
     return [cli.resolve_model_config().model]
 
 
-def clear_chat_session() -> bool:
-    """Archive the console session (POST /api/chat {action:'clear'}).
-    Returns True when something was rotated."""
+def _rotate_active_session() -> Path:
+    """Move the live console session file into
+    archive/<stem>.<stamp>[.<n>].jsonl and return where it went. Shared by
+    {action:'clear'} and the X20 resume — ONE rotation rule, one archive
+    namespace, one collision counter. Raises OSError to the caller (the
+    source file is never half-moved: same-directory move is atomic)."""
     src = chat_session_path()
-    if not src.is_file():
-        return False
     arch = chat_sessions_dir() / "archive"
     arch.mkdir(parents=True, exist_ok=True)
     stamp = int(time.time())
@@ -2481,7 +2482,131 @@ def clear_chat_session() -> bool:
         n += 1
         dst = arch / f"{CHAT_SESSION_NAME}.{stamp}.{n}.jsonl"
     shutil.move(str(src), str(dst))
+    return dst
+
+
+def clear_chat_session() -> bool:
+    """Archive the console session (POST /api/chat {action:'clear'}).
+    Returns True when something was rotated."""
+    if not chat_session_path().is_file():
+        return False
+    _rotate_active_session()
     return True
+
+
+def resume_chat_session(sid: str) -> tuple[int, dict]:
+    """X20 live session switch (POST /api/chat {action:'resume', id}).
+    Returns (http_code, payload). Steps in this exact, crash-safe order:
+      1. resolve `id` — SAME grammar + resolved-parent double-check export
+         uses, scope = sessions root and archive/ only (400 bad grammar /
+         404 unknown, id verbatim in details[0]); the id being the LIVE file
+         answers an honest no-op 200 {resumed:false, reason:'already active'};
+      2. copy the target to a temp name IN THE SESSIONS ROOT (same directory
+         as the active file, so the commit rename is same-directory);
+      3. rotate the current active session into archive/ — the exact rotation
+         {action:'clear'} uses, so the old live session survives as a copy;
+      4. rename the temp onto the active path (atomic within the directory);
+      5. only NOW delete the target's source copy: it moved into the live
+         slot, so the list never shows it twice (a failed unlink degrades to
+         an extra listed copy — never data loss, reported as
+         `leftover_source:true`).
+    Failures at 2/3 leave the active file byte-identical (temp removed); a
+    failure at 4 restores the archived copy to the active path first — so the
+    live path always ends up either the original file or the new one, never
+    half of each. Nothing is deleted before the switch has committed, so the
+    operation is non-destructive: the previous live session is in archive/,
+    the target's only copy becomes the live session. ONE stderr audit line per
+    attempt (sanitized id only — grammar-safe charset, no newlines), zero
+    message content, zero credentials."""
+    root = chat_sessions_dir()
+    active = chat_session_path()
+    audit_id = re.sub(r"[^A-Za-z0-9._/-]", "?", str(sid))[:96]
+
+    def _audit(result: str) -> None:
+        sys.stderr.write(f"chat session resume id={audit_id} result={result}\n")
+
+    try:
+        target = session_file(root, sid)
+    except ValueError as e:
+        _audit("bad_id")
+        return 400, {"error": "validation failed", "details": [str(e)]}
+    except FileNotFoundError as e:
+        _audit("not_found")
+        return 404, {"error": "not found", "details": [str(e)]}
+    try:
+        same_live = target == active.resolve()
+    except OSError:
+        same_live = False
+    if same_live:
+        _audit("noop")
+        return 200, {"ok": True, "resumed": False, "id": str(sid),
+                     "reason": "already active"}
+    def _fail(result: str, detail: str) -> tuple[int, dict]:
+        _audit(result)
+        return 500, {"error": "resume failed", "details": [detail]}
+
+    # 1. copy the target next to the active file — nothing committed yet
+    stamp = int(time.time())
+    tmp = root / f"{CHAT_SESSION_NAME}.resume-{stamp}.jsonl.tmp"
+    n = 0
+    while tmp.exists():
+        n += 1
+        tmp = root / f"{CHAT_SESSION_NAME}.resume-{stamp}.{n}.jsonl.tmp"
+    try:
+        shutil.copy2(str(target), str(tmp))
+    except OSError as e:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return _fail(f"copy_failed:{type(e).__name__}",
+                     f"copy failed ({type(e).__name__})")
+    # 2. rotate the live session into archive/ (clear semantics)
+    archived: Path | None = None
+    if active.is_file():
+        try:
+            archived = _rotate_active_session()
+        except OSError as e:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            return _fail(f"archive_failed:{type(e).__name__}",
+                         f"archive failed ({type(e).__name__})")
+    # 3. commit: the temp becomes the live session (atomic rename)
+    try:
+        os.replace(str(tmp), str(active))
+    except OSError as e:
+        restored = True
+        if archived is not None:
+            try:
+                shutil.move(str(archived), str(active))
+                archived = None
+            except OSError:
+                restored = False
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        if not restored:
+            return _fail(f"rename_failed:{type(e).__name__}",
+                         f"rename failed ({type(e).__name__}) and the "
+                         f"archived copy could not be restored — the live "
+                         f"session is in archive/ only")
+        return _fail(f"rename_failed:{type(e).__name__}",
+                     f"rename failed ({type(e).__name__})")
+    # 4. committed — drop the target's now-duplicated source copy
+    leftover = False
+    try:
+        target.unlink()
+    except OSError:
+        leftover = True
+    _audit("ok_leftover" if leftover else "ok")
+    payload: dict = {"ok": True, "resumed": True, "id": str(sid),
+                     "archived": archived is not None}
+    if leftover:
+        payload["leftover_source"] = True
+    return 200, payload
 
 
 # ------------------------------------------- Wave 6 delta2: X12 auto-prune ---
@@ -4540,7 +4665,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_chat(self) -> None:
         """POST /api/chat — one streamed agent turn (same loop/stack/session
-        contract as the TG pipeline), or {action:'clear'} to archive.
+        contract as the TG pipeline), or {action:'clear'} to archive,
+        or {action:'resume', id} (X20) to switch the live session.
 
         Events: meta {model} · delta {text} · tool {name, ok} ·
                 progress {server, tool, message, progress} (MCP progress,
@@ -4573,6 +4699,19 @@ class Handler(BaseHTTPRequestHandler):
                                                + ", ".join(allowed)]}, 400)
         if doc.get("action") == "clear":
             return self._json({"ok": True, "archived": clear_chat_session()})
+        if doc.get("action") == "resume":
+            # X20 live session switch — dispatched BEFORE the text gate (like
+            # clear): it carries `id`, never `text`. Same bearer gate as every
+            # /api/chat write; 400/404/500 come back as honest JSON.
+            sid = doc.get("id")
+            if not isinstance(sid, str) or not sid.strip():
+                sys.stderr.write("chat session resume id=- result=no_id\n")
+                return self._json({"error": "validation failed",
+                                   "details": ["id is required (a session "
+                                               "id from GET /api/sessions)"]},
+                                  400)
+            code, payload = resume_chat_session(sid.strip())
+            return self._json(payload, code)
         text = doc.get("text")
         if not isinstance(text, str) or not text.strip():
             return self._json({"error": "validation failed",

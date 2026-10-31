@@ -299,6 +299,38 @@ def _size(path: Path) -> int:
         return 0
 
 
+def _resolve_session_path(directory: str | Path, sid: str) -> Path:
+    """Grammar-checked id -> existing session file. Shared by
+    export_session and the console resume face (X20) so one rule governs
+    both: the id grammar plus a resolved-parent check make a traversal
+    impossible even if the grammar is ever loosened. Raises FileNotFoundError
+    naming the id (honest 404 in the HTTP layer)."""
+    root = Path(directory)
+    target = root / f"{sid}{SESSION_SUFFIX}"
+    try:
+        resolved = target.resolve()
+        base = root.resolve()
+        ok_parent = resolved.parent == base or resolved.parent == base / "archive"
+    except OSError:
+        raise FileNotFoundError(f"no session {sid}") from None
+    if not ok_parent or not resolved.is_file():
+        raise FileNotFoundError(f"no session {sid}")
+    return resolved
+
+
+def session_file(directory: str | Path, sid: str) -> Path:
+    """X20 resume resolver: one session id (root or archive/ level) -> its
+    file, with the SAME grammar and parent double-check export uses — one
+    accept/reject rule, so a resume can never leave the sessions directory.
+    Raises ValueError (bad grammar, -> 400) or FileNotFoundError (unknown id,
+    -> 404)."""
+    sid = str(sid or "").strip()
+    if not _SID_RE.fullmatch(sid):
+        raise ValueError("session id must be [A-Za-z0-9._-] segments with "
+                         "at most one archive/ level")
+    return _resolve_session_path(directory, sid)
+
+
 def export_session(directory: str | Path, sid: str, fmt: str = "json") -> tuple[str, str]:
     """X13 export: one session as (text, content_type).
 
@@ -315,16 +347,7 @@ def export_session(directory: str | Path, sid: str, fmt: str = "json") -> tuple[
     fmt = str(fmt or "").strip().lower()
     if fmt not in ("json", "md"):
         raise ValueError("format must be one of: json | md")
-    root = Path(directory)
-    target = root / f"{sid}{SESSION_SUFFIX}"
-    try:
-        resolved = target.resolve()
-        base = root.resolve()
-        ok_parent = resolved.parent == base or resolved.parent == base / "archive"
-    except OSError:
-        raise FileNotFoundError(f"no session {sid}") from None
-    if not ok_parent or not resolved.is_file():
-        raise FileNotFoundError(f"no session {sid}")
+    resolved = _resolve_session_path(directory, sid)
     sess = Session(resolved)
     meta = sess.meta()
     msgs = sess.load()

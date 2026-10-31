@@ -377,10 +377,12 @@
         <div class="chat-meta" id="ctxMeta" hidden></div>
       </section>
 
-      <!-- Wave 6 delta2 (X13 + X12): session browser — READ-ONLY three states
-           (list / searching / empty), substring search honestly labeled (no
-           FTS claim), per-row JSON/MD export downloads, and the opt-in
-           auto-prune state + one-shot disk advisory (X12) on one line. -->
+      <!-- Wave 6 delta2 (X13 + X12) + delta3 (X20): session browser — list /
+           search / empty states, substring search honestly labeled (no FTS
+           claim), per-row OPEN (X20: make it the LIVE chat session — the
+           server rotates the old live file into archive/, crash-safe) +
+           JSON/MD export downloads, and the opt-in auto-prune state +
+           one-shot disk advisory (X12) on one line. -->
       <section class="card">
         <h2><span>SESSIONS</span><span class="chat-badge" id="sessBadge">–</span></h2>
         <div class="ctl-row">
