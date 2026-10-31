@@ -1,0 +1,106 @@
+/* Skills catalog page — page-scoped skin for site/skills.html.
+   Draft E design language: paper ground, tech-blue accent, engraved rules.
+   This file is page-only; assets/style.css and assets/main.js are untouched
+   (so no ?v bump is owed on site/index.html). */
+
+/* ------------------------------------------------------------ hero --- */
+.sk-hero { position: relative; padding-top: clamp(112px, 16vh, 168px); }
+.sk-hero .section-head { margin-bottom: 0; }
+.sk-hero h1 {
+  font-size: clamp(34px, 5vw, 58px); line-height: 1.03; margin-top: 16px;
+  color: var(--ink);
+}
+.sk-hero .section-sub { max-width: 720px; }
+.sk-rosette {
+  position: absolute; top: clamp(96px, 13vh, 140px); right: 0;
+  width: clamp(140px, 22vw, 260px); height: auto; color: var(--ink);
+  opacity: .5; pointer-events: none;
+}
+.sk-note {
+  margin-top: 28px; max-width: 760px;
+  border-left: 2px solid var(--blue); padding: 4px 0 4px 16px;
+}
+.sk-note b {
+  display: block; font-family: var(--mono); font-size: 11.5px;
+  letter-spacing: .16em; text-transform: uppercase; color: var(--blue-deep);
+  margin-bottom: 6px; font-weight: 400;
+}
+.sk-note p { margin: 0; color: var(--muted); font-size: 14.5px; line-height: 1.7; }
+.sk-meta {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 14px;
+  margin-top: 30px;
+}
+.sk-count { font-family: var(--mono); font-size: 12.5px; color: var(--blue-deep); }
+.sk-count b { font-weight: 600; }
+
+/* ---------------------------------------------------------- groups --- */
+.sk-groups { margin-top: clamp(48px, 7vh, 78px); }
+.sk-group { margin-top: 46px; }
+.sk-group:first-child { margin-top: 0; }
+.sk-group-head {
+  display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+  border-bottom: 1px solid var(--line); padding-bottom: 12px;
+  margin-bottom: 20px;
+}
+.sk-cat {
+  font-size: clamp(20px, 2.3vw, 26px); color: var(--navy); margin: 0;
+  letter-spacing: -.01em;
+}
+.sk-catdesc { color: var(--muted); font-size: 13.5px; margin: 0; }
+.sk-n {
+  margin-left: auto; font-family: var(--mono); font-size: 11px;
+  letter-spacing: .12em; color: var(--blue-deep);
+  border: 1px solid var(--line); border-radius: 999px; padding: 3px 11px;
+  background: var(--panel-2); white-space: nowrap;
+}
+
+/* ----------------------------------------------------------- cards --- */
+/* page-local grid: auto-fit so a one-card category still fills the row,
+   while 2/3-card categories keep the home page's rhythm at any width */
+.sk-group .feature-grid {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+.sk-card { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.sk-cardhead { display: flex; align-items: baseline; gap: 10px; }
+.sk-cardhead h4 {
+  margin: 0; font-family: var(--mono); font-size: 14.5px;
+  letter-spacing: .04em; color: var(--ink); overflow-wrap: anywhere;
+}
+.sk-ver {
+  margin-left: auto; flex: none; font-family: var(--mono); font-size: 10.5px;
+  letter-spacing: .1em; color: var(--blue-deep);
+  border-color: rgba(40, 146, 255, .45);
+}
+.sk-card p { margin: 0; font-size: 13.8px; line-height: 1.7; color: var(--muted);
+  overflow-wrap: anywhere; }
+.sk-tags { display: flex; flex-wrap: wrap; gap: 7px; margin-top: auto; }
+.sk-tags .chip { max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
+.sk-req { display: inline-flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
+.sk-req code {
+  font-family: var(--mono); font-size: 10.5px; color: var(--navy);
+  background: rgba(40, 146, 255, .10); padding: 1px 6px; border-radius: 3px;
+  overflow-wrap: anywhere;
+}
+.sk-bad-bundled { color: var(--blue-deep); border-color: rgba(40, 146, 255, .5); }
+.sk-bad-catalog { color: var(--muted); }
+
+.sk-fallback {
+  margin-top: 34px; padding: 26px 22px; border: 1px dashed var(--line-2);
+  background: linear-gradient(180deg, rgba(255, 255, 255, .9),
+    rgba(246, 249, 252, .7));
+  color: var(--muted); font-size: 14px;
+}
+.sk-fallback a { color: var(--blue-deep); text-decoration: underline; }
+.sk-loading { color: var(--muted); font-family: var(--mono); font-size: 12.5px;
+  letter-spacing: .1em; }
+
+/* ------------------------------------------------------- responsive --- */
+@media (max-width: 860px) {
+  .sk-rosette { position: static; display: block; margin-top: 22px;
+    width: min(220px, 60vw); opacity: .45; }
+  .sk-n { margin-left: 0; }
+}
+@media (max-width: 640px) {
+  .sk-hero { padding-top: 104px; }
+  .sk-cardhead { flex-wrap: wrap; }
+}

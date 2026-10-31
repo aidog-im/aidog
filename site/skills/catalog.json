@@ -1,0 +1,155 @@
+{
+  "skills": [
+    {
+      "slug": "growth-ops",
+      "name": "growth-ops",
+      "category": "automation-ops",
+      "description": "Use when you need free distribution for a site or project — search-engine indexing, directory submissions, verification emails, an overnight unattended submission run, or a judgement call on whether a channel is worth retrying.",
+      "version": "1.0.0",
+      "requires": [
+        "run_bash",
+        "http_fetch"
+      ],
+      "install_status": "catalog"
+    },
+    {
+      "slug": "mail-assistant",
+      "name": "mail-assistant",
+      "category": "automation-ops",
+      "description": "Use when asked to check the inbox or triage incoming mail — read-only listing, four-class sorting, drafted replies that mirror the sender's language and never send themselves, activation-link verification, and a to-do report for the owner.",
+      "version": "1.0.0",
+      "requires": [
+        "CHANNEL_IMAP_USER",
+        "CHANNEL_IMAP_PASS",
+        "http_fetch"
+      ],
+      "install_status": "catalog"
+    },
+    {
+      "slug": "site-ops",
+      "name": "site-ops",
+      "category": "automation-ops",
+      "description": "Use when operating a static site on an edge platform — DNS changes, custom-domain binding, scoped API tokens, cache purge, a locked deploy chain — or when diagnosing a deploy, header, or ghost-path failure.",
+      "version": "1.0.0",
+      "requires": [
+        "run_bash",
+        "http_fetch"
+      ],
+      "install_status": "catalog"
+    },
+    {
+      "slug": "analysis-pipeline",
+      "name": "analysis-pipeline",
+      "category": "content",
+      "description": "Use when turning a submitted request for a deep website or project analysis into a publishable long-form article — worthiness scorecard, evidence gathering, anti-poisoning rules, bilingual draft, lint and a static publish package.",
+      "version": "1.0.0",
+      "requires": [
+        "http_fetch",
+        "write_file"
+      ],
+      "install_status": "catalog"
+    },
+    {
+      "slug": "systematic-debugging",
+      "name": "systematic-debugging",
+      "category": "dev",
+      "description": "Use when encountering any bug, test failure, or unexpected behavior, before proposing fixes",
+      "version": "1.0.0",
+      "requires": [
+        "run_bash",
+        "grep"
+      ],
+      "install_status": "bundled"
+    },
+    {
+      "slug": "webapp-testing",
+      "name": "webapp-testing",
+      "category": "dev",
+      "description": "Toolkit for interacting with and testing local web applications using Playwright. Supports verifying frontend functionality, debugging UI behavior, capturing browser screenshots, and viewing browser logs.",
+      "version": "1.0.0",
+      "requires": [
+        "run_bash",
+        "execute_code",
+        "browser_open"
+      ],
+      "install_status": "catalog"
+    },
+    {
+      "slug": "writing-plans",
+      "name": "writing-plans",
+      "category": "dev",
+      "description": "Use when you have a spec or requirements for a multi-step task, before touching code",
+      "version": "1.0.0",
+      "requires": [
+        "run_bash",
+        "write_file"
+      ],
+      "install_status": "bundled"
+    },
+    {
+      "slug": "voice-reply",
+      "name": "voice-reply",
+      "category": "reporting",
+      "description": "Use when the user explicitly asks for a spoken reply — turning an answer into a short voice clip (free TTS), always attaching the text, transcribing inbound voice notes before processing, and degrading to plain text when synthesis fails.",
+      "version": "1.0.0",
+      "requires": [
+        "MYCORE_TG_TOKEN"
+      ],
+      "install_status": "catalog"
+    },
+    {
+      "slug": "research-brief",
+      "name": "research-brief",
+      "category": "research",
+      "description": "Use when asked to verify a claim, compare options, shortlist or select a tool, summarise a topic, or draft a reply from research — a three-tier report pipeline with multi-source verification, mandatory citations and three-colour annotation.",
+      "version": "1.0.0",
+      "requires": [
+        "http_fetch"
+      ],
+      "install_status": "catalog"
+    },
+    {
+      "slug": "binance-read-only",
+      "name": "binance-read-only",
+      "category": "trading-readonly",
+      "description": "Use when reading Binance balances, orders or market data, creating a least-privilege USER_DATA API key, or diagnosing Binance auth — orders only via the console approval gate.",
+      "version": "1.0.0",
+      "requires": [
+        "BINANCE_API_KEY",
+        "BINANCE_API_SECRET",
+        "exchange_portfolio",
+        "exchange_orders"
+      ],
+      "install_status": "bundled"
+    },
+    {
+      "slug": "kraken-read-only",
+      "name": "kraken-read-only",
+      "category": "trading-readonly",
+      "description": "Use when reading Kraken balances, orders or market data, creating a least-privilege Query-only Kraken API key, or diagnosing Kraken auth (nonce, API-Sign) — never for trading.",
+      "version": "1.0.0",
+      "requires": [
+        "KRAKEN_API_KEY",
+        "KRAKEN_API_SECRET",
+        "exchange_portfolio",
+        "exchange_orders"
+      ],
+      "install_status": "bundled"
+    },
+    {
+      "slug": "okx-read-only",
+      "name": "okx-read-only",
+      "category": "trading-readonly",
+      "description": "Use when reading OKX balances, orders or market data, creating a least-privilege read-only OKX API key, or diagnosing OKX auth (passphrase, timestamp skew) — never for trading.",
+      "version": "1.0.0",
+      "requires": [
+        "OKX_API_KEY",
+        "OKX_API_SECRET",
+        "OKX_API_PASSPHRASE",
+        "exchange_portfolio",
+        "exchange_orders"
+      ],
+      "install_status": "bundled"
+    }
+  ]
+}

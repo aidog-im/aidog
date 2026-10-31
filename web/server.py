@@ -100,6 +100,13 @@ Routes:
                                    {images: [{name, url}]} via imagegen (honest 503)
   GET  /api/media/<name>        -> one generated image from data/images/ (strict
                                    name whitelist, no traversal)
+  GET  /api/skills/remote       -> official skills catalog (car 4, 0.5.47):
+                                   {source: remote|cache|unavailable,
+                                   fetched_at, count, skills[7-field rows]};
+                                   5s fetch ceiling + 60s cache, fail-soft
+                                   ladder (bundled site copy, then an honest
+                                   empty 200 — never 5xx), loopback read,
+                                   no auth (same contract as GET /api/mission)
   GET  /static/i18n/<lang>.json -> locale packs served from the SSOT
                                    overlay/locales/ (en default, zh switchable)
 """
@@ -1734,6 +1741,108 @@ def collect_skills() -> dict:
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
 
 
+# ------------------------- official skills catalog (car 4, 0.5.47) --------
+# GET /api/skills/remote pulls the published catalog. The design-book ladder
+# (autonomous_ops_design.md 4.4) is fail-soft end to end: remote -> the copy
+# shipped with this release -> an honest empty 200; a 5xx is impossible by
+# construction. The two knobs below are env seams (operator/test overrides,
+# read per request the way lib.profile_paths reads its own) — the shipped
+# constant carries no credential of any kind.
+SKILLS_REMOTE_URL = "https://aidog.im/skills/catalog.json"
+SKILLS_COPY_FILE = REPO / "site" / "skills" / "catalog.json"
+SKILLS_REMOTE_TIMEOUT = 5.0   # one outbound attempt, hard ceiling
+SKILLS_REMOTE_TTL = 60.0      # in-process reuse window (no stampede)
+_skills_lock = threading.Lock()
+_skills_cache: dict = {"ts": 0.0, "key": None, "data": None}
+
+
+def _skill_rows(doc) -> list[dict]:
+    """Project a catalog document onto the fixed seven-field schema
+    (slug/name/category/description/version/requires/install_status).
+    Non-object entries and entries without slug+name are dropped (partial
+    success); unknown keys never pass through, so neither source can smuggle
+    a local path, an internal id or a credential into the payload."""
+    if not isinstance(doc, dict) or not isinstance(doc.get("skills"), list):
+        return []
+    rows: list[dict] = []
+    for entry in doc["skills"]:
+        if not isinstance(entry, dict):
+            continue
+        slug = str(entry.get("slug") or "").strip()
+        name = str(entry.get("name") or "").strip()
+        if not slug or not name:
+            continue
+        requires = entry.get("requires")
+        rows.append({
+            "slug": slug,
+            "name": name,
+            "category": str(entry.get("category") or ""),
+            "description": str(entry.get("description") or ""),
+            "version": str(entry.get("version") or ""),
+            "requires": [str(r) for r in requires]
+                        if isinstance(requires, list) else [],
+            "install_status": str(entry.get("install_status") or ""),
+        })
+    return rows
+
+
+def collect_skills_remote() -> dict:
+    """GET /api/skills/remote — the official skills catalog (car 4, 0.5.47).
+
+    Read, loopback, no auth (same contract as GET /api/mission). Priority:
+    1) the published catalog over HTTP (5s ceiling, one attempt); 2) the copy
+    shipped with this release, honestly marked `source: "cache"`; 3) an
+    empty `source: "unavailable"` payload. Never 5xx, never a hang: one
+    in-process lock plus a 60s cache keyed by (url, copy path) allows at most
+    one outbound fetch per minute per config, and concurrent callers wait out
+    that single fetch instead of stacking their own."""
+    url = (os.environ.get("AIDOG_SKILLS_CATALOG_URL") or "").strip() \
+        or SKILLS_REMOTE_URL
+    copy_file = Path((os.environ.get("AIDOG_SKILLS_CATALOG_FILE") or "").strip()
+                     or SKILLS_COPY_FILE)
+    now = time.time()
+    key = (url, str(copy_file))
+    with _skills_lock:
+        cached = _skills_cache
+        if (cached["data"] is not None and cached.get("key") == key
+                and now - cached["ts"] < SKILLS_REMOTE_TTL):
+            return cached["data"]
+        stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        data: dict | None = None
+        remote_err: str | None = None
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "aidog-console"})
+            with urllib.request.urlopen(req,
+                                         timeout=SKILLS_REMOTE_TIMEOUT) as resp:
+                doc = json.loads(resp.read().decode("utf-8", "replace"))
+            rows = _skill_rows(doc)
+            if not rows:
+                raise ValueError("remote catalog has no usable entries")
+            data = {"source": "remote", "fetched_at": stamp,
+                    "count": len(rows), "skills": rows}
+        except Exception as e:  # noqa: BLE001 — offline degrades, never 500
+            remote_err = type(e).__name__
+        if data is None:  # fail-soft: the copy shipped with this release
+            copy_err: str | None = None
+            try:
+                rows = _skill_rows(
+                    json.loads(copy_file.read_text(encoding="utf-8")))
+            except Exception as e:  # noqa: BLE001
+                rows, copy_err = [], type(e).__name__
+            if rows:
+                data = {"source": "cache", "fetched_at": stamp,
+                        "count": len(rows), "skills": rows}
+            else:
+                # reason only, no path and no URL: an honest type-name trio
+                data = {"source": "unavailable", "fetched_at": stamp,
+                        "count": 0, "skills": [],
+                        "error": f"remote fetch failed ({remote_err}) and the "
+                                 f"bundled copy is unusable ({copy_err})"}
+        _skills_cache.update(ts=now, key=key, data=data)
+        return data
+
+
 def collect_events() -> dict:
     events: list[dict] = []
     for rb in system_facts().get("reboots", []):
@@ -2793,6 +2902,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(collect_version(fresh=fresh))
         if path == "/api/skills":
             return self._json(collect_skills())
+        if path == "/api/skills/remote":
+            return self._json(collect_skills_remote())
         if path == "/api/voice":
             return self._json(collect_voice())
         if path == "/api/channels":

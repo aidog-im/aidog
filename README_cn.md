@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/aidog-im/aidog/releases"><img src="https://img.shields.io/badge/release-0.5.46-blue?style=flat-square" alt="release 0.5.46"></a>
+  <a href="https://github.com/aidog-im/aidog/releases"><img src="https://img.shields.io/badge/release-0.5.47-blue?style=flat-square" alt="release 0.5.47"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
   <img src="https://img.shields.io/badge/core_tests-1477%2F1477-brightgreen?style=flat-square" alt="核心测试 1477/1477">
   <img src="https://img.shields.io/badge/console_smoke-234%2F234-brightgreen?style=flat-square" alt="控制台冒烟 234/234">
@@ -183,31 +183,32 @@ python3 deploy/aidog_update.py check # 版本通道：up to date
 | 桌面壳（`node --test`） | **15/15** |
 | `aidog doctor` | **0 FAIL · 0 WARN**（出站全断时如实报环境 WARN） |
 | 发布闸（deny-by-default 清单） | **READY** |
-| 真机 E2E | profiles **18/18** · channels **8/8** · 国内渠道 **44/44** · 管线 **35/35** · web3 只读 **33/33** · web3 审批 **61/61** · 前端覆盖 **62/62** · 前端 UI **33/33** · 激活 **81/81** · 激活 UI **50/50** · 设置矩阵 **63/63** + UI **20/20** · 守夜任务 **54/54** · 编排看板 **63/63** · 审批挂起 **73/73** |
+| 真机 E2E | profiles **18/18** · channels **8/8** · 国内渠道 **44/44** · 管线 **35/35** · web3 只读 **33/33** · web3 审批 **61/61** · 前端覆盖 **62/62** · 前端 UI **33/33** · 激活 **81/81** · 激活 UI **50/50** · 设置矩阵 **63/63** + UI **20/20** · 守夜任务 **54/54** · 编排看板 **63/63** · 审批挂起 **73/73** · 技能目录 **167/167** · 远端目录 **37/37** |
 
-目录规模：**25 个注册工具** · **9 家交易所场所** · **15 腿真机
+目录规模：**25 个注册工具** · **9 家交易所场所** · **17 腿真机
 E2E**——全部全绿。
 
 语言包：`en`（默认）+ `zh` 各 **614 键**，parity lint 把关；官网另有
-**217 键**双语站包。
+**254 键**双语站包。
 
 ## 文档
 
 - [`docs/installation.md`](docs/installation.md) — 安装、槽位、向导
-- [`docs/features/`](docs/features/) — **32 份能力文档**，一项能力一档
+- [`docs/features/`](docs/features/) — **33 份能力文档**，一项能力一档
   （渠道、记忆、定时、子代理、MCP、语音、桌面、profile、工具开关……），
   每份都写明诚实边界
 - [`docs/manual_verification.md`](docs/manual_verification.md) — 人工验收清单
 - [`docs/security_checklist.md`](docs/security_checklist.md) — 安全审查清单
 - **[aidog.im](https://aidog.im)** — 产品官网（双语、PWA、AI 可读 `llms.txt`）
 
-**32 份一览**（分五组，每组一行）：
+**33 份一览**（分五组，每组一行）：
 
 - **代理循环与工具** — [`acp`](docs/features/acp.md)（ACP v1 stdio 服务器）· [`openai_api_server`](docs/features/openai_api_server.md)（OpenAI 兼容 `/v1` 网关）· [`terminal_backends`](docs/features/terminal_backends.md)（7 后端 `run_bash` 矩阵）· [`execute_code`](docs/features/execute_code.md) · [`subagents`](docs/features/subagents.md) · [`mcp`](docs/features/mcp.md) · [`tool_toggles`](docs/features/tool_toggles.md) · [`browser_automation`](docs/features/browser_automation.md) · [`model_failover`](docs/features/model_failover.md) · [`missions`](docs/features/missions.md)（永不睡觉的任务守夜循环）
 - **知识与记忆** — [`memory_and_routing`](docs/features/memory_and_routing.md) · [`checkpoints`](docs/features/checkpoints.md) · [`context_files`](docs/features/context_files.md)（项目指令文件）· [`evolution_loop`](docs/features/evolution_loop.md) · [`connectors`](docs/features/connectors.md)（只读 Linear/Notion 搜索）
 - **渠道与媒体** — [`channels`](docs/features/channels.md) · [`channels_domestic`](docs/features/channels_domestic.md) · [`console_chat`](docs/features/console_chat.md) · [`voice_session`](docs/features/voice_session.md) · [`voice_announcements`](docs/features/voice_announcements.md) · [`tts_engines`](docs/features/tts_engines.md) · [`image_generation`](docs/features/image_generation.md)
 - **运维与控制台** — [`setup_wizard`](docs/features/setup_wizard.md) · [`frontend_coverage`](docs/features/frontend_coverage.md) · [`capabilities`](docs/features/capabilities.md) · [`desktop_client`](docs/features/desktop_client.md) · [`profiles`](docs/features/profiles.md) · [`site_visibility`](docs/features/site_visibility.md) · [`zero_key_onboarding`](docs/features/zero_key_onboarding.md) · [`natural_language_cron`](docs/features/natural_language_cron.md) · [`event_hooks`](docs/features/event_hooks.md)
 - **Web3** — [`exchanges`](docs/features/exchanges.md)（9 家场所，下单过人工审批闸）
+- **技能生态** — [`skills_ecosystem`](docs/features/skills_ecosystem.md)（官方目录页、私有技能仓、双闸审核、远端目录 API）
 
 设计史与第三方调研笔记按政策留在私仓内，不随导出。
 

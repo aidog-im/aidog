@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Skills catalog — I'm AiDog</title>
+<meta name="description" content="The official I'm AiDog skills catalog: every skill screened by a machine gate and a human review gate, grouped in six categories, read from one shared catalog file.">
+<link rel="icon" type="image/png" href="assets/favicon.png">
+<link rel="apple-touch-icon" href="assets/icons/apple-touch-icon.png">
+<meta name="theme-color" content="#2892ff">
+<meta name="robots" content="index,follow">
+<link rel="stylesheet" href="assets/style.css?v=20261026">
+<link rel="stylesheet" href="assets/skills.css?v=20261026">
+</head>
+<body>
+
+<header class="nav" id="nav">
+  <a class="brand" href="index.html">
+    <img src="assets/logo.jpg" alt="I'm AiDog logo" width="30" height="30" data-i18n-alt="brand.logoAlt">
+    <span class="brand-name">AIDOG<span class="brand-dot">.IM</span></span>
+  </a>
+  <button class="burger" id="burger" aria-label="menu" aria-expanded="false"><span></span><span></span><span></span></button>
+  <nav class="nav-links" id="navLinks">
+    <a href="index.html#home" class="nav-link" data-i18n="nav.home">Home</a>
+    <a href="index.html#start" class="nav-link" data-i18n="nav.start">Start</a>
+    <a href="index.html#skills" class="nav-link active" data-i18n="nav.skills">Skills</a>
+    <a href="index.html#capabilities" class="nav-link" data-i18n="nav.capabilities">Capabilities</a>
+    <a href="index.html#console" class="nav-link" data-i18n="nav.console">Console</a>
+    <a href="index.html#models" class="nav-link" data-i18n="nav.models">Models</a>
+    <a href="index.html#security" class="nav-link" data-i18n="nav.security">Security</a>
+    <a href="index.html#architecture" class="nav-link" data-i18n="nav.architecture">Architecture</a>
+  </nav>
+  <div class="nav-right">
+    <button class="lang-btn" id="langBtn" aria-label="switch language"><span id="langLabel" data-i18n="i18n.toggle">ZH</span></button>
+    <a class="btn btn-ghost nav-gh" href="https://github.com/aidog-im/aidog" target="_blank" rel="noopener" data-i18n="nav.github">GitHub</a>
+  </div>
+</header>
+
+<main>
+
+<!-- ============================================ SKILLS HERO -->
+<section class="section sk-hero" id="top">
+  <div class="section-head">
+    <span class="section-index">SKILLS</span>
+    <h1 data-i18n="skills.pageTitle">Skills catalog</h1>
+    <p class="section-sub" data-i18n="skills.pageSub">Every skill here passed a machine gate (structure, format, leak scan) and a human review gate. The website and the product read the same catalog file — one source of truth, no marketplace, no surprise code.</p>
+  </div>
+
+  <svg class="sk-rosette" id="skRosette" viewBox="-160 -160 320 320" aria-hidden="true"></svg>
+
+  <div class="sk-note reveal in">
+    <b data-i18n="skills.pageNoteT">How a skill gets listed</b>
+    <p data-i18n="skills.pageNoteB">Files, not execution: a skill lands as reviewed text, is screened by a deterministic router before any model reads it, and never installs or runs itself.</p>
+  </div>
+
+  <div class="sk-meta reveal in">
+    <span class="sk-count"><b id="skCountN">—</b> <span data-i18n="skills.countLabel">skills listed</span></span>
+    <a class="btn btn-ghost" href="index.html#skills" data-i18n="skills.backHome">Back to the home page</a>
+  </div>
+</section>
+
+<div class="engrave-rule" aria-hidden="true"><svg class="guilloche" id="skBand" viewBox="0 0 1440 34" preserveAspectRatio="none"></svg></div>
+
+<!-- ============================================ CATALOG -->
+<section class="section" id="catalog">
+  <div class="section-head reveal in">
+    <span class="section-index">CATALOG</span>
+    <h2 data-i18n="skills.catalogTitle">Six categories</h2>
+    <p class="section-sub" data-i18n="skills.catalogSub">Grouped the way the repository groups them: automation and operations, research, development, content, read-only trading, and reporting. Versions come straight from the catalog entry.</p>
+  </div>
+
+  <div class="sk-groups" id="skGroups">
+    <p class="sk-loading" id="skLoading" data-i18n="skills.loading">Loading the catalog…</p>
+  </div>
+
+  <noscript>
+    <div class="sk-fallback">This page renders the catalog with JavaScript; the same data is readable directly as <a href="skills/catalog.json">skills/catalog.json</a>.</div>
+  </noscript>
+</section>
+
+</main>
+
+<footer class="footer">
+  <div class="footer-inner">
+    <div class="footer-top">
+      <p class="footer-big"><span data-i18n="footer.taglineA">Not a platform.</span><br><span data-i18n="footer.taglineB">A dog that knows you.</span></p>
+      <div class="footer-brand">
+        <img src="assets/logo.jpg" alt="" width="28" height="28">
+        <span>© <span id="year">2026</span> I'm AiDog</span>
+      </div>
+    </div>
+    <div class="footer-links">
+      <span class="footer-free" data-i18n="footer.free">permanently free</span>
+      <a href="index.html#capabilities" data-i18n="footer.caps">Capabilities</a>
+      <a href="llms.txt">llms.txt</a>
+      <a href="https://github.com/aidog-im/aidog" target="_blank" rel="noopener">GitHub</a>
+      <span class="footer-dim" data-i18n="footer.aidogim">aidog.im</span>
+    </div>
+    <div class="footer-fine">
+      <span data-i18n="footer.fine">Grown for one · built for anyone</span>
+      <span>aidog.im</span>
+    </div>
+  </div>
+</footer>
+
+<script>
+/* Skills catalog page — self-contained (no assets/main.js on purpose: this
+   page's nav links point at index.html#… anchors, which main.js's scroll spy
+   would query as selectors). It re-implements only what the page needs:
+   language pack loading, burger nav, the engraved Draft E band/rosette, and
+   the catalog renderer that reads skills/catalog.json. */
+(function () {
+  "use strict";
+
+  var LANG_KEY = "aidog.site.lang";
+  var qsLang = null;
+  try {
+    var m = location.search.match(/[?&]lang=(en|zh)\b/);
+    if (m) qsLang = m[1];
+  } catch (e) { /* ignore */ }
+  var lang = qsLang;
+  if (!lang) {
+    try { lang = localStorage.getItem(LANG_KEY); } catch (e) { /* private mode */ }
+  }
+  if (lang !== "en" && lang !== "zh") lang = "en";
+
+  var dicts = {};
+  var catalog = null;
+
+  /* Categories in the repository's own order (design §4.2). */
+  var CATEGORIES = ["automation-ops", "research", "dev", "content",
+                    "trading-readonly", "reporting"];
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text != null) n.textContent = text;
+    return n;
+  }
+
+  /* ---------------------------------------------------------- i18n --- */
+  function loadDict(l) {
+    if (dicts[l]) return Promise.resolve(dicts[l]);
+    return fetch("i18n/" + l + ".json")
+      .then(function (r) { if (!r.ok) throw new Error("http " + r.status); return r.json(); })
+      .then(function (d) { dicts[l] = d; return d; })
+      .catch(function () { return null; });
+  }
+
+  function applyDict(d) {
+    if (!d) return;
+    document.querySelectorAll("[data-i18n]").forEach(function (node) {
+      var k = node.getAttribute("data-i18n");
+      if (Object.prototype.hasOwnProperty.call(d, k)) node.textContent = d[k];
+    });
+    document.querySelectorAll("[data-i18n-alt]").forEach(function (node) {
+      var k = node.getAttribute("data-i18n-alt");
+      if (Object.prototype.hasOwnProperty.call(d, k)) node.setAttribute("alt", d[k]);
+    });
+  }
+
+  function setLang(l) {
+    lang = l;
+    try { localStorage.setItem(LANG_KEY, l); } catch (e) { /* ignore */ }
+    document.documentElement.lang = (l === "zh") ? "zh-Hans" : "en";
+    var label = document.getElementById("langLabel");
+    if (label) label.textContent = (l === "en") ? "ZH" : "EN";
+    loadDict(l).then(applyDict);
+  }
+
+  var langBtn = document.getElementById("langBtn");
+  if (langBtn) langBtn.addEventListener("click", function () {
+    setLang(lang === "en" ? "zh" : "en");
+    try {
+      var url = new URL(location.href);
+      url.searchParams.set("lang", lang);
+      history.replaceState(null, "", url.pathname + url.search + url.hash);
+    } catch (e) { /* file:// */ }
+  });
+
+  var burger = document.getElementById("burger");
+  var navLinks = document.getElementById("navLinks");
+  if (burger && navLinks) {
+    burger.addEventListener("click", function () {
+      var open = navLinks.classList.toggle("open");
+      burger.setAttribute("aria-expanded", String(open));
+    });
+    navLinks.addEventListener("click", function (e) {
+      if (e.target.classList.contains("nav-link")) navLinks.classList.remove("open");
+    });
+  }
+
+  /* --------------------------------------------------- engraving --- */
+  /* Same hypotrochoid rosette and banknote band the home page draws, kept
+     local so this page needs no assets/main.js. */
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  function path(d) {
+    var p = document.createElementNS(SVG_NS, "path");
+    p.setAttribute("d", d);
+    p.setAttribute("fill", "none");
+    p.setAttribute("stroke", "currentColor");
+    p.setAttribute("stroke-width", ".7");
+    p.setAttribute("vector-effect", "non-scaling-stroke");
+    return p;
+  }
+  function rosette(n, R, dd, turns) {
+    var r = R / (n + 1), g = R - r, pts = [], i, t;
+    for (i = 0; i <= 900; i++) {
+      t = i / 900 * Math.PI * 2 * turns;
+      pts.push((g * Math.cos(t) + dd * Math.cos(n * t)).toFixed(2) + "," +
+        (g * Math.sin(t) - dd * Math.sin(n * t)).toFixed(2));
+    }
+    return "M" + pts.join("L");
+  }
+  (function () {
+    var ros = document.getElementById("skRosette");
+    if (ros) {
+      [[17, 150, 42], [13, 124, 34], [9, 98, 26]].forEach(function (a) {
+        ros.appendChild(path(rosette(a[0], a[1], a[2], 1)));
+      });
+    }
+    var band = document.getElementById("skBand");
+    if (!band) return;
+    var out = "", k, x, pts, y;
+    for (k = 0; k < 7; k++) {
+      pts = [];
+      for (x = 0; x <= 1440; x += 8) {
+        y = 17 + Math.sin(x / 58 + k * Math.PI / 7) * (7.4 - k * 0.55) *
+          Math.sin(x / 1440 * Math.PI);
+        pts.push(x.toFixed(0) + "," + y.toFixed(2));
+      }
+      out += '<path d="M' + pts.join("L") + '" fill="none" stroke="currentColor"' +
+        ' stroke-width=".6" opacity="' + (0.85 - k * 0.08).toFixed(2) + '"/>';
+    }
+    band.innerHTML = out;
+  })();
+
+  /* ---------------------------------------------------- catalog --- */
+  function card(entry) {
+    var art = el("article", "feature sk-card reveal in");
+
+    var head = el("div", "sk-cardhead");
+    head.appendChild(el("h4", null, entry.slug));
+    head.appendChild(el("span", "chip sk-ver", "v" + entry.version));
+    art.appendChild(head);
+
+    var p = el("p", "sk-desc");
+    p.setAttribute("data-i18n", "skills.card." + entry.slug);
+    p.textContent = entry.description;      /* English default = catalog text */
+    art.appendChild(p);
+
+    var tags = el("div", "sk-tags");
+    var badge = el("span", "chip " +
+      (entry.install_status === "bundled" ? "sk-bad-bundled" : "sk-bad-catalog"));
+    badge.setAttribute("data-i18n", entry.install_status === "bundled"
+      ? "skills.badgeBundled" : "skills.badgeCatalog");
+    badge.textContent = entry.install_status === "bundled" ? "bundled" : "from catalog";
+    tags.appendChild(badge);
+
+    if (entry.requires && entry.requires.length) {
+      var req = el("span", "chip sk-req");
+      var lab = el("span", null);
+      lab.setAttribute("data-i18n", "skills.requires");
+      lab.textContent = "requires";
+      req.appendChild(lab);
+      entry.requires.forEach(function (tool) { req.appendChild(el("code", null, tool)); });
+      tags.appendChild(req);
+    }
+    art.appendChild(tags);
+    return art;
+  }
+
+  function render() {
+    var host = document.getElementById("skGroups");
+    if (!host || !catalog || !catalog.skills) return;
+    host.textContent = "";
+
+    CATEGORIES.forEach(function (cat) {
+      var items = catalog.skills.filter(function (e) { return e.category === cat; });
+      if (!items.length) return;
+
+      var group = el("section", "sk-group");
+      group.setAttribute("data-cat", cat);
+
+      var head = el("div", "sk-group-head");
+      var h = el("h3", "sk-cat");
+      h.setAttribute("data-i18n", "skills.cat." + cat);
+      h.textContent = cat;
+      head.appendChild(h);
+      var d = el("p", "sk-catdesc");
+      d.setAttribute("data-i18n", "skills.catd." + cat);
+      d.textContent = "";
+      head.appendChild(d);
+      head.appendChild(el("span", "sk-n", String(items.length)));
+      group.appendChild(head);
+
+      var grid = el("div", "feature-grid");
+      items.forEach(function (e) { grid.appendChild(card(e)); });
+      group.appendChild(grid);
+      host.appendChild(group);
+    });
+
+    var n = document.getElementById("skCountN");
+    if (n) n.textContent = String(catalog.skills.length);
+  }
+
+  function showFallback() {
+    var host = document.getElementById("skGroups");
+    if (!host) return;
+    host.textContent = "";
+    var box = el("div", "sk-fallback");
+    var a = document.createElement("a");
+    a.href = "skills/catalog.json";
+    a.textContent = "skills/catalog.json";
+    box.appendChild(document.createTextNode(
+      "The catalog file could not be fetched here. The same data lives at "));
+    box.appendChild(a);
+    box.appendChild(document.createTextNode("."));
+    host.appendChild(box);
+    var n = document.getElementById("skCountN");
+    if (n) n.textContent = "—";
+  }
+
+  fetch("skills/catalog.json")
+    .then(function (r) { if (!r.ok) throw new Error("http " + r.status); return r.json(); })
+    .then(function (d) {
+      if (!d || !Array.isArray(d.skills)) throw new Error("bad catalog shape");
+      catalog = d;
+      render();
+      return loadDict(lang);
+    })
+    .then(function (d) { applyDict(d); })
+    .catch(function () { showFallback(); });
+
+  /* first paint: language pack before the catalog lands */
+  loadDict(lang).then(applyDict);
+  setLang(lang);
+
+  var year = document.getElementById("year");
+  if (year) year.textContent = String(new Date().getFullYear());
+})();
+</script>
+</body>
+</html>
