@@ -46,6 +46,35 @@ console chat) pass the resolved dirs explicitly; `build_system_stack()` keeps
 - The skill-hint entry stays LAST in the stack (assembly invariant asserted
   by `mycore/tests/run.py::test_assembly`).
 
+## @references (line-based file inclusion) — shipped in v0.5.32
+
+A context file may pull in another file from its own directory with a
+line-based `@` reference:
+
+- **Grammar**: a line whose stripped form starts with `@` followed by a
+  non-empty path — e.g. `@rules/backend.md` — is a reference. A bare `@`
+  with an empty rest, and any line not starting with `@`, is ordinary text.
+- **Resolution base**: paths resolve relative to **the directory of the
+  context file containing the line** (not the process cwd, not the repo
+  root), via `Path.resolve()`.
+- **Depth 1**: the referenced file's content is inlined verbatim; `@` lines
+  *inside* referenced content are NOT expanded (no recursion — documented
+  bound, keeps the feature predictable and loop-free).
+- **Markers** (honest, always visible in the injected text):
+  - `[context @ref denied: <raw line>]` — resolved target escapes the
+    context dir (e.g. `../` traversal or an absolute path outside): denied by
+    the credential-boundary rule, target content never read.
+  - `[context @ref missing: <raw line>]` — target missing, empty, unreadable,
+    or a directory.
+  - `[context @ref limit: <raw line>]` — the per-file bound was reached.
+- **Bound**: at most `MAX_CTX_REFS` = **16** references expanded per context
+  file; further reference lines become the `limit` marker.
+- Reads reuse `_read_slot` (same `MAX_SLOT_CHARS` cap per referenced file).
+  Expansion applies ONLY to configured project context files — constitution,
+  memory, and learned slots are untouched — and a context file with no `@`
+  reference line comes out byte-identical. Implementation:
+  `assembly._expand_context_refs(text, base)`.
+
 ## Honest limits
 
 - Coverage is per configured directory only — no traversal, no git-root
@@ -60,7 +89,10 @@ console chat) pass the resolved dirs explicitly; `build_system_stack()` keeps
 `python3 -m mycore.tests.run` — `test_context_files()` covers injection +
 order + header + present-only + truncation + `AGENTS.local.md`, the default
 off shape, and `resolve_context_dirs` precedence (env > settings > corrupt
-settings = off, dedupe, missing dir dropped).
+settings = off, dedupe, missing dir dropped). @reference coverage runs as
+`mycore.tests.run::test_context_refs()` (expansion, depth 1,
+missing/denied/limit markers, 16-ref bound, byte-identical no-@,
+10 checks — car G).
 
 ## Related
 

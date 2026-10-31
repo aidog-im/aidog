@@ -4649,7 +4649,8 @@ def test_channels_domestic() -> None:
         # --- contract: CHANNELS order + factory + outbound-only poll -------
         check("dom channels: CHANNELS appends the three domestic routes",
               channels.CHANNELS == ("discord", "slack", "email", "webhook",
-                                    "dingtalk", "feishu", "wechat"))
+                                    "dingtalk", "feishu", "wechat",
+                                    "whatsapp", "signal"))
         loaded = channels.load_channels(repo, settings,
                                         transport=FakeTransport())
         check("dom channels: factory builds every CHANNELS route",
@@ -7533,14 +7534,379 @@ def test_profiles() -> None:
                 os.environ[k] = v
 
 
+def test_channels_wa_signal() -> None:
+    """WhatsApp (Meta Cloud API, outbound-only) + Signal (local signal-cli
+    REST daemon, bidirectional): request shapes, gates, inbound mapping,
+    honest fail-soft, the 9-route CHANNELS contract and zero credential echo
+    — offline fake transport, no network, no real credentials."""
+    import contextlib
+    import io
+    from mycore import channels
+
+    wa_token = "wa-TOK-abc123XYZ"
+    sig_token = "sig-TOK-def456UVW"
+    pnid = "100123456789012"
+    slot_vals = {
+        "CHANNEL_WHATSAPP_TOKEN": wa_token,
+        "CHANNEL_SIGNAL_TOKEN": sig_token,
+    }
+    saved = {k: os.environ.get(k) for k in list(slot_vals) + ["AIDOG_MC_STATE"]}
+    repo = Path(tempfile.mkdtemp(prefix="ws_repo_"))
+    state = Path(tempfile.mkdtemp(prefix="ws_state_"))
+
+    class FakeTransport:
+        """Records calls (url, payload, headers); replays scripted replies
+        (str = response text, Exception = raised verbatim)."""
+
+        def __init__(self, replies=()):
+            self.calls = []
+            self.replies = list(replies)
+
+        def __call__(self, url, payload, headers, timeout):
+            self.calls.append({"url": url, "payload": payload,
+                               "headers": dict(headers), "timeout": timeout})
+            if not self.replies:
+                raise AssertionError("scripted transport reply missing")
+            item = self.replies.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+    try:
+        for key, val in slot_vals.items():
+            os.environ[key] = val
+        settings = {"state_dir": str(state), "channels": {
+            "whatsapp": {"enabled": True, "phone_number_id": pnid},
+            "signal": {"enabled": True, "url": "http://127.0.0.1:8080"},
+        }}
+        all_vals = list(slot_vals.values())
+
+        # --- contract: CHANNELS 9 routes in order + factory ---------------
+        check("ws channels: CHANNELS is the 9 routes in order",
+              channels.CHANNELS == ("discord", "slack", "email", "webhook",
+                                    "dingtalk", "feishu", "wechat",
+                                    "whatsapp", "signal"),
+              str(channels.CHANNELS))
+        loaded = channels.load_channels(repo, settings,
+                                        transport=FakeTransport())
+        check("ws channels: load_channels returns 9 routes",
+              len(loaded) == 9 and tuple(loaded) == channels.CHANNELS
+              and all(isinstance(v, channels.Channel)
+                      for v in loaded.values()),
+              str(tuple(loaded)))
+
+        # --- whatsapp: outbound shape -------------------------------------
+        tr = FakeTransport([json.dumps({"messaging_product": "whatsapp",
+                                        "contacts": [{"wa_id": "15551234567"}],
+                                        "messages": [{"id": "wamid.1"}]})])
+        wa = channels.load_channels(repo, settings, transport=tr)["whatsapp"]
+        ok = wa.send("+15551234567", "hello whatsapp")
+        call = tr.calls[0]
+        check("ws whatsapp: send url shape (graph v20 /messages)",
+              ok is True
+              and call["url"] ==
+              f"https://graph.facebook.com/v20.0/{pnid}/messages",
+              call["url"])
+        check("ws whatsapp: Bearer token in Authorization header only",
+              call["headers"].get("Authorization") == f"Bearer {wa_token}"
+              and wa_token not in call["url"]
+              and call["headers"].get("Content-Type") == "application/json",
+              str(call["headers"])[:160])
+        check("ws whatsapp: body is messaging_product/to/type/text json",
+              json.loads(call["payload"]) ==
+              {"messaging_product": "whatsapp", "to": "+15551234567",
+               "type": "text",
+               "text": {"preview_url": False, "body": "hello whatsapp"}},
+              str(call["payload"])[:160])
+        tr2 = FakeTransport([json.dumps({"messaging_product": "whatsapp",
+                                         "messages": [{"id": "wamid.2"}]})])
+        wa2 = channels.load_channels(repo, settings, transport=tr2)["whatsapp"]
+        wa2.send("+15551234567", "x" * 6000)
+        body = json.loads(tr2.calls[0]["payload"])["text"]["body"]
+        check("ws whatsapp: text body capped at 4096 chars",
+              len(body) <= 4096 and body.endswith("…[truncated]"),
+              str(len(body)))
+
+        # --- whatsapp: missing token = not configured, zero transport -----
+        os.environ.pop("CHANNEL_WHATSAPP_TOKEN", None)
+        ok_c, reason = wa.configured()
+        tr_n = FakeTransport()
+        wa_n = channels.load_channels(repo, settings, transport=tr_n)["whatsapp"]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            sent = wa_n.send("+15551234567", "hi")
+        log = buf.getvalue()
+        check("ws whatsapp: missing slot -> reason names slot, send False, "
+              "no transport call",
+              ok_c is False and reason == "missing CHANNEL_WHATSAPP_TOKEN slot"
+              and sent is False and tr_n.calls == []
+              and "CHANNEL_SEND_FAIL" in log
+              and all(v not in (reason + log) for v in all_vals), reason)
+        os.environ["CHANNEL_WHATSAPP_TOKEN"] = wa_token
+
+        # --- whatsapp: inbound structurally absent (inbound=False) ---------
+        tr_w0 = FakeTransport()
+        wa0 = channels.WhatsAppChannel(repo=repo,
+                                       cfg=settings["channels"]["whatsapp"],
+                                       state=state, transport=tr_w0)
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            got = wa0.poll()
+        check("ws whatsapp: inbound=False poll silent, zero transport calls",
+              got == [] and tr_w0.calls == []
+              and "CHANNEL_POLL_FAIL" not in buf.getvalue(),
+              f"calls={len(tr_w0.calls)}")
+
+        # --- status rows: honest notes + zero secret echo ------------------
+        st = channels.status(settings, repo)
+        st_text = json.dumps(st, ensure_ascii=False)
+        by = {r["name"]: r for r in st}
+        check("ws status: 9 rows, whatsapp ready with structural note",
+              len(st) == 9 and [r["name"] for r in st] == list(channels.CHANNELS)
+              and by["whatsapp"]["configured"] is True
+              and by["whatsapp"]["inbound"] is False
+              and "public Meta callback" in by["whatsapp"]["note"],
+              str(by.get("whatsapp")))
+        check("ws status: signal ready with daemon note, zero credential echo",
+              by["signal"]["configured"] is True
+              and by["signal"]["inbound"] is True
+              and "daemon" in by["signal"]["note"]
+              and all(v not in st_text for v in all_vals),
+              str(by.get("signal")))
+
+        # --- signal: outbound shape + optional auth header -----------------
+        tr_s = FakeTransport([json.dumps({"timestamp": 1730000000000,
+                                          "source": "+15559876543",
+                                          "username": "+15559876543"})])
+        sg = channels.load_channels(repo, settings, transport=tr_s)["signal"]
+        ok = sg.send("+15559876543", "hello signal")
+        call = tr_s.calls[0]
+        check("ws signal: send url + body shape (numbers list)",
+              ok is True and call["url"] == "http://127.0.0.1:8080/v2/send"
+              and json.loads(call["payload"]) ==
+              {"message": "hello signal", "numbers": ["+15559876543"]},
+              f"{call['url']} {str(call['payload'])[:120]}")
+        check("ws signal: token header present only when the slot is set",
+              call["headers"].get("Authorization") == f"Bearer {sig_token}"
+              and sig_token not in call["url"], str(call["headers"])[:160])
+        os.environ.pop("CHANNEL_SIGNAL_TOKEN", None)
+        tr_s2 = FakeTransport([json.dumps({"timestamp": 1, "source": "+1",
+                                           "message": "x"})])
+        sg2 = channels.load_channels(repo, settings, transport=tr_s2)["signal"]
+        sg2.send("+1", "x")
+        check("ws signal: no token slot -> no Authorization header sent",
+              "Authorization" not in tr_s2.calls[0]["headers"],
+              str(tr_s2.calls[0]["headers"])[:120])
+        os.environ["CHANNEL_SIGNAL_TOKEN"] = sig_token
+
+        # --- signal: url missing = not configured --------------------------
+        tr_u = FakeTransport()
+        sg_no = channels.SignalChannel(repo=repo,
+                                       cfg={"enabled": True, "url": ""},
+                                       state=state, transport=tr_u)
+        ok_c, reason = sg_no.configured()
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            sent = sg_no.send("+1", "x")
+        check("ws signal: empty url -> not configured, send False, no call",
+              ok_c is False
+              and reason == "missing channels.signal.url setting"
+              and sent is False and tr_u.calls == []
+              and "CHANNEL_SEND_FAIL" in buf.getvalue(), reason)
+
+        # --- signal: poll maps daemon envelopes -> Inbound -----------------
+        tr_p = FakeTransport([json.dumps([
+            {"source": "+15559876543", "sourceName": "Ada",
+             "timestamp": 1730000000000, "message": "hi signal"},
+            {"source": "", "timestamp": 1730000000001, "message": "skip"},
+            {"source": "+15550000000", "timestamp": 1730000000002,
+             "message": ""}])])
+        sg_p = channels.load_channels(repo, settings, transport=tr_p)["signal"]
+        got = sg_p.poll()
+        call = tr_p.calls[0]
+        check("ws signal: poll GET /v1/receive maps envelope -> Inbound",
+              len(got) == 1 and isinstance(got[0], channels.Inbound)
+              and got[0].route == "signal"
+              and got[0].sender == "+15559876543"
+              and got[0].target == "+15559876543"
+              and got[0].text == "hi signal"
+              and got[0].key == "signal:+15559876543"
+              and call["url"] == "http://127.0.0.1:8080/v1/receive"
+              and call["payload"] is None,
+              f"calls={len(tr_p.calls)} got={got}")
+
+        # --- signal: daemon absent -> honest fail-soft empty batch ---------
+        tr_f = FakeTransport([ConnectionError("daemon down")])
+        sg_f = channels.load_channels(repo, settings, transport=tr_f)["signal"]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            got = sg_f.poll()
+        log = buf.getvalue()
+        check("ws signal: daemon absent -> poll [] + sanitized POLL_FAIL line",
+              got == [] and "CHANNEL_POLL_FAIL" in log
+              and all(v not in log for v in all_vals), log.strip())
+
+        # --- reprs never carry a credential ---------------------------------
+        reps = " ".join(repr(channels.load_channels(
+            repo, settings, transport=FakeTransport())[n])
+            for n in ("whatsapp", "signal"))
+        check("ws channels: adapter reprs never carry a credential",
+              all(v not in reps for v in all_vals), reps)
+    finally:
+        for key, val in saved.items():
+            if val is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = val
+        shutil.rmtree(repo, True)
+        shutil.rmtree(state, True)
+
+
+def test_context_refs() -> None:
+    """Line-based '@' refs in configured context files: expansion, depth 1,
+    missing/denied/limit markers, MAX_CTX_REFS bound, byte-identical no-@."""
+    import tempfile
+    from pathlib import Path
+
+    from mycore.assembly import (MAX_CTX_REFS, _expand_context_refs,
+                                 build_system_stack)
+
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        ctx = tdp / "proj"
+        ctx.mkdir()
+        (ctx / "rules.md").write_text("RULES BODY", encoding="utf-8")
+        (ctx / "nested.md").write_text("NESTED\n@rules.md", encoding="utf-8")
+
+        # --- happy path: ref line replaced by referenced file content ---
+        text = "intro\n@rules.md\noutro\n"
+        got = _expand_context_refs(text, ctx)
+        check("ctx@: ref line inlined with target content",
+              "RULES BODY" in got and "@rules.md" not in got)
+        check("ctx@: surrounding lines untouched",
+              got.startswith("intro\n") and got.endswith("outro\n"))
+
+        # --- integration: expansion applies to injected stack content ---
+        (ctx / "AGENTS.md").write_text("keep\n@rules.md\n", encoding="utf-8")
+        stack = build_system_stack(
+            tdp / "no_such_soul.md", (), learned_path=None, context_dirs=(ctx,))
+        proj = next(m["content"] for m in stack
+                    if "project context" in m["content"])
+        check("ctx@: build_system_stack injects expanded content",
+              "RULES BODY" in proj and "@rules.md" not in proj)
+
+        # --- depth 1: '@' line inside referenced content stays literal ---
+        got = _expand_context_refs("@nested.md\n", ctx)
+        check("ctx@: nested @ line stays literal (depth 1)",
+              "@rules.md" in got and "RULES BODY" not in got
+              and "NESTED" in got)
+
+        # --- missing / directory target -> missing marker ---
+        got = _expand_context_refs("@nope.md\n", ctx)
+        check("ctx@: missing target -> missing marker",
+              got.strip() == "[context @ref missing: @nope.md]")
+        (ctx / "adir").mkdir()
+        got = _expand_context_refs("@adir\n", ctx)
+        check("ctx@: directory target -> missing marker",
+              got.strip() == "[context @ref missing: @adir]")
+
+        # --- denial: traversal and absolute path outside the context dir ---
+        (tdp / "secret.md").write_text("SECRET", encoding="utf-8")
+        got = _expand_context_refs("@../secret.md\n", ctx)
+        check("ctx@: ../ traversal -> denied marker",
+              got.strip() == "[context @ref denied: @../secret.md]"
+              and "SECRET" not in got)
+        got = _expand_context_refs(f"@{tdp / 'secret.md'}\n", ctx)
+        check("ctx@: absolute path outside -> denied marker",
+              got.strip() == f"[context @ref denied: @{tdp / 'secret.md'}]"
+              and "SECRET" not in got)
+
+        # --- bound: 17 refs -> 16 expanded + 1 limit marker ---
+        big = "\n".join("@rules.md" for _ in range(MAX_CTX_REFS + 1))
+        got = _expand_context_refs(big, ctx)
+        check("ctx@: cap = 16 expansions, 17th -> limit marker",
+              got.count("RULES BODY") == MAX_CTX_REFS
+              and got.count("[context @ref limit:") == 1
+              and "[context @ref limit: @rules.md]" in got)
+
+        # --- no '@' line -> byte-identical passthrough ---
+        plain = "line one\n  plain two\n@\nlone @ mid\n\n"
+        check("ctx@: file without @ refs is byte-identical",
+              _expand_context_refs(plain, ctx) == plain)
+
+
+def test_tools_toggle() -> None:
+    """tools_off: settings disables a tool, env overrides settings, empty
+    config = full-registry parity, unknown env name = ignored (never fatal)."""
+    import os
+    from mycore.tools import KNOWN_TOOL_NAMES, build_registry, resolve_disabled_tools
+
+    saved_env = os.environ.get("MYCORE_TOOLS_OFF")
+    try:
+        # catalog sanity: 11 core + generate_image + connector_search + 6 browser
+        check("tools_off: KNOWN_TOOL_NAMES covers core + conditional",
+              {"read_file", "run_bash", "cron", "delegate", "execute_code",
+               "generate_image", "connector_search", "browser_open",
+               "browser_close"} <= KNOWN_TOOL_NAMES and len(KNOWN_TOOL_NAMES) == 19,
+              str(sorted(KNOWN_TOOL_NAMES)))
+
+        # 1) settings dict path disables a core tool
+        os.environ.pop("MYCORE_TOOLS_OFF", None)
+        off = resolve_disabled_tools({"mycore": {"tools_off": ["grep", "cron"]}})
+        check("tools_off: settings dict -> set", off == frozenset({"grep", "cron"}),
+              str(sorted(off)))
+        reg = build_registry(disabled=off)
+        names = reg.names()
+        check("tools_off: disabled tool absent from schema",
+              "grep" not in names and "cron" not in names
+              and all(t["function"]["name"] not in {"grep", "cron"}
+                      for t in reg.schema()), str(names))
+        out = reg.dispatch("grep", {"pattern": "x", "path": "."})
+        check("tools_off: dispatch says unknown tool",
+              out.startswith("ERROR: unknown tool 'grep'"), out[:80])
+
+        # 2) env overrides settings
+        os.environ["MYCORE_TOOLS_OFF"] = "glob"
+        off = resolve_disabled_tools({"mycore": {"tools_off": ["grep"]}})
+        check("tools_off: env overrides settings",
+              off == frozenset({"glob"}) and "grep" not in off, str(sorted(off)))
+
+        # 3) empty config = full registry parity (byte-identical name list)
+        os.environ.pop("MYCORE_TOOLS_OFF", None)
+        for empty in ({}, {"mycore": {}}, {"mycore": {"tools_off": []}},
+                      {"mycore": {"tools_off": "not-a-list"}}):
+            check(f"tools_off: empty/invalid config resolves empty {list(empty) or ['{}']}",
+                  resolve_disabled_tools(empty) == frozenset(),
+                  str(resolve_disabled_tools(empty)))
+        base = build_registry().names()
+        check("tools_off: disabled=None parity",
+              build_registry(disabled=None).names() == base)
+        check("tools_off: disabled=frozenset() parity (byte-identical names)",
+              build_registry(disabled=frozenset()).names() == base,
+              str(base))
+
+        # 4) unknown env name ignored (no exception)
+        os.environ["MYCORE_TOOLS_OFF"] = "grep,definitely_not_a_tool"
+        off = resolve_disabled_tools({})
+        check("tools_off: unknown env name ignored, known kept",
+              off == frozenset({"grep"}), str(sorted(off)))
+    finally:
+        if saved_env is None:
+            os.environ.pop("MYCORE_TOOLS_OFF", None)
+        else:
+            os.environ["MYCORE_TOOLS_OFF"] = saved_env
+
+
 def main() -> int:
     test_model()
     test_registry_and_tools()
+    test_tools_toggle()
     test_loop()
     test_compact()
     test_session()
     test_assembly()
     test_context_files()
+    test_context_refs()
     test_checkpoint()
     test_modeltier()
     test_skill_dirs_chain()
@@ -7562,6 +7928,7 @@ def main() -> int:
     test_channels()
     test_channels_service()
     test_channels_domestic()
+    test_channels_wa_signal()
     test_hooks()
     test_acp()
     test_tg_topics()

@@ -1,7 +1,7 @@
 """mycore.channels — full-duplex messaging channels (C car spec: c-channels;
 D car spec: imaidog-d-channels adds the three domestic routes).
 
-Seven routes (CHANNELS, append order = status() row order), outbound send +
+Nine routes (CHANNELS, append order = status() row order), outbound send +
 inbound poll, stdlib-only (no third-party deps):
 
     discord   POST /api/v10/channels/{id}/messages
@@ -30,6 +30,16 @@ inbound poll, stdlib-only (no third-party deps):
               hints can echo appsecret fragments). Outbound only
               (inbound=False): inbound needs a verified service account
               plus a public callback endpoint.
+    whatsapp  POST graph.facebook.com/v20.0/{phone_number_id}/messages with a
+              Bearer token from the CHANNEL_WHATSAPP_TOKEN slot. Outbound only
+              (inbound=False): inbound is STRUCTURAL — the Meta Cloud API has
+              no polling endpoint, receiving needs a public Meta webhook
+              callback (status() states it in the ready-row note).
+    signal    POST {channels.signal.url}/v2/send (local signal-cli REST
+              daemon; optional CHANNEL_SIGNAL_TOKEN as Authorization when
+              set); poll GET {url}/v1/receive maps daemon envelopes to
+              Inbound — best-effort local polling: no daemon -> one
+              sanitized POLL_FAIL line + empty batch (fail-soft).
 
 Transport is injectable — the same callable pattern as mycore.tg — so the
 offline test suite exercises every request shape with zero network and zero
@@ -77,7 +87,7 @@ from typing import Callable
 from lib import profile_paths as pp  # noqa: E402  (car F §13.1: profile seams)
 
 CHANNELS = ("discord", "slack", "email", "webhook",
-            "dingtalk", "feishu", "wechat")
+            "dingtalk", "feishu", "wechat", "whatsapp", "signal")
 
 DISCORD_API = "https://discord.com/api/v10"
 SLACK_API = "https://slack.com/api"
@@ -89,6 +99,9 @@ STATE_ENV = "AIDOG_MC_STATE"  # mirrors mycore.service.STATE_ENV
 EMAIL_SUBJECT = "AiDog"
 DINGTALK_TEXT_CAP = 20000      # DingTalk text message cap (chars)
 WECHAT_TEXT_CAP = 1024         # WeChat customer-service cap (BYTES, utf-8 safe)
+WHATSAPP_TEXT_CAP = 4096       # WhatsApp text body cap (characters)
+SIGNAL_TEXT_CAP = 4096         # Signal text cap (kept consistent, characters)
+WHATSAPP_API = "https://graph.facebook.com/v20.0"   # Meta Cloud API base
 FEISHU_API = os.environ.get("AIDOG_FEISHU_API") or "https://open.feishu.cn/open-apis"
 WECHAT_API = os.environ.get("AIDOG_WECHAT_API") or "https://api.weixin.qq.com"
 # Base URLs are env-overridable as an E2E test seam (the offline suite and
@@ -115,6 +128,8 @@ SLOT_FEISHU_APP_ID = "CHANNEL_FEISHU_APP_ID"
 SLOT_FEISHU_APP_SECRET = "CHANNEL_FEISHU_APP_SECRET"
 SLOT_WECHAT_APPID = "CHANNEL_WECHAT_APPID"
 SLOT_WECHAT_APP_SECRET = "CHANNEL_WECHAT_APP_SECRET"
+SLOT_WHATSAPP_TOKEN = "CHANNEL_WHATSAPP_TOKEN"
+SLOT_SIGNAL_TOKEN = "CHANNEL_SIGNAL_TOKEN"
 
 # Process-wide token cache (feishu tenant token / wechat access_token).
 # Adapter instances may be rebuilt per poll, so only a MODULE-level dict
@@ -277,6 +292,9 @@ class Channel:
 
     name = ""
     inbound = True        # route accepts inbound messages (poll or endpoint)
+    # Ready-row honesty: non-empty = appended as the status() note when the
+    # route is enabled AND configured (structural/best-effort inbound limits).
+    inbound_note = ""
 
     def __init__(self, repo, cfg=None, state=None, transport=None,
                  timeout: float = REQUEST_TIMEOUT) -> None:
@@ -992,6 +1010,130 @@ class WeChatChannel(Channel):
         return []            # inbound needs a verified service account
 
 
+class WhatsAppChannel(Channel):
+    """Meta WhatsApp Cloud API route: Bearer token from the
+    CHANNEL_WHATSAPP_TOKEN slot + the non-secret `phone_number_id` setting,
+    text messages POSTed to graph.facebook.com/v20.0/{id}/messages.
+
+    Honest boundary — outbound only: inbound is STRUCTURALLY absent, not
+    merely unimplemented. The Cloud API exposes no polling endpoint;
+    receiving messages requires a Meta webhook callback on a PUBLIC https
+    URL, so `inbound = False`, poll() is silent by design, and a ready
+    status row carries `inbound_note` stating exactly that."""
+
+    name = "whatsapp"
+    inbound = False
+    inbound_note = "inbound needs a public Meta callback (structural)"
+
+    def configured(self) -> tuple[bool, str]:
+        if not self._secret(SLOT_WHATSAPP_TOKEN):
+            return False, f"missing {SLOT_WHATSAPP_TOKEN} slot"
+        if not str(self.cfg.get("phone_number_id") or "").strip():
+            return False, "missing channels.whatsapp.phone_number_id setting"
+        return True, ""
+
+    def _send(self, target: str, text: str) -> None:
+        token = self._secret(SLOT_WHATSAPP_TOKEN)
+        pnid = str(self.cfg.get("phone_number_id") or "").strip()
+        if len(text) > WHATSAPP_TEXT_CAP:
+            mark = " …[truncated]"
+            text = text[:WHATSAPP_TEXT_CAP - len(mark)] + mark
+        payload = json.dumps({"messaging_product": "whatsapp", "to": target,
+                              "type": "text",
+                              "text": {"preview_url": False,
+                                       "body": text}}).encode("utf-8")
+        url = f"{WHATSAPP_API}/{urllib.parse.quote(pnid, safe='')}/messages"
+        doc = _json(self._request("whatsapp.send", url, payload,
+                                  {"Authorization": f"Bearer {token}",
+                                   "Content-Type": "application/json"}),
+                    "whatsapp.send")
+        if not isinstance(doc, dict):
+            raise ChannelError("whatsapp.send: response is not a JSON object")
+        err = doc.get("error")
+        if err:
+            # Meta error objects carry code + message (platform text, no
+            # credential echo) — 80-char cap, same policy as dingtalk.
+            code = err.get("code") if isinstance(err, dict) else ""
+            msg = str((err.get("message") if isinstance(err, dict) else err)
+                      or "")[:80]
+            raise ChannelError(f"whatsapp.send: error code={code} {msg}")
+        if "messages" not in doc:
+            raise ChannelError("whatsapp.send: response has no messages entry")
+
+    def _poll(self) -> list[Inbound]:
+        return []            # inbound = a public Meta callback (structural)
+
+
+class SignalChannel(Channel):
+    """Signal route via a LOCAL signal-cli REST daemon: explicit non-secret
+    `url` setting (http(s); empty = not configured — no default is guessed,
+    a wrong guess would POST to an unintended host) + an OPTIONAL
+    CHANNEL_SIGNAL_TOKEN slot sent as `Authorization: Bearer` only when set
+    (the vanilla daemon has no auth; a reverse proxy may require one).
+
+    Honest boundary — inbound is BEST-EFFORT LOCAL POLLING: GET {url}/v1/receive
+    maps daemon envelopes to Inbound; when the daemon is absent or refuses
+    the connection the failure degrades to one sanitized POLL_FAIL line and
+    an empty batch (fail-soft, the feishu polling convention), which a ready
+    status row states in `inbound_note`. No cursor is persisted: a successful
+    receive delivers the daemon's current batch once."""
+
+    name = "signal"
+    inbound = True
+    inbound_note = "inbound best-effort local daemon polling (no daemon -> empty)"
+
+    def configured(self) -> tuple[bool, str]:
+        if not str(self.cfg.get("url") or "").strip():
+            return False, "missing channels.signal.url setting"
+        return True, ""
+
+    def _base_url(self) -> str:
+        return str(self.cfg.get("url") or "").strip().rstrip("/")
+
+    def _headers(self) -> dict:
+        headers = {"Content-Type": "application/json"}
+        token = self._secret(SLOT_SIGNAL_TOKEN)
+        if token:                       # optional auth — header only when set
+            headers["Authorization"] = f"Bearer {token}"
+        return headers
+
+    def _send(self, target: str, text: str) -> None:
+        if len(text) > SIGNAL_TEXT_CAP:
+            mark = " …[truncated]"
+            text = text[:SIGNAL_TEXT_CAP - len(mark)] + mark
+        payload = json.dumps({"message": text, "numbers": [target]}) \
+            .encode("utf-8")
+        doc = _json(self._request("signal.send", f"{self._base_url()}/v2/send",
+                                  payload, self._headers()), "signal.send")
+        if not isinstance(doc, (dict, list)):
+            raise ChannelError("signal.send: response is not a JSON object")
+
+    def _poll(self) -> list[Inbound]:
+        doc = _json(self._request("signal.poll",
+                                  f"{self._base_url()}/v1/receive", None,
+                                  self._headers()), "signal.poll")
+        if isinstance(doc, dict):       # newer daemon builds wrap envelopes
+            doc = doc.get("envelopes")
+        if doc is None:
+            return []                   # nothing pending (honest empty batch)
+        if not isinstance(doc, list):
+            raise ChannelError("signal.poll: response is not a message list")
+        out: list[Inbound] = []
+        for env in doc:
+            if not isinstance(env, dict):
+                continue
+            data = env.get("dataMessage") \
+                if isinstance(env.get("dataMessage"), dict) else {}
+            sender = str(env.get("source") or env.get("sourceName") or "")
+            text = str(env.get("message") or data.get("message") or "")
+            if not sender or not text:
+                continue                 # unattributable or non-text envelope
+            # target = the sender's number: replies go back to the same device
+            out.append(Inbound(route=self.name, sender=sender, target=sender,
+                               text=text))
+        return out
+
+
 # ------------------------------------------------------------ email utils ---
 def _default_smtp(host: str, port: int, ssl_on: bool, timeout: float):
     cls = smtplib.SMTP_SSL if ssl_on else smtplib.SMTP
@@ -1077,13 +1219,16 @@ def load_channels(repo, settings, transport=None) -> dict[str, Channel]:
                    transport=transport)
     return {cls.name: build(cls) for cls in
             (DiscordChannel, SlackChannel, EmailChannel, WebhookChannel,
-             DingTalkChannel, FeishuChannel, WeChatChannel)}
+             DingTalkChannel, FeishuChannel, WeChatChannel,
+             WhatsAppChannel, SignalChannel)}
 
 
 def status(settings, repo) -> list[dict]:
     """One row per route for GET /api/channels:
     {name, enabled, configured, note, inbound}.
-    note = skip reason: "disabled" | "missing <SLOT> slot" | "" (ready).
+    note = skip reason: "disabled" | "missing <SLOT> slot" | "" (ready) |
+    the route's inbound_note when ready and it carries an honest inbound
+    boundary (structural/best-effort — never a credential).
     Zero secret echo by construction (reasons name slots/settings keys only).
     """
     chans = load_channels(repo, settings, transport=None)
@@ -1099,7 +1244,7 @@ def status(settings, repo) -> list[dict]:
         elif not ok:
             note = reason
         else:
-            note = ""
+            note = chan.inbound_note
         rows.append({"name": name,
                      "enabled": bool(chan.enabled),
                      "configured": bool(ok),

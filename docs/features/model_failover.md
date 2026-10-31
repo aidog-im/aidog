@@ -117,7 +117,7 @@ Fallback chain = enabled when `mycore.upstreams` is non-empty.
 ## Tests / gates
 
 `python3 -m mycore.tests.run` — `test_modeltier()` now runs **44 checks
-(18 v1 + 26 v2)**; suite total **981/981** (car F; car-4c was 959/959; baseline was 645).
+(18 v1 + 26 v2)**; suite total **1020/1020** (car G; car F was 981/981, car-4c 959/959, baseline 645).
 
 - v1 (unchanged): spec grammar, fatal-vs-failover classification, chain
   default resolution, env > settings precedence with honest invalid-spec

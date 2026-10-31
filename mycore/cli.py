@@ -23,7 +23,7 @@ from .modeltier import parse_upstreams
 from .loop import run_turn
 from .model import ChatClient, ModelConfig, ModelError
 from .session import Session
-from .tools import build_registry
+from .tools import build_registry, resolve_disabled_tools
 
 DEFAULT_BUDGET_CHARS = 24000        # ~6k tokens of conversation payload
 REPO = Path(__file__).resolve().parent.parent
@@ -132,7 +132,8 @@ def main(argv: list[str] | None = None) -> int:
 
     start_len = persist_from
     try:
-        result = run_turn(messages, client.chat, build_registry(),
+        result = run_turn(messages, client.chat,
+                          build_registry(disabled=resolve_disabled_tools()),
                           max_iters=args.max_iters, on_event=on_event,
                           budget_chars=args.budget or None)
     except ModelError as e:

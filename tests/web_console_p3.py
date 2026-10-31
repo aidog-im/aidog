@@ -687,6 +687,36 @@ def main() -> int:
         check("POST settings channels.feishu unknown subkey -> 400", s == 400,
               f"got {s} {str(body)[:160]}")
 
+        # --- WhatsApp / Signal routes: same partition contract (still inside
+        # the snapshot window above — these writes are restored at the end). --
+        s, body = post("/api/settings",
+                       {"channels": {"whatsapp": {
+                           "enabled": False,
+                           "phone_number_id": "100123456789012"}}}, token)
+        wa = (body.get("settings", {}).get("channels", {}).get("whatsapp", {})
+              if isinstance(body, dict) else {})
+        check("POST settings channels.whatsapp legal merge -> 200",
+              s == 200 and isinstance(body, dict) and body.get("ok") is True
+              and wa.get("enabled") is False
+              and wa.get("phone_number_id") == "100123456789012",
+              f"got {s} {str(body)[:160]}")
+        s, body = post("/api/settings",
+                       {"channels": {"whatsapp": {"nope": 1}}}, token)
+        check("POST settings channels.whatsapp unknown subkey -> 400",
+              s == 400 and "unknown channels.whatsapp" in str(body),
+              f"got {s} {str(body)[:160]}")
+        s, body = post("/api/settings",
+                       {"channels": {"whatsapp": {
+                           "phone_number_id": "9" * 65}}}, token)
+        check("POST settings channels.whatsapp phone_number_id over 64 -> 400",
+              s == 400 and "phone_number_id" in str(body),
+              f"got {s} {str(body)[:160]}")
+        s, body = post("/api/settings",
+                       {"channels": {"signal": {"url": "ftp://daemon"}}}, token)
+        check("POST settings channels.signal bad url scheme -> 400",
+              s == 400 and "channels.signal.url" in str(body),
+              f"got {s} {str(body)[:160]}")
+
     # --- car 4a-M2b: hooks settings partition — whitelist gate, schema
     # errors, legal write + byte-consistent readback (all inside the
     # snapshot block above so settings.json is restored afterwards). ---
@@ -802,6 +832,33 @@ def main() -> int:
               isinstance(tmb, dict) and tmb.get("backend") == "local"
               and tmb.get("spec_set") is False, f"terminal={tmb}")
 
+    # --- v0.5.32: mycore.tools_off per-tool kill switch (validated by the
+    # registry catalog KNOWN_TOOL_NAMES; fail-closed). The legal write below
+    # is reverted byte-for-byte by the settings.json restore at the end. ---
+    if token:
+        s, body = post("/api/settings",
+                       {"mycore": {"tools_off": ["grep", "glob"]}}, token)
+        s2, body2 = get("/api/settings")
+        mc2 = body2.get("mycore") if isinstance(body2, dict) else None
+        check("POST mycore valid tools_off -> 200 + round-trips",
+              s == 200 and s2 == 200 and isinstance(mc2, dict)
+              and mc2.get("tools_off") == ["grep", "glob"],
+              f"got {s}/{s2} {str(body)[:140]} {str(mc2)[:140]}")
+        s, body = post("/api/settings",
+                       {"mycore": {"tools_off": ["no_such_tool"]}}, token)
+        check("POST mycore unknown tools_off name -> 400 + name",
+              s == 400 and "no_such_tool" in str(body),
+              f"got {s} {str(body)[:160]}")
+        s, body = post("/api/settings", {"mycore": {"tools_off": "grep"}}, token)
+        check("POST mycore tools_off wrong type -> 400",
+              s == 400 and "tools_off" in str(body),
+              f"got {s} {str(body)[:160]}")
+        s, body = post("/api/settings",
+                       {"mycore": {"tools_off": ["grep", "grep"]}}, token)
+        check("POST mycore tools_off duplicate entry -> 400",
+              s == 400 and "duplicate" in str(body),
+              f"got {s} {str(body)[:160]}")
+
     # --- car 4c: media settings partition — illegal writes are refused with
     # the parser's exact reason and must change NOTHING on disk
     # (read-compare-read of raw bytes, before the restore below). ---
@@ -861,11 +918,11 @@ def main() -> int:
           and isinstance(caps["cron"].get("jobs"), int),
           f"got {s} {str(caps)[:200]}")
     chb = caps.get("channels") if isinstance(caps, dict) else None
-    check("GET /api/capabilities channels = all 7 routes + status lists",
+    check("GET /api/capabilities channels = all 9 routes + status lists",
           isinstance(chb, dict) and isinstance(chb.get("all"), list)
-          and len(chb.get("all", [])) == 7
+          and len(chb.get("all", [])) == 9
           and {"discord", "slack", "email", "webhook", "dingtalk",
-               "feishu", "wechat"} <= set(chb.get("all", []))
+               "feishu", "wechat", "whatsapp", "signal"} <= set(chb.get("all", []))
           and isinstance(chb.get("enabled"), list)
           and isinstance(chb.get("configured"), list)
           and all(isinstance(x, str)

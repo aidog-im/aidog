@@ -122,7 +122,7 @@ from .loop import run_turn
 from .model import ChatClient
 from .session import Session
 from .tg import POLL_BOT_ENV, TgClient, TgError
-from .tools import build_registry
+from .tools import build_registry, resolve_disabled_tools
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -392,7 +392,9 @@ class ChatService:
         # HARD token gate (tg.py): dedicated MYCORE_TG_TOKEN required here too.
         self.tg = TgClient(token=TgClient.polling_token(),
                            token_env=POLL_BOT_ENV, transport=transport)
-        self.registry = build_registry(state_dir=self.state)
+        self.registry = build_registry(
+            state_dir=self.state,
+            disabled=resolve_disabled_tools(self._settings_doc()))
         # Car 2-D5: surface MCP startup notes (success counts / honest skip
         # reasons) in the service log — the model never sees a silent miss.
         for note in getattr(self.registry, "mcp_notes", []):

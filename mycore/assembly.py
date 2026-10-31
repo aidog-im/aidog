@@ -16,7 +16,10 @@ This module builds the SYSTEM message stack that `run_turn` receives:
                       present-only per file like the learned slot — a project
                       without these files is the normal state. The repo's own
                       root AGENTS.md is deliberately NOT auto-discovered: the
-                      operator opts a directory in explicitly.
+                      operator opts a directory in explicitly. Line-based
+                      '@<path>' references inside these files expand to the
+                      referenced file's content (depth 1, deny/missing/limit
+                      markers, MAX_CTX_REFS bound) — see _expand_context_refs.
   3. skill hints   -> skill descriptions stay OUT of the prompt by design; the
                       loop calls the skill_route tool instead (lazy bodies,
                       docs/features/memory_and_routing.md)
@@ -41,6 +44,7 @@ REPO = Path(__file__).resolve().parent.parent
 from lib import profile_paths as pp  # noqa: E402
 
 MAX_SLOT_CHARS = 8000        # per-file cap (budget discipline, honest truncation)
+MAX_CTX_REFS = 16            # @reference bound per context file (abuse/budget cap)
 
 # Project context files (car 1-D1): injected only from explicitly configured
 # directories — see resolve_context_dirs(). Order = injection priority.
@@ -63,6 +67,55 @@ def _read_slot(path: Path, cap: int = MAX_SLOT_CHARS) -> str | None:
     if not text.strip():
         return None
     return text if len(text) <= cap else text[:cap] + f"\n... [truncated at {cap} chars]"
+
+
+def _expand_context_refs(text: str, base: Path) -> str:
+    """Expand LINE-BASED '@' references in one project context file.
+
+    Grammar: a line whose stripped form is '@<path>' with a non-empty <path>
+    references a file resolved relative to `base` — the directory of the
+    context file that contains the line. Any other line passes through
+    untouched, so a file with no such line comes out BYTE-IDENTICAL.
+
+    Boundaries (credential discipline): the resolved target must stay inside
+    `base` (Path.resolve() + is_relative_to — symlink-safe); a traversal or an
+    absolute path escaping the dir becomes the visible
+    '[context @ref denied: <raw line>]' marker. Missing/empty/unreadable
+    targets — and directories — become '[context @ref missing: <raw line>]'.
+    Expansion is DEPTH 1: '@' lines inside referenced content stay literal
+    (no recursion). At most MAX_CTX_REFS references are expanded per context
+    file; further reference lines become '[context @ref limit: <raw line>]'.
+    Reads reuse _read_slot (same per-file cap). Never raises; used only for
+    configured project context — constitution/memory/learned slots untouched.
+    """
+    try:
+        base_res = base.resolve()
+    except OSError:
+        base_res = base
+    out: list[str] = []
+    used = 0
+    for line in text.split("\n"):
+        stripped = line.strip()
+        ref = stripped[1:].strip() if stripped.startswith("@") else ""
+        if not ref:                       # plain line, or '@' with empty rest
+            out.append(line)
+            continue
+        if used >= MAX_CTX_REFS:
+            out.append(f"[context @ref limit: {line}]")
+            continue
+        used += 1
+        try:
+            target = (base_res / ref).resolve()
+        except (OSError, ValueError):
+            out.append(f"[context @ref denied: {line}]")
+            continue
+        if not target.is_relative_to(base_res):   # traversal / absolute outside
+            out.append(f"[context @ref denied: {line}]")
+            continue
+        content = _read_slot(target)      # depth 1: nested '@' lines NOT expanded
+        out.append(content if content is not None
+                    else f"[context @ref missing: {line}]")
+    return "\n".join(out)
 
 
 def resolve_context_dirs(settings_path: Path | None = None) -> tuple[Path, ...]:
@@ -153,7 +206,8 @@ def build_system_stack(constitution_path: Path | None = None,
             if text is None:
                 continue
             stack.append({"role": "system",
-                          "content": f"[project context] {d / name}:\n{text}"})
+                          "content": f"[project context] {d / name}:\n"
+                                     f"{_expand_context_refs(text, d)}"})
 
     stack.append({"role": "system",
                   "content": "[body layer] Skills: call the skill_route tool BEFORE reading "

@@ -141,9 +141,9 @@ credentials** and is not claimed anywhere in the product surface.
 
 ## 7. Tests
 
-(Phase C counts at v0.5.25; the D car added
-`test_channels_domestic` and +10 smoke checks — current totals in
-`channels_domestic.md` §6.)
+(Phase C counts at v0.5.25; the D car added `test_channels_domestic`, the
+G car (v0.5.32) added `test_channels_wa_signal` — current run.py total
+**1020/1020**, console smoke **154/154**.)
 
 - `mycore.tests.run::test_channels` — 50 checks (four-route send shapes,
   Authorization header vs. zero-leak assertions, cursor incrementality,
@@ -151,8 +151,12 @@ credentials** and is not claimed anywhere in the product surface.
 - `mycore.tests.run::test_channels_service` — 27 checks (poll leg, allowlist
   fail-closed, command/pipeline dispatch, string-key sessions, cron origin
   round trip, dry-run, loop survival on poll errors).
-- `tests/web_console_p3.py` — 9 checks (status endpoint, settings partition
-  validation, webhook gates, settings restore).
+- `mycore.tests.run::test_channels_wa_signal` — 17 checks (§9 request
+  shapes, gates, inbound mapping, fail-soft, the 9-route CHANNELS contract,
+  zero credential echo).
+- `tests/web_console_p3.py` — 13 channel-side checks (status endpoint,
+  settings partition validation, webhook gates, settings restore, plus the
+  §9 whatsapp/signal validation legs).
 - E2E script: `tmp/e2e_channels.py` (8 checks, restores settings/secrets
   byte-for-byte; tmp/ is gitignored).
 
@@ -183,3 +187,65 @@ fake transport (`mk_update(..., thread_id=)` + recorded
 two topics, commands not opening a topic session, non-int thread field
 ignored, plain-chat zero regression. **No live TG E2E was re-run for this
 feature** (offline suite is the evidence, per the car-4a scope decision).
+
+## 9. WhatsApp + Signal routes (channel growth 7 -> 9)
+
+Two routes appended to `CHANNELS` (append order = `status()` row order):
+`("discord", "slack", "email", "webhook", "dingtalk", "feishu", "wechat",
+"whatsapp", "signal")`. Same framework contract as §1 — injectable
+transport, `configured()` naming keys/slots only, fail-soft poll, zero
+credential echo.
+
+### 9.1 WhatsApp (`whatsapp`) — Meta WhatsApp Cloud API, outbound only
+
+- **Slot** (zero echo): `CHANNEL_WHATSAPP_TOKEN` (Meta permanent/system user
+  token) — required.
+- **Settings** (`POST /api/settings` schema: `enabled`, `phone_number_id`):
+  `phone_number_id` = non-secret single-line id, **max 64 chars**; empty or
+  missing token ⇒ `configured()` is `False` with an honest reason naming the
+  slot/setting key, never a value.
+- **Outbound shape**: `POST https://graph.facebook.com/v20.0/{phone_number_id}/messages`
+  with `Authorization: Bearer <token>` and JSON
+  `{"messaging_product": "whatsapp", "to": <target>, "type": "text",
+  "text": {"preview_url": false, "body": <text>}}`; text capped at **4096
+  chars** (`…[truncated]` marker); a response without a `messages` entry or
+  carrying an `error` object is an honest `ChannelError` (code + 80-char
+  platform message, dingtalk policy).
+- **Inbound honest boundary**: **structural**, not pending — the Cloud API
+  exposes no polling endpoint, so `inbound = False`, `poll()` is silent, and
+  a ready status row carries the note
+  `inbound needs a public Meta callback (structural)` (receiving needs a Meta
+  webhook callback on a public HTTPS URL).
+- **Test legs**: `tests/web_console_p3.py` — whatsapp legal merge -> 200,
+  unknown `whatsapp` subkey -> 400, `phone_number_id` over 64 -> 400; core
+  suite: URL shape, Bearer-in-header-only, body shape, 4096 cap,
+  missing-slot gate with zero transport calls, `inbound=False` silent poll,
+  status note + zero echo.
+
+### 9.2 Signal (`signal`) — local signal-cli REST daemon, bidirectional
+
+- **Slot** (zero echo): `CHANNEL_SIGNAL_TOKEN` — **optional**; sent as
+  `Authorization: Bearer` only when set (the vanilla daemon has no auth; a
+  reverse proxy may require one). Absent ⇒ no `Authorization` header at all.
+- **Settings** (`POST /api/settings` schema: `enabled`, `url`, `allow`):
+  `url` = explicit `http(s)://` base of the local daemon (**empty = not
+  configured** — no default is guessed, a wrong guess would POST to an
+  unintended host); `allow` = fail-closed inbound sender allow-list, same
+  rule as §2 (empty/absent = every inbound denied).
+- **Outbound shape**: `POST {url}/v2/send` with JSON
+  `{"message": <text>, "numbers": [<target>]}`; text capped at 4096 chars
+  (consistent with WhatsApp).
+- **Inbound honest boundary**: **best-effort local daemon polling** —
+  `GET {url}/v1/receive` maps daemon envelopes to
+  `Inbound(route="signal", sender=<source>, target=<source>, text=…)`; when
+  the daemon is absent or refuses the connection the failure degrades to one
+  sanitized `CHANNEL_POLL_FAIL` line and an empty batch (fail-soft, the
+  feishu convention), and a ready status row carries the note
+  `inbound best-effort local daemon polling (no daemon -> empty)`. No cursor
+  file is written: a successful receive delivers the daemon's current batch
+  once.
+- **Test legs**: `tests/web_console_p3.py` — signal bad URL scheme -> 400
+  (route-generic `channels.signal.url must be an http(s) URL` message);
+  core suite: send URL/body, auth header only when the slot is set, empty-`url`
+  gate, poll envelope -> `Inbound` mapping, daemon-absent fail-soft, status
+  note + zero echo.

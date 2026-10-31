@@ -92,4 +92,4 @@ an unreadable/corrupt settings file just means "no hooks configured").
   200 with byte-consistent file + `GET /api/settings` readback (settings
   restored afterwards), and responses never echo a slot value.
 
-Suite totals after car F: core **981/981**, smoke **146/146**.
+Suite totals after car G (v0.5.32): core **1020/1020**, smoke **154/154**.

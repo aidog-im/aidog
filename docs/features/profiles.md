@@ -97,7 +97,7 @@ default layer is additionally scanned for profile-marker bytes by the suite
 |---|---|---|
 | Isolation suite (offline, stdlib, writes confined to `/tmp`) | `python3 tests/profile_f.py` | **63/63** — path seams 12 · dual-profile subprocess cross-check 24 · stack + skill roots 8 · `aidog profile` CLI 12 · `run_service.sh` semantics 5 · end-of-suite default-layer scan 2 |
 | Car-F E2E (real machine, temporary script) | `python3 tmp/e2e_car_f.py` | **18/18** — 18 legs incl. baseline/final byte-identical default layer, profile console on 18791–18795, token-gated POST, fail-closed `--check` rc 3/4/5 |
-| Full gate line (car F) | see HANDOVER §3 | core **981/981** · smoke **146/146** · router **30/30** · memory **58/58** · setup **99/99** · desktop **15/15** · publish **READY(0)** |
+| Full gate line (car G, v0.5.32) | see HANDOVER §3 | core **1020/1020** · smoke **154/154** · router **30/30** · memory **58/58** · setup **99/99** · profile **63/63** · desktop **15/15** · publish **READY(0)** |
 
 The suite's core leg runs **two real `ChatService` child processes**
 (alice/bob, offline fake transport + injected echo chat), each doing

@@ -101,7 +101,7 @@ from mycore.loop import run_turn  # noqa: E402
 from mycore.model import ChatClient  # noqa: E402
 from mycore.service import state_dir as mycore_state_dir  # noqa: E402
 from mycore.session import Session  # noqa: E402
-from mycore.tools import build_registry  # noqa: E402
+from mycore.tools import build_registry, resolve_disabled_tools  # noqa: E402
 HOST, PORT = "127.0.0.1", int(os.environ.get("AIDOG_WEB_PORT", "8790"))
 try:
     VERSION = (REPO / "VERSION").read_text(encoding="utf-8").strip()  # single source of truth
@@ -208,6 +208,8 @@ DEFAULT_SETTINGS: dict = {
         "dingtalk": {"enabled": False},
         "feishu": {"enabled": False, "allow": [], "chat_ids": []},
         "wechat": {"enabled": False},
+        "whatsapp": {"enabled": False, "phone_number_id": ""},
+        "signal": {"enabled": False, "url": "", "allow": []},
     },
     # Media face (car 4c): console voice/image configuration — non-secret only
     # (credential slots TTS_API_KEY / IMAGE_API_KEY live in secrets.env and
@@ -222,8 +224,15 @@ ALLOWED_TOP = ("language", "refresh_sec", "sound", "voice_volume",
                "alert_preview", "currency", "fx_rate", "mycore", "usage",
                "evolution", "channels", "hooks", "media")
 USAGE_KEYS = ("metrics_url", "pricing_config", "log_dir")
-MYCORE_KEYS = ("base_url", "model", "context_dirs", "upstreams", "mcp", "shell")
+MYCORE_KEYS = ("base_url", "model", "context_dirs", "upstreams", "mcp", "shell",
+               "tools_off")
 MYCORE_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$")
+# Per-tool kill switch (v0.5.32): each mycore.tools_off entry is one tool
+# name — lowercase snake, bounded at 40 chars (mirrors the name grammar the
+# registry itself uses). The KNOWN_TOOL_NAMES membership check lives in the
+# branch below (import is fail-closed: an unavailable catalog refuses writes).
+TOOLS_OFF_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
+TOOLS_OFF_MAX = 32
 # Supported UI languages = the discovered locale packs (overlay/locales/*);
 # fallback keeps validation sane if the packs are ever unreadable.
 LANGS = tuple(i18n.languages()) or ("en", "zh")
@@ -233,7 +242,7 @@ CURRENCIES = tuple(CURRENCY_SYM)
 # Channel adapter config partition (car C): per-channel allow-lists and the
 # field schema validated by validate_settings_patch (all-or-nothing).
 CHANNEL_KEYS = ("discord", "slack", "email", "webhook",
-                "dingtalk", "feishu", "wechat")
+                "dingtalk", "feishu", "wechat", "whatsapp", "signal")
 _CHANNEL_SCHEMA = {
     "discord": ("enabled", "allow", "channel_ids"),
     "slack": ("enabled", "allow", "channel_ids"),
@@ -243,6 +252,11 @@ _CHANNEL_SCHEMA = {
     "dingtalk": ("enabled",),
     "feishu": ("enabled", "allow", "chat_ids"),
     "wechat": ("enabled",),
+    "whatsapp": ("enabled", "phone_number_id"),
+    # signal carries `allow`: its inbound leg is real (daemon polling), and
+    # the service gate is fail-closed on channels.signal.allow (empty/absent
+    # = deny every sender), so the list must be writable here.
+    "signal": ("enabled", "url", "allow"),
 }
 # Media partition (car 4c): field schema validated like the other blocks —
 # URLs must be http(s)+host (empty = off), models/engines are closed enums,
@@ -656,6 +670,40 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                         continue
                     clean_mc[key] = val
                     continue
+                if key == "tools_off":
+                    # Per-tool kill switch (v0.5.32, docs/features/
+                    # tool_toggles.md): a bounded list of KNOWN tool names.
+                    # Fail-closed: wrong shape, bad grammar, duplicates and
+                    # unknown names are all refused; only the offending tool
+                    # name is ever echoed back (never a value, never a secret).
+                    if not isinstance(val, list) or not 1 <= len(val) <= TOOLS_OFF_MAX:
+                        errors.append(f"mycore.tools_off must be a list of 1..{TOOLS_OFF_MAX} tool names")
+                        continue
+                    try:
+                        from mycore.tools import KNOWN_TOOL_NAMES
+                    except Exception:  # noqa: BLE001 — fail closed, name only
+                        errors.append("mycore.tools_off unavailable")
+                        continue
+                    seen: set = set()
+                    bad: str | None = None
+                    for item in val:
+                        if not isinstance(item, str) or not TOOLS_OFF_NAME_RE.match(item):
+                            bad = item if isinstance(item, str) else ""
+                            errors.append("mycore.tools_off entries must match "
+                                          f"[a-z][a-z0-9_]{{0,39}} (got {bad[:40]!r})")
+                            break
+                        if item in seen:
+                            bad = item
+                            errors.append(f"mycore.tools_off duplicate entry: {item}")
+                            break
+                        if item not in KNOWN_TOOL_NAMES:
+                            bad = item
+                            errors.append(f"mycore.tools_off unknown tool: {item}")
+                            break
+                        seen.add(item)
+                    if bad is None:
+                        clean_mc[key] = val
+                    continue
                 if not isinstance(val, str) or not val or len(val) > 256 or "\x00" in val:
                     errors.append(f"mycore.{key} must be a non-empty string of at most 256 chars")
                     continue
@@ -739,16 +787,20 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                             errors.append(f"channels.{name}.{key} must be an integer in 1..65535")
                             continue
                         clean_sub[key] = val
-                    else:  # string fields: to / from / hosts / url
+                    else:  # string fields: to / from / hosts / url / ids
                         if not isinstance(val, str) or len(val) > 512 \
                                 or "\x00" in val or "\n" in val or "\r" in val:
                             errors.append(f"channels.{name}.{key} must be a single-line "
                                           "string of at most 512 chars")
                             continue
+                        if key == "phone_number_id" and len(val) > 64:
+                            errors.append(f"channels.{name}.{key} must be at most "
+                                          "64 chars")
+                            continue
                         if key == "url" and val:
                             parts = urllib.parse.urlparse(val)
                             if parts.scheme not in ("http", "https") or not parts.hostname:
-                                errors.append("channels.webhook.url must be an http(s) URL "
+                                errors.append(f"channels.{name}.url must be an http(s) URL "
                                               "(empty = off)")
                                 continue
                         clean_sub[key] = val
@@ -1824,7 +1876,7 @@ def _run_webhook_turn(text: str, sender: str):
     pre_ids = {id(m) for m in messages}
     messages.append({"role": "user", "content": text})
 
-    res = run_turn(messages, ChatClient(cfg).chat, build_registry(),
+    res = run_turn(messages, ChatClient(cfg).chat, build_registry(disabled=resolve_disabled_tools()),
                    budget_chars=chat_budget())
     if res.stop == "model_error":
         return res  # nothing persisted: the session stays retry-clean
@@ -1860,7 +1912,7 @@ def collect_channels() -> dict:
 # when mycore.channels is not importable (documented route order; the module's
 # CHANNELS tuple is authoritative whenever it loads).
 _SEND_ROUTES_FALLBACK = ("discord", "slack", "email", "webhook",
-                         "dingtalk", "feishu", "wechat")
+                         "dingtalk", "feishu", "wechat", "whatsapp", "signal")
 
 
 def channel_routes() -> tuple[str, ...]:
@@ -1969,7 +2021,7 @@ def collect_capabilities() -> dict:
         mcp_block["note"] = "mcp config invalid"  # honest, reason-free
     # Tools: names + descriptions from the live registry schema.
     try:
-        fns = [f.get("function", {}) for f in build_registry().schema()]
+        fns = [f.get("function", {}) for f in build_registry(disabled=resolve_disabled_tools()).schema()]
         tools = [{"name": f.get("name", ""), "description": f.get("description", "")}
                  for f in fns if isinstance(f, dict)]
     except Exception as e:  # noqa: BLE001
@@ -2404,7 +2456,7 @@ class Handler(BaseHTTPRequestHandler):
                 "progress": (prog if isinstance(prog, (int, float))
                              and not isinstance(prog, bool) else None)})
 
-        registry = build_registry()
+        registry = build_registry(disabled=resolve_disabled_tools())
         registry.bind_progress(on_mcp_progress)
         chat_fn = ChatClient(cfg).chat
         res = run_turn(messages, chat_fn, registry,
@@ -2493,7 +2545,7 @@ class Handler(BaseHTTPRequestHandler):
         """One turn over the shared agent loop — same ChatClient, same tool
         registry, same compaction budget as /api/chat. run_turn never raises
         for model/tool failures (model_error arrives via TurnResult.stop)."""
-        return run_turn(messages, ChatClient(cfg).chat, build_registry(),
+        return run_turn(messages, ChatClient(cfg).chat, build_registry(disabled=resolve_disabled_tools()),
                         budget_chars=chat_budget(), on_delta=on_delta)
 
     def _handle_openai_models(self) -> None:

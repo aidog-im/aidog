@@ -11,6 +11,11 @@ translates plain speech into a scheduler spec string (mycore.scheduler owns
 one shared grammar, so /cron and the tool can never drift). Its handler
 captures `state_dir` at build_registry() time and resolves the default path
 lazily at call time (env AIDOG_MC_STATE read when the tool actually runs).
+
+Per-tool kill switch (v0.5.32): `build_registry(..., disabled=...)` drops the
+named tools from the registry (absent from schema, dispatch falls through to
+the normal unknown-tool error) and `resolve_disabled_tools()` resolves the
+effective set from env MYCORE_TOOLS_OFF over settings `mycore.tools_off`.
 English comments per repo i18n policy.
 """
 from __future__ import annotations
@@ -19,6 +24,7 @@ import fnmatch
 import json
 import os
 import re
+import sys
 import tempfile
 import time
 import urllib.error
@@ -35,6 +41,27 @@ DEFAULT_ALLOWED_ROOTS = (str(REPO), tempfile.gettempdir())
 MAX_RESULT_CHARS = 24000          # tool output cap (context budget discipline)
 COMPRESS_THRESHOLD = 6000         # results above this compress first (car 4a-M3)
 BASH_TIMEOUT = 120
+
+# Per-tool kill switch (docs/features/tool_toggles.md): every tool name
+# build_registry CAN register across all modes — the 11 core tools plus the
+# conditional registrants (browser_* probe-gated, generate_image always,
+# connector_search slot-gated). MCP tool names are config-defined and dynamic,
+# so they are deliberately NOT part of this catalog (the console validator
+# refuses them; capability-honest registration still governs their presence).
+KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
+    # the 11 core tools (design §14.3 + Phase B2 cron + car 2 delegation)
+    "read_file", "write_file", "edit_file", "run_bash", "grep", "glob",
+    "http_fetch", "skill_route", "cron", "delegate", "execute_code",
+    # car 4b: browser automation (registered only when a browser binary is
+    # discoverable — the toggle names them anyway so config stays declarative)
+    "browser_open", "browser_snapshot", "browser_click", "browser_type",
+    "browser_screenshot", "browser_close",
+    # car 4c: media face (always / slot-gated registrants)
+    "generate_image", "connector_search"})
+
+# settings key mycore.tools_off + env MYCORE_TOOLS_OFF (owner-approved design)
+TOOLS_OFF_ENV = "MYCORE_TOOLS_OFF"
+TOOLS_OFF_MAX = 32
 
 
 class ToolError(Exception):
@@ -572,9 +599,51 @@ def _connector_search(query: str, source: str = "auto", limit: int = 5) -> str:
         raise ToolError(str(e)) from None
 
 
+def resolve_disabled_tools(settings: dict | None = None) -> frozenset[str]:
+    """Effective per-tool kill set (docs/features/tool_toggles.md).
+
+    Precedence: env MYCORE_TOOLS_OFF (comma-separated, whitespace tolerated)
+    OVERRIDES settings key `mycore.tools_off` (a JSON list of strings) when
+    the env var is present and non-empty; otherwise settings; otherwise empty.
+    `settings` is the raw web/settings.json document; when None the standard
+    path is loaded (lib.profile_paths.settings_path — same convention as
+    mycore.service._settings_doc). Unknown names from settings are rejected
+    at write time by the console validator; unknown names from env are
+    ignored here with one honest, non-fatal stderr note each (`tools_off
+    unknown: <name>` — never secret-bearing). Non-list/non-string settings
+    values are ignored (fail-closed to "nothing disabled" is WRONG here: an
+    invalid document simply must not break registry construction)."""
+    env_raw = os.environ.get(TOOLS_OFF_ENV, "")
+    if env_raw.strip():
+        out: set[str] = set()
+        for chunk in env_raw.split(","):
+            name = chunk.strip()
+            if not name:
+                continue
+            if name in KNOWN_TOOL_NAMES:
+                out.add(name)
+            else:
+                print(f"tools_off unknown: {name}", file=sys.stderr)
+        return frozenset(out)
+    if settings is None:
+        try:
+            settings = json.loads(pp.settings_path(REPO).read_text(
+                encoding="utf-8"))
+        except (OSError, ValueError):
+            settings = {}
+    if not isinstance(settings, dict):
+        return frozenset()
+    mc = settings.get("mycore") if isinstance(settings.get("mycore"), dict) else {}
+    raw = mc.get("tools_off") if isinstance(mc, dict) else None
+    if not isinstance(raw, list):
+        return frozenset()
+    return frozenset(n for n in raw if isinstance(n, str))
+
+
 def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
                    state_dir: str | Path | None = None,
-                   mcp_raw: str | None = None) -> ToolRegistry:
+                   mcp_raw: str | None = None,
+                   disabled: frozenset[str] | set[str] | None = None) -> ToolRegistry:
     """The 11 core tools (design §14.3 + cron/Phase B2 + car 2 delegate/
     execute_code) plus any configured MCP tools (car 2-D5).
     `allowed_roots`
@@ -583,6 +652,9 @@ def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
     checkpoints (service passes its own state dir; None = resolve
     AIDOG_MC_STATE at tool-call time). `mcp_raw` is the MCP server config
     (JSON array; None = resolve env MYCORE_MCP > settings mycore.mcp > off).
+    `disabled` = per-tool kill set (owner-approved v0.5.32): a name in this
+    set is NEVER registered — absent from schema() AND dispatch() returns the
+    normal `unknown tool` error. None/empty = today's registry byte-identical.
     MCP is fail-soft: a bad config or an unreachable server becomes an honest
     note on registry.mcp_notes — the 11 core tools always register."""
     roots = tuple(allowed_roots) if allowed_roots else DEFAULT_ALLOWED_ROOTS
@@ -785,4 +857,11 @@ def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
             attach(r, raw)
     except ValueError as e:                   # config problem: honest note
         r.mcp_notes = [f"mcp config invalid: {e}"]
+    # Per-tool kill switch: drop disabled names LAST so the decision covers
+    # every registrant (core, browser, connectors, MCP) in exactly one place.
+    # Registration side effects (probes, MCP sessions) are unchanged — only
+    # model-visible capability is withheld.
+    if disabled:
+        for _name in disabled:
+            r._tools.pop(_name, None)
     return r

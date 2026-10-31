@@ -119,4 +119,4 @@ reason>` — the server never re-implements the grammar.
   connection, validator leg) lives in the repo-local E2E script
   `tmp/e2e_car4b.py` (tmp harness, outside the gate suites).
 
-Suite totals after car F: core **981/981**, smoke **146/146**.
+Suite totals after car G (v0.5.32): core **1020/1020**, smoke **154/154**.

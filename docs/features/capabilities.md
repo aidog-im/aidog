@@ -53,9 +53,9 @@ Field sources:
 | `version` | `VERSION` file | single source of truth |
 | `mycore.model` / `upstreams_configured` | `cli.resolve_model_config()` | boolean only — the upstream spec (urls, env names) never serializes |
 | `mycore.mcp_servers` | `mcp.parse_config(mcp.raw_config(...))` | **names + count only**; an invalid config reports `note`, never the raw text |
-| `tools` | `build_registry().schema()` | names + descriptions of the agent's live tool set |
+| `tools` | `build_registry().schema()` | names + descriptions of the agent's live tool set — follows `mycore.tools_off` (disabled tools are absent, see [tool_toggles.md](tool_toggles.md)) |
 | `skills` | skill frontmatter discovery | read, never executed — same source as the console gallery |
-| `channels` | `collect_channels()` + `channel_routes()` | `all` lists all 7 routes; `enabled`/`configured` are name lists (`configured()` consults slot **presence** only) |
+| `channels` | `collect_channels()` + `channel_routes()` | `all` lists all 9 routes; `enabled`/`configured` are name lists (`configured()` consults slot **presence** only) |
 | `hooks` | settings `hooks` block | absent block (before the event-hooks car) → empty list — honest, not fabricated |
 | `cron` | scheduler state file | absent/corrupt registry → `0` |
 | `browser` | `mycore.browser.available()` | **availability bool only** — a discovery probe that never launches anything; `true` iff the six `browser_*` entries appear in `tools` (probe failure → `available:false` + `note`) — see [browser_automation.md](browser_automation.md) |

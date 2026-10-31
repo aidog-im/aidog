@@ -46,7 +46,7 @@ from . import checkpoint, cli
 from .assembly import build_system_stack, resolve_context_dirs
 from .loop import run_turn
 from .model import ChatClient
-from .tools import ToolError, build_registry, resolve_inside
+from .tools import ToolError, build_registry, resolve_disabled_tools, resolve_inside
 
 REPO = Path(__file__).resolve().parent.parent
 from lib import profile_paths as pp  # noqa: E402  (car F: per-profile settings)
@@ -548,7 +548,8 @@ class AcpServer:
         and delegate capture this same registry object at build time, so
         steps dispatched through them hit the proxy too. Dispatch is wrapped
         once so every result lands in session.last_result (tool preview)."""
-        reg = build_registry(allowed_roots=session.roots)
+        reg = build_registry(allowed_roots=session.roots,
+                             disabled=resolve_disabled_tools())
         if self.fs_read and self.fs_write:
             proxies = {
                 "read_file": lambda path, offset=0, limit=200:
@@ -559,7 +560,8 @@ class AcpServer:
                     self._proxy_edit(session, path, old_text, new_text),
             }
             for name, handler in proxies.items():
-                reg._tools[name].handler = handler   # fresh per-session Tool
+                if name in reg._tools:      # absent = tools_off (never proxy a disabled tool)
+                    reg._tools[name].handler = handler   # fresh per-session Tool
         base_dispatch = reg.dispatch
 
         def dispatch(name: str, arguments: dict) -> str:
