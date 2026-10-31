@@ -23,13 +23,17 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Callable
 
+from . import meter
 from .modeltier import (HealthRegistry, SHARED_HEALTH, Upstream,  # noqa: F401
-                        health_note, is_auth_class, is_failover_class)
+                        RateRegistry, SHARED_RATE, RotationState,
+                        SHARED_ROTATION, health_note, is_auth_class,
+                        is_failover_class)
 
 DEFAULT_TIMEOUT = 120.0
 
@@ -63,6 +67,13 @@ class ModelConfig:
     # mycore.reasoning_effort resolves it). Empty dict = the payload stays
     # byte-identical to the pre-X15 wire — defaults never change silently.
     extra_body: dict = field(default_factory=dict)
+    # v0.5.55 gateway car: candidate-order rotation (""/"ordered" = the
+    # historical fixed order, "round_robin" = start offset walks the chain)
+    # and GLOBAL rate caps (0 = off) enforced per (endpoint, key slot) by an
+    # in-process sliding window. All three default to today's behavior.
+    rotation: str = ""
+    max_rpm: int = 0
+    max_tpm: int = 0
 
     def chain(self) -> tuple[tuple[str, str, str], ...]:
         """Ordered attempts: primary first, then each upstream. Every entry is
@@ -95,6 +106,12 @@ class ModelConfig:
         out = (f"{self.base_url} model={self.model} "
                f"key[{self.api_key_env}]={'set' if has_key else 'unset'} "
                f"upstreams={len(self.upstreams)}")
+        if self.rotation == "round_robin":
+            out += " rotation=round_robin"
+        if self.max_rpm > 0:
+            out += f" max_rpm={self.max_rpm}"
+        if self.max_tpm > 0:
+            out += f" max_tpm={self.max_tpm}"
         if self.upstreams_note:
             out += f" upstreams-invalid: {self.upstreams_note}"
         cool = health_note([HealthRegistry.identity(u[0], u[1])
@@ -115,6 +132,19 @@ def _is_loopback(url: str) -> bool:
     except ValueError:
         return False
     return parts.hostname in ("127.0.0.1", "localhost", "::1")
+
+
+def _error_class(message: str) -> str:
+    """Short, secret-free failure class for the meter row: the HTTP status
+    when present, else the exception-class token before the colon ("transport
+    failure" / "response is not JSON"). Never the full message (it may name
+    endpoints beyond the meter's need) and never a body."""
+    import re as _re
+    m = _re.search(r"HTTP (\d{3})", message or "")
+    if m:
+        return f"HTTP {m.group(1)}"
+    head = (message or "error").split(":", 1)[0].strip()
+    return (head or "error")[:80]
 
 
 def _slot_key(name: str) -> str:
@@ -310,7 +340,9 @@ class ChatClient:
     def __init__(self, cfg: ModelConfig | None = None,
                  transport: Transport | None = None,
                  stream_transport: StreamTransport | None = None,
-                 health: HealthRegistry | None = None) -> None:
+                 health: HealthRegistry | None = None,
+                 rate: RateRegistry | None = None,
+                 rotation: RotationState | None = None) -> None:
         self.cfg = cfg or ModelConfig()
         self.transport = transport or _urllib_transport
         self.stream_transport = stream_transport or _urllib_stream_transport
@@ -318,11 +350,23 @@ class ChatClient:
         # per-turn client still honors cooldowns across turns; tests inject
         # an isolated HealthRegistry (usually with a fake clock).
         self.health = health if health is not None else SHARED_HEALTH
+        # v0.5.55: rate windows + rotation cursor follow the same pattern —
+        # shared by default (one chat service = one process), injectable for
+        # isolated tests.
+        self.rate = rate if rate is not None else SHARED_RATE
+        self.rotation = rotation if rotation is not None else SHARED_ROTATION
 
     def _candidates(self) -> tuple[tuple[str, str, str], ...]:
-        """v2 attempt units in chain order, cooling units skipped. When the
-        WHOLE chain cools, only the LEAST cold unit is kept — a call must
-        never degrade into a silent zero-attempt stop."""
+        """v2 attempt units in chain order: cooling units skipped (least-cold
+        fallback when the WHOLE chain cools — a call must never degrade into
+        a silent zero-attempt stop). v0.5.55 adds, IN ORDER:
+          1. rate gating — units AT an active global cap (max_rpm/max_tpm)
+             are skipped the same way; when every remaining unit is limited,
+             the LEAST limited one is still returned (same never-silent
+             rule as the cooldown path);
+          2. rotation — with rotation=round_robin the returned tuple starts
+             at a walking offset (ordered/"" keeps the historical
+             primary-first order byte-for-byte)."""
         units = self.cfg.units()
         if not units:
             return ()
@@ -331,12 +375,27 @@ class ChatClient:
             return HealthRegistry.identity(u[0], u[1])
 
         cooling = [u for u in units if self.health.cooling(ident(u))]
-        if not cooling:
-            return units
-        if len(cooling) == len(units):
-            least = min(units, key=lambda u: self.health.remaining(ident(u)))
-            return (least,)
-        return tuple(u for u in units if not self.health.cooling(ident(u)))
+        if cooling:
+            if len(cooling) == len(units):
+                units = (min(units, key=lambda u: self.health.remaining(ident(u))),)
+            else:
+                units = tuple(u for u in units if not self.health.cooling(ident(u)))
+        if self.cfg.max_rpm > 0 or self.cfg.max_tpm > 0:
+            open_units = tuple(
+                u for u in units
+                if not self.rate.limited(ident(u), self.cfg.max_rpm,
+                                         self.cfg.max_tpm))
+            if open_units:
+                units = open_units
+            elif len(units) > 1:
+                units = (min(units, key=lambda u: self.rate.pressure(
+                    ident(u), self.cfg.max_rpm, self.cfg.max_tpm)),)
+            # len == 1: the single unit stays (attempting it is strictly
+            # better than failing the call outright — least-cold precedent).
+        if self.cfg.rotation == "round_robin" and len(units) > 1:
+            off = self.rotation.next(len(units))
+            units = units[off:] + units[:off]
+        return units
 
     @staticmethod
     def _next_unit(units: tuple[tuple[str, str, str], ...], i: int,
@@ -399,13 +458,21 @@ class ChatClient:
         while i < len(units):
             base_url, key_slot, model = units[i]
             ident = HealthRegistry.identity(base_url, key_slot)
+            if self.cfg.max_rpm > 0 or self.cfg.max_tpm > 0:
+                self.rate.record_request(ident)   # attempt starts -> window
+            started = time.monotonic()
             try:
                 doc = self._attempt(base_url, key_slot, model, messages,
                                     tools, opts, delta_fn)
                 self.health.record_success(ident)
+                self._record_usage(base_url, opts.get("model") or model,
+                                   doc, started, ident)
                 return doc
             except ModelError as e:
                 last = e
+                meter.record(base_url, opts.get("model") or model, ok=False,
+                             latency_ms=int((time.monotonic() - started) * 1000),
+                             error_class=_error_class(str(e)))
                 failover = is_failover_class(str(e))
                 if failover:
                     self.health.record_failure(ident)
@@ -421,6 +488,29 @@ class ChatClient:
                     failed_from = base_url   # crossing to a different endpoint
                 i = nxt
         raise last if last is not None else ModelError("no upstream to attempt")
+
+    def _record_usage(self, base_url: str, model: str, doc: dict,
+                      started: float, ident: str) -> None:
+        """v0.5.55 meter + rate accounting after a SUCCESSFUL attempt.
+        Token counts come only from the provider's usage block (absent =
+        None = honest no-usage row, never a fabricated 0); rate windows get
+        the sum only when at least one count was reported. Meter failures
+        are swallowed inside meter.record — accounting can never break a
+        completed call."""
+        usage = doc.get("usage") if isinstance(doc, dict) else None
+        in_tok = out_tok = cached = None
+        if isinstance(usage, dict):
+            if type(usage.get("prompt_tokens")) is int:
+                in_tok = usage["prompt_tokens"]
+            if type(usage.get("completion_tokens")) is int:
+                out_tok = usage["completion_tokens"]
+            if type(usage.get("cached_tokens")) is int:
+                cached = usage["cached_tokens"]
+        meter.record(base_url, model, ok=True,
+                     latency_ms=int((time.monotonic() - started) * 1000),
+                     in_tok=in_tok, out_tok=out_tok, cached=cached)
+        if self.cfg.max_tpm > 0 and (in_tok or out_tok):
+            self.rate.record_tokens(ident, (in_tok or 0) + (out_tok or 0))
 
     def _headers(self, base_url: str, key_env: str) -> dict:
         """Per-attempt headers. The key VALUE is resolved as env FIRST, then

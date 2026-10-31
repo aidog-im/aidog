@@ -12404,6 +12404,312 @@ def test_delta2() -> None:
 
 
 
+def test_model_gateway() -> None:
+    """v0.5.55 gateway car: structured endpoints spec, round-robin
+    rotation, sliding-window rate caps, self-metering log and their config
+    precedence — fully offline (fake transports/clocks, temp dirs, no keys)."""
+    import json as _json
+    import tempfile
+    from mycore import cli as _gcli
+    from mycore import meter as gmeter
+    from mycore import modeltier as gmt
+
+    gmt.reset_health()
+    gmt.reset_rate()
+
+    # ---------- structured endpoints grammar (modeltier.parse_endpoints) ---
+    eps = gmt.parse_endpoints([
+        {"url": "https://a.example/v1", "model": "model-a",
+         "keys": ["MODEL_API_KEY", "MODEL_UP_K1"]},
+        {"url": "http://b.example/v1/"},
+    ])
+    check("gw: parse structured endpoints -> same Upstream shape",
+          len(eps) == 2 and eps[0].base_url == "https://a.example/v1"
+          and eps[0].key_env == "MODEL_API_KEY,MODEL_UP_K1"
+          and eps[0].model == "model-a"
+          and eps[1].base_url == "http://b.example/v1"
+          and eps[1].key_env == "" and eps[1].model == "",
+          str(eps))
+    check("gw: empty list -> no chain", gmt.parse_endpoints([]) == ())
+    gw_bad = []
+    for raw in ("not-a-list", {"url": "x"}, ["str-entry"],
+                [{"url": "ftp://x/v1"}], [{"url": "no-scheme"}],
+                [{"url": "http://a.example/v1", "model": "bad model!"}],
+                [{"url": "http://a.example/v1", "keys": "K"}],
+                [{"url": "http://a.example/v1", "keys": ["WEB_TOKEN"]}],
+                [{"url": "http://a.example/v1", "keys": ["MODEL_UP_K9"]}],
+                [{"url": "http://a.example/v1", "keys": ["MODEL_UP_K1",
+                                                           "MODEL_UP_K1"]}],
+                [{"url": "http://a.example/v1", "nope": 1}],
+                [{"url": "http://a.example/v1"}] * 5):
+        try:
+            gmt.parse_endpoints(raw)
+            gw_bad.append(raw)
+        except ValueError:
+            pass
+    check("gw: 12 invalid structured shapes rejected", not gw_bad,
+          str(gw_bad)[:200])
+    try:
+        gmt.parse_endpoints([{"url": "http://a.example/v1",
+                              "keys": ["WEB_TOKEN"]}])
+        why = ""
+    except ValueError as e:
+        why = str(e)
+    check("gw: rejection reason is chat-safe (entry + field only)",
+          "entry 1" in why and "WEB_TOKEN" not in why and "http" not in why,
+          why)
+
+    # ---------- rotation cursor (RotationState) ----------------------------
+    rot = gmt.RotationState()
+    seq = [rot.next(3) for _ in range(7)]
+    check("gw: round-robin cursor walks and wraps",
+          seq == [0, 1, 2, 0, 1, 2, 0], str(seq))
+    check("gw: span<=1 always offset 0",
+          gmt.RotationState(at=5).next(1) == 0
+          and gmt.RotationState(at=5).next(0) == 0)
+    rot.reset(at=2)
+    check("gw: reset(seeded) restarts at seed", rot.next(4) == 2)
+
+    # ---------- rate windows (RateRegistry) --------------------------------
+    clock = [1000.0]
+    rate = gmt.RateRegistry(now=lambda: clock[0])
+    ident = gmt.HealthRegistry.identity("http://r.example/v1", "R_K")
+    check("gw: rate counts start empty",
+          rate.counts(ident) == (0, 0) and not rate.limited(ident, 2, 0))
+    rate.record_request(ident)
+    clock[0] += 10
+    rate.record_request(ident)
+    check("gw: rpm cap reached -> limited",
+          rate.counts(ident)[0] == 2 and rate.limited(ident, 2, 0)
+          and not rate.limited(ident, 3, 0))
+    rate.record_tokens(ident, 500)
+    check("gw: tpm cap reached -> limited",
+          rate.counts(ident) == (2, 500) and rate.limited(ident, 0, 500)
+          and not rate.limited(ident, 0, 501))
+    check("gw: zero caps never limit", not rate.limited(ident, 0, 0))
+    check("gw: pressure ranks over-limit above idle",
+          rate.pressure(ident, 2, 0) >= 1.0
+          and rate.pressure("http://idle.example/v1|K", 2, 0) == 0.0)
+    clock[0] += 61
+    check("gw: window slides -> counts drop to zero",
+          rate.counts(ident) == (0, 0) and not rate.limited(ident, 2, 500))
+    rate.record_request(ident)
+    rate.record_tokens(ident, -5)          # ignored (n <= 0)
+    check("gw: non-positive token records ignored",
+          rate.counts(ident) == (1, 0))
+
+    # ---------- self-metering (mycore.meter) -------------------------------
+    gmeter.deactivate()
+    gmeter.record("http://x/v1", "m", ok=True, in_tok=1, out_tok=1)
+    check("gw: inactive meter drops rows silently", not gmeter.active())
+    with tempfile.TemporaryDirectory() as td:
+        gmeter.activate(td)
+        check("gw: activate -> active + returns dir",
+              gmeter.active() and gmeter.active_dir() == Path(td))
+        gmeter.record("http://a.example/v1", "model-a", ok=True,
+                      latency_ms=42, in_tok=1000, out_tok=200, cached=100)
+        gmeter.record("http://a.example/v1", "model-a", ok=False,
+                      latency_ms=7, error_class="HTTP 429")
+        gmeter.record("http://b.example/v1", "model-b", ok=True,
+                      latency_ms=9)          # provider reported no usage
+        doc = gmeter.read(days=1)
+        check("gw: meter aggregates requests/ok/fail by endpoint+model",
+              doc.get("available") is True and doc["requests"] == 3
+              and doc["ok"] == 2 and doc["fail"] == 1
+              and doc["in_tokens"] == 1000 and doc["out_tokens"] == 200
+              and doc["no_usage"] == 2   # the fail row + the usage-less ok
+              and len(doc["by_endpoint"]) == 2
+              and len(doc["by_model"]) == 2,
+              _json.dumps(doc)[:300])
+        check("gw: meter rows carry no key material",
+              "sk-" not in _json.dumps(doc))
+        day_files = list(Path(td).glob("*.jsonl"))
+        check("gw: one daily file written", len(day_files) == 1,
+              str(day_files))
+        row = _json.loads(day_files[0].read_text().splitlines()[0])
+        check("gw: row shape = ts/day/ep/model/ok + facts only",
+              set(row) == {"ts", "day", "ep", "model", "ok", "ms",
+                           "in", "out", "cached"}
+              and row["ok"] is True,
+              str(sorted(row)))
+        cost = gmeter.estimate_cost(gmeter.read(days=1), {
+            "model-a": {"in": 5.0, "out": 30.0},
+            "default": {"in": 1.0, "out": 2.0}})
+        # model-a: 1000/1e6*5 + 200/1e6*30 = 0.005 + 0.006 = 0.011
+        check("gw: cost = exact price match in CNY",
+              abs(cost["per_model"]["model-a"]["cost_cny"] - 0.011) < 1e-9
+              and abs(cost["total_cny"] - 0.011) < 1e-9,
+              str(cost))
+        cost2 = gmeter.estimate_cost(gmeter.read(days=1), {})   # no table
+        check("gw: no pricing -> null total, models listed unpriced",
+              cost2["total_cny"] is None
+              and set(cost2["unpriced"]) == {"model-a", "model-b"}
+              and all(v["cost_cny"] is None
+                      for v in cost2["per_model"].values()),
+              str(cost2))
+        gmeter.deactivate()
+    check("gw: deactivate -> inactive", not gmeter.active())
+
+    # ---------- config precedence (cli.resolve_model_config) ---------------
+    with tempfile.TemporaryDirectory() as td:
+        web = Path(td) / "web"
+        web.mkdir()
+        settings = web / "settings.json"
+        settings.write_text(_json.dumps({"mycore": {
+            "base_url": "http://127.0.0.1:3460/v1", "model": "m",
+            "upstreams": "http://legacy.example/v1|LEGACY_K",
+            "endpoints": [{"url": "http://struct.example/v1",
+                           "keys": ["MODEL_UP_K2"]}],
+            "rotation": "round_robin", "max_rpm": 5, "max_tpm": 700}}),
+            encoding="utf-8")
+        real_repo = _gcli.REPO
+        saved_env = {k: os.environ.pop(k, None)
+                     for k in ("MYCORE_BASE_URL", "MYCORE_MODEL",
+                               "MYCORE_UPSTREAMS")}
+        try:
+            _gcli.REPO = Path(td)
+            cfg = _gcli.resolve_model_config()
+            check("gw: structured endpoints beat the legacy one-line spec",
+                  len(cfg.upstreams) == 1
+                  and cfg.upstreams[0].base_url == "http://struct.example/v1"
+                  and cfg.upstreams[0].key_env == "MODEL_UP_K2",
+                  str(cfg.upstreams))
+            check("gw: rotation + rate knobs resolve from settings",
+                  cfg.rotation == "round_robin" and cfg.max_rpm == 5
+                  and cfg.max_tpm == 700,
+                  f"{cfg.rotation} {cfg.max_rpm} {cfg.max_tpm}")
+            os.environ["MYCORE_UPSTREAMS"] = "http://env.example/v1"
+            cfg = _gcli.resolve_model_config()
+            check("gw: env MYCORE_UPSTREAMS wins over BOTH tracks",
+                  len(cfg.upstreams) == 1
+                  and cfg.upstreams[0].base_url == "http://env.example/v1",
+                  str(cfg.upstreams))
+            os.environ.pop("MYCORE_UPSTREAMS")
+            settings.write_text(_json.dumps({"mycore": {
+                "upstreams": "http://legacy.example/v1|LEGACY_K"}}),
+                encoding="utf-8")
+            cfg = _gcli.resolve_model_config()
+            check("gw: legacy one-line track still resolves (dual-track)",
+                  len(cfg.upstreams) == 1
+                  and cfg.upstreams[0].key_env == "LEGACY_K",
+                  str(cfg.upstreams))
+            check("gw: defaults keep today's behavior",
+                  ModelConfig().rotation == "" and ModelConfig().max_rpm == 0
+                  and ModelConfig().max_tpm == 0)
+            settings.write_text(_json.dumps({"mycore": {
+                "endpoints": [{"url": "ftp://bad"}],
+                "rotation": "sideways", "max_rpm": 99999}}),
+                encoding="utf-8")
+            cfg = _gcli.resolve_model_config()
+            check("gw: invalid endpoints -> chain off + honest note",
+                  cfg.upstreams == () and "entry 1" in cfg.upstreams_note,
+                  cfg.upstreams_note)
+            check("gw: junk rotation / out-of-range rpm ignored",
+                  cfg.rotation == "" and cfg.max_rpm == 0,
+                  f"{cfg.rotation!r} {cfg.max_rpm}")
+        finally:
+            _gcli.REPO = real_repo
+            for k, v in saved_env.items():
+                if v is not None:
+                    os.environ[k] = v
+
+    # ---------- ChatClient: rate gating + rotation + meter rows ------------
+    def gw_ok(url, headers, payload, timeout):
+        return _json.dumps({"choices": [{"message": {"content": "x"}}],
+                            "usage": {"prompt_tokens": 10,
+                                      "completion_tokens": 5}})
+
+    chain = ModelConfig(base_url="http://p.example/v1",
+                        upstreams=(gmt.Upstream("http://q.example/v1", "Q_K"),),
+                        rotation="round_robin")
+    gmt.reset_rate()
+    rcli = ChatClient(chain, transport=gw_ok,
+                      health=gmt.HealthRegistry(now=lambda: 0.0),
+                      rate=gmt.RateRegistry(now=lambda: 0.0),
+                      rotation=gmt.RotationState())
+    first = [rcli._candidates()[0][0] for _ in range(4)]
+    check("gw: round_robin walks both units as first candidate",
+          first[0] == first[2] and first[1] == first[3]
+          and first[0] != first[1], str(first))
+    ordered = ModelConfig(base_url="http://p.example/v1",
+                          upstreams=(gmt.Upstream("http://q.example/v1",
+                                                  "Q_K"),))
+    ocli = ChatClient(ordered, transport=gw_ok,
+                      health=gmt.HealthRegistry(now=lambda: 0.0),
+                      rate=gmt.RateRegistry(now=lambda: 0.0),
+                      rotation=gmt.RotationState(at=1))
+    check("gw: ordered/empty rotation keeps primary-first order",
+          [ocli._candidates()[0][0]] * 3 == ["http://p.example/v1"] * 3)
+
+    # rate gating: fill primary's window, the next call must start at q
+    clock2 = [0.0]
+    gated_rate = gmt.RateRegistry(now=lambda: clock2[0])
+    gated = ChatClient(ModelConfig(base_url="http://p.example/v1",
+                                   upstreams=(gmt.Upstream(
+                                       "http://q.example/v1", "Q_K"),),
+                                   max_rpm=1),
+                       transport=gw_ok,
+                       health=gmt.HealthRegistry(now=lambda: clock2[0]),
+                       rate=gated_rate,
+                       rotation=gmt.RotationState())
+    p_ident = gmt.HealthRegistry.identity("http://p.example/v1",
+                                          "MODEL_API_KEY")
+    gated_rate.record_request(p_ident)          # primary at its rpm cap
+    check("gw: capped primary skipped -> next candidate is the upstream",
+          gated._candidates()[0][0] == "http://q.example/v1",
+          str(gated._candidates()))
+    # every unit capped -> LEAST limited still attempted (never silent stop)
+    gated_rate.record_request(
+        gmt.HealthRegistry.identity("http://q.example/v1", "Q_K"))
+    cands = gated._candidates()
+    check("gw: all capped -> exactly one (least-limited) candidate remains",
+          len(cands) == 1 and cands[0][0] in ("http://p.example/v1",
+                                              "http://q.example/v1"),
+          str(cands))
+
+    # meter rows from a real chat() call (success + failure shapes)
+    with tempfile.TemporaryDirectory() as td:
+        gmeter.activate(td)
+        gmeter.record("http://pre/v1", "m", ok=True)   # baseline row
+        calls = {"n": 0}
+
+        def flaky(url, headers, payload, timeout):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise ModelError("HTTP 500 Internal Server Error")
+            return gw_ok(url, headers, payload, timeout)
+
+        mcli = ChatClient(ModelConfig(
+            base_url="http://m1.example/v1",
+            upstreams=(gmt.Upstream("http://m2.example/v1", "M2_K"),)),
+            transport=flaky,
+            health=gmt.HealthRegistry(now=lambda: 0.0),
+            rate=gmt.RateRegistry(now=lambda: 0.0),
+            rotation=gmt.RotationState())
+        out = mcli.chat([{"role": "user", "content": "hi"}])
+        check("gw: chat failovers then succeeds",
+              first_choice_text(out) == "x" and calls["n"] == 2,
+              str(calls))
+        day_files = list(Path(td).glob("*.jsonl"))
+        rows = [_json.loads(ln)
+                for f in day_files for ln in f.read_text().splitlines()
+                if ln.strip()]
+        fail_rows = [r for r in rows if not r.get("ok")]
+        ok_rows = [r for r in rows if r.get("ok")
+                   and r.get("ep") != "http://pre/v1"]
+        check("gw: failed attempt logged with error class",
+              len(fail_rows) == 1 and fail_rows[0]["err"] == "HTTP 500"
+              and fail_rows[0]["ep"] == "http://m1.example/v1",
+              str(fail_rows))
+        check("gw: success logged with provider token counts",
+              len(ok_rows) == 1 and ok_rows[0]["in"] == 10
+              and ok_rows[0]["out"] == 5
+              and ok_rows[0]["ep"] == "http://m2.example/v1",
+              str(ok_rows))
+        gmeter.deactivate()
+
+
+
 def main() -> int:
     test_model()
     test_registry_and_tools()
@@ -12421,6 +12727,7 @@ def main() -> int:
     test_context_refs()
     test_checkpoint()
     test_modeltier()
+    test_model_gateway()
     test_skill_dirs_chain()
     test_loop_budget()
     test_cli_precedence()

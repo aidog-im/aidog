@@ -219,6 +219,13 @@
           </div>
           <div class="stat-grid" id="usageStats"></div>
           <div class="stat-note" id="usageNote"></div>
+          <!-- v0.5.55: self-metered block (own log — works without the
+               external metrics source; hidden when the meter is inactive) -->
+          <div class="sub-head" id="selfHead" hidden>
+            <span data-i18n="usage.selfHead">SELF-METERED (7 DAYS)</span>
+          </div>
+          <div class="stat-grid" id="selfStats" hidden></div>
+          <div class="stat-note" id="selfNote" hidden></div>
         </div>
 
         <div class="card span-1">
@@ -797,6 +804,14 @@
             <input type="text" id="usageLogDir" maxlength="512" autocomplete="off"
                    spellcheck="false" placeholder="/path/to/logs">
           </div>
+          <div class="ctl-row token-row">
+            <label data-i18n="ctl.usageModelPricing"
+                   data-i18n-t="ctl.usageModelPricingT"
+                   title="CNY per 1M tokens for the self-metered panel. Exact model match, then default. Empty = costs stay unknown (honest null).">Model pricing (CNY / 1M, JSON)</label>
+          </div>
+          <textarea id="usageModelPricing" class="evo-input evo-body" rows="3"
+                    maxlength="4000" spellcheck="false"
+                    placeholder='{"my-model": {"in": 5, "out": 30}, "default": {"in": 1, "out": 2}}'></textarea>
         </div>
 
         <div class="card">
@@ -847,11 +862,46 @@
             <input type="text" id="mycContextDirs" maxlength="256" autocomplete="off"
                    spellcheck="false" data-i18n-ph="ctl.emptyOff" placeholder="empty = off">
           </div>
+          <!-- v0.5.55 gateway car: structured endpoint manager ---------- -->
           <div class="ctl-row">
-            <label data-i18n="ctl.mycUpstreams">Failover upstreams</label>
-            <input type="text" id="mycUpstreams" maxlength="1024" autocomplete="off"
-                   spellcheck="false" placeholder="url[|key_env[|model]], …">
+            <label data-i18n="ctl.mycEndpoints">Failover endpoints</label>
+            <span class="save-state" id="epSourceChip" role="status" hidden></span>
           </div>
+          <div id="epList" class="ep-list"></div>
+          <div class="ctl-actions">
+            <button class="btn" id="epAddBtn" type="button"
+                    data-i18n="myc.epAdd">+ ADD ENDPOINT</button>
+            <button class="btn" id="epSaveChk" type="button"
+                    data-i18n="myc.epKeys">KEY SLOTS</button>
+            <span class="save-state" id="epMsg" role="status"></span>
+          </div>
+          <div id="epKeyPool" class="ep-pool" hidden></div>
+          <div class="ctl-row">
+            <label data-i18n="ctl.mycRotation" data-i18n-t="ctl.mycRotationT"
+                   title="ordered = primary first (historical behavior). round_robin = each call starts at the next endpoint/key in the chain.">Rotation</label>
+            <select id="mycRotation">
+              <option value="" data-i18n="myc.rotOrdered">ordered — primary first (default)</option>
+              <option value="round_robin" data-i18n="myc.rotRR">round_robin — walk the chain</option>
+            </select>
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="ctl.mycRate" data-i18n-t="ctl.mycRateT"
+                   title="Global sliding-window caps per endpoint+key. 0 = off.">Rate caps (req/min · tok/min, 0 = off)</label>
+            <span class="ep-rate">
+              <input type="number" id="mycMaxRpm" min="0" max="1000" step="1"
+                     inputmode="numeric" aria-label="max requests per minute">
+              <input type="number" id="mycMaxTpm" min="0" max="10000000" step="1"
+                     inputmode="numeric" aria-label="max tokens per minute">
+            </span>
+          </div>
+          <details id="epAdv" class="ep-adv">
+            <summary data-i18n="myc.epAdv">Advanced — one-line upstreams spec</summary>
+            <div class="ctl-row">
+              <label data-i18n="ctl.mycUpstreams">Failover upstreams</label>
+              <input type="text" id="mycUpstreams" maxlength="1024" autocomplete="off"
+                     spellcheck="false" placeholder="url[|key_env[|model]], …">
+            </div>
+          </details>
           <!-- Wave 4 gamma: X5 connectivity test + X6 failover health -->
           <div class="ctl-actions">
             <button class="btn" id="upTestBtn" type="button"

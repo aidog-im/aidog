@@ -1806,6 +1806,12 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 1
 
+    # v0.5.55: self-metered usage log (chat attempts only; never a key).
+    # Default path = <state>/model_usage/ — the SAME directory the console
+    # meter activates, so both processes append into one daily-file set.
+    from . import meter as meter_mod
+    meter_mod.activate()
+
     # Gate 2: single instance (one getUpdates consumer per token).
     pidfile = state / PIDFILE_NAME
     try:

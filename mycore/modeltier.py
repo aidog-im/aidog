@@ -71,6 +71,19 @@ MAX_UPSTREAMS = 4
 MAX_SPEC_CHARS = 1024
 MAX_KEY_SLOTS = 8              # credential-pool slots per endpoint (v2)
 
+# Structured chain (v0.5.55 gateway car): settings `mycore.endpoints` entries.
+# Unlike the one-line spec (operator-level trust, any env-var name), the
+# console-managed form only references the CONSOLE model-key slots — a
+# defense-in-depth boundary so a settings write can never aim a sensitive
+# non-model slot (channel/bot/GH tokens) at an operator-chosen URL.
+KEY_SLOT_ALLOW_RE = re.compile(r"^(?:MODEL_API_KEY|OPENAI_API_TOKEN|MODEL_UP_K[1-8])$")
+# Global rate knobs (0 = off), sliding window per (endpoint, key slot).
+MAX_RPM = 1000                 # requests per minute cap ceiling
+MAX_TPM = 10_000_000           # tokens per minute cap ceiling
+RATE_WINDOW_S = 60.0           # sliding window length
+RATE_MAX_EVENTS = 4096         # per-ident event cap inside one window
+
+
 # Payload/protocol errors: the SAME request would fail everywhere, so
 # failing over would only multiply a client-side bug (routing 2-way, trimmed).
 FATAL_HTTP = frozenset({400, 405, 413, 415, 422})
@@ -154,6 +167,67 @@ def parse_upstreams(spec: str) -> tuple[Upstream, ...]:
             raise ValueError(f"entry {i}: bad model id")
         out.append(Upstream(base_url=url.rstrip("/"), key_env=key_env,
                             model=model))
+    return tuple(out)
+
+
+def parse_endpoints(raw: object) -> tuple[Upstream, ...]:
+    """Parse settings `mycore.endpoints` (structured chain, v0.5.55 gateway
+    car) into the SAME Upstream tuple parse_upstreams() builds — everything
+    downstream (chain/units/failover/health) is unchanged.
+
+    Grammar: a LIST of at most MAX_UPSTREAMS objects:
+      {"url": <http(s) URL, required>, "model": <model id, optional>,
+       "keys": [<slot name>, ...] (<= MAX_KEY_SLOTS, optional)}
+
+    Keys reference console model-key SLOTS ONLY (KEY_SLOT_ALLOW_RE) — stricter
+    than the one-line spec on purpose (see the constant's comment). Empty keys
+    = inherit the primary key slot(s), same semantics as an empty key_env.
+    Raises ValueError with chat-safe reasons: entry numbers and field names
+    only, never a URL, slot value or model id from the input.
+    """
+    if not isinstance(raw, list):
+        raise ValueError("endpoints must be a list")
+    if len(raw) > MAX_UPSTREAMS:
+        raise ValueError(f"at most {MAX_UPSTREAMS} endpoints")
+    out: list[Upstream] = []
+    for i, entry in enumerate(raw, 1):
+        if not isinstance(entry, dict):
+            raise ValueError(f"entry {i} must be an object")
+        unknown = [k for k in entry if k not in ("url", "model", "keys")]
+        if unknown:
+            raise ValueError(f"entry {i}: unknown field")
+        url = entry.get("url")
+        if not isinstance(url, str) or not url.strip():
+            raise ValueError(f"entry {i}: url is required")
+        url = url.strip()
+        try:
+            parsed = urllib.parse.urlparse(url)
+        except ValueError:
+            raise ValueError(f"entry {i}: bad url") from None
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise ValueError(f"entry {i}: url must be http(s) with a host")
+        model = entry.get("model", "")
+        if model is None:
+            model = ""
+        if model and (not isinstance(model, str) or not _MODEL_RE.match(model)):
+            raise ValueError(f"entry {i}: bad model id")
+        keys = entry.get("keys", [])
+        if keys is None:
+            keys = []
+        if not isinstance(keys, list):
+            raise ValueError(f"entry {i}: keys must be a list")
+        if len(keys) > MAX_KEY_SLOTS:
+            raise ValueError(f"entry {i}: at most {MAX_KEY_SLOTS} key slots")
+        seen: set[str] = set()
+        for slot in keys:
+            if not isinstance(slot, str) or not KEY_SLOT_ALLOW_RE.match(slot):
+                raise ValueError(f"entry {i}: key slot not allowed")
+            if slot in seen:
+                raise ValueError(f"entry {i}: duplicate key slot")
+            seen.add(slot)
+        # every slot passed the isinstance+regex gate above, so keys is all-str
+        out.append(Upstream(base_url=url.rstrip("/"),
+                            key_env=",".join(keys), model=model))
     return tuple(out)
 
 
@@ -271,3 +345,129 @@ def health_note(idents: tuple[str, ...] | list[str] | None = None) -> str:
 def reset_health() -> None:
     """Clear the process-shared registry (test isolation / full reset)."""
     SHARED_HEALTH.reset()
+
+
+class RotationState:
+    """Round-robin cursor over the candidate unit list (v0.5.55 gateway car).
+
+    In-process only (same honest scope as HealthRegistry — no cross-process
+    persistence). `next(span)` returns the starting offset for ONE call and
+    advances the cursor, so consecutive calls walk the chain instead of always
+    hammering the primary. Thread-safe: the chat service rotates from multiple
+    worker threads. Tests inject their own instance (or seed `at`).
+    """
+    __slots__ = ("_lock", "_at")
+
+    def __init__(self, at: int = 0) -> None:
+        import threading
+        self._lock = threading.Lock()
+        self._at = int(at) % 1_000_003
+
+    def next(self, span: int) -> int:
+        """Offset in [0, span) for this call; advances the shared cursor."""
+        if span <= 1:
+            return 0
+        with self._lock:
+            off = self._at % span
+            self._at = (self._at + 1) % 1_000_003
+            return off
+
+    def reset(self, at: int = 0) -> None:
+        with self._lock:
+            self._at = int(at) % 1_000_003
+
+
+SHARED_ROTATION = RotationState()
+
+
+class RateRegistry:
+    """In-process sliding-window rate limiter per (endpoint, key slot)
+    (v0.5.55 gateway car; mirrors HealthRegistry's injection style).
+
+    Two independent windows per ident, both 60s sliding:
+      * requests:  record_request(ident) once per ATTEMPT start;
+      * tokens:    record_tokens(ident, n) with the provider-reported usage
+                   of a successful call (honest: never estimated).
+    Thresholds (max_rpm / max_tpm, 0 = off) are passed in per check from
+    ModelConfig — the registry stores state only, no config.
+    `limited()` gates candidates; when EVERY unit is limited the caller must
+    fall back to the LEAST limited one (never a silent total stop — same rule
+    as the cooldown path). Events are pruned on access and capped per ident
+    (RATE_MAX_EVENTS) so a hot window cannot grow unboundedly.
+    """
+    __slots__ = ("_now", "_state")
+
+    def __init__(self, now: Callable[[], float] | None = None) -> None:
+        self._now = now or time.monotonic
+        self._state: dict[str, dict] = {}
+
+    def _rec(self, ident: str) -> dict:
+        rec = self._state.get(ident)
+        if rec is None:
+            rec = {"reqs": [], "toks": []}
+            self._state[ident] = rec
+        return rec
+
+    def _prune(self, rec: dict) -> None:
+        # events are appended in monotonic order: prune when the OLDEST one
+        # has left the window (checking the head, not the tail — the tail is
+        # the newest event and stays fresh while old heads linger).
+        cut = self._now() - RATE_WINDOW_S
+        if rec["reqs"] and rec["reqs"][0] < cut:
+            rec["reqs"] = [t for t in rec["reqs"] if t >= cut]
+        if rec["toks"] and rec["toks"][0][0] < cut:
+            rec["toks"] = [e for e in rec["toks"] if e[0] >= cut]
+
+    def record_request(self, ident: str) -> None:
+        """One attempt against this unit starts now (counts toward max_rpm)."""
+        rec = self._rec(ident)
+        self._prune(rec)
+        rec["reqs"].append(self._now())
+        if len(rec["reqs"]) > RATE_MAX_EVENTS:
+            del rec["reqs"][: len(rec["reqs"]) - RATE_MAX_EVENTS]
+
+    def record_tokens(self, ident: str, n: int) -> None:
+        """Provider-reported tokens of a finished call (toward max_tpm)."""
+        if n <= 0:
+            return
+        rec = self._rec(ident)
+        self._prune(rec)
+        rec["toks"].append((self._now(), int(n)))
+        if len(rec["toks"]) > RATE_MAX_EVENTS:
+            del rec["toks"][: len(rec["toks"]) - RATE_MAX_EVENTS]
+
+    def counts(self, ident: str) -> tuple[int, int]:
+        """(requests, tokens) inside the current window."""
+        rec = self._state.get(ident)
+        if rec is None:
+            return (0, 0)
+        self._prune(rec)
+        return (len(rec["reqs"]), sum(n for _, n in rec["toks"]))
+
+    def limited(self, ident: str, max_rpm: int, max_tpm: int) -> bool:
+        """True when this unit is AT/over an active cap for the window."""
+        reqs, toks = self.counts(ident)
+        if max_rpm > 0 and reqs >= max_rpm:
+            return True
+        return bool(max_tpm > 0 and toks >= max_tpm)
+
+    def pressure(self, ident: str, max_rpm: int, max_tpm: int) -> float:
+        """0.0..1+ over-limit ratio for the least-limited fallback pick."""
+        reqs, toks = self.counts(ident)
+        p = 0.0
+        if max_rpm > 0:
+            p = max(p, reqs / max_rpm)
+        if max_tpm > 0:
+            p = max(p, toks / max_tpm)
+        return p
+
+    def reset(self) -> None:
+        self._state.clear()
+
+
+SHARED_RATE = RateRegistry()
+
+
+def reset_rate() -> None:
+    """Clear the process-shared rate windows (test isolation / full reset)."""
+    SHARED_RATE.reset()

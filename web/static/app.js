@@ -50,7 +50,7 @@ async function loadLang(lang) {
     el.alt = t(el.dataset.i18nAlt, el.alt);
   });
   applyStaticText();
-  renderStatus(); renderUsage(); renderVersion(); renderVoice();
+  renderStatus(); renderUsage(); renderSelf(selfData); renderVersion(); renderVoice();
   mediaLangRefresh();          // voice session + image badge texts follow too
   settingsRelang();            // rows built by JS keep their pack strings too
   renderExchange();            // venue rows / probe labels follow the language too
@@ -1463,6 +1463,384 @@ async function upstreamTest() {
   }
 }
 
+/* ---- v0.5.55 gateway car: structured endpoint manager ------------------
+   Source of truth is GET /api/mycore/endpoints (the server resolves env >
+   structured > one-line). The panel edits a LOCAL row list; nothing is
+   written until the normal settings save runs, where the endpoints array
+   joins the payload and the one-line field is sent empty (dual-track mutex —
+   the server refuses both non-empty in one patch).
+   Red lines kept: a key VALUE never enters the DOM (rows carry slot NAMES
+   + presence booleans only; the pool editor writes through /api/secrets and
+   clears its password input immediately); every fetch fails soft to an
+   honest note, never to a fake row. */
+let epData = null;        // last /api/mycore/endpoints payload
+let epFailed = false;     // last load failed (the note must survive repaints)
+let epRows = [];          // local editable rows (primary excluded)
+let epPrim = null;        // primary row (read-only: edited in Kernel endpoint)
+let epDirty = false;
+let epPresence = {};      // slot -> bool (10-slot catalog)
+let epKeysOpen = false;
+
+const EP_SLOT_OPTIONS = ["MODEL_API_KEY", "OPENAI_API_TOKEN",
+  "MODEL_UP_K1", "MODEL_UP_K2", "MODEL_UP_K3", "MODEL_UP_K4",
+  "MODEL_UP_K5", "MODEL_UP_K6", "MODEL_UP_K7", "MODEL_UP_K8"];
+
+async function loadEndpoints() {
+  const list = document.getElementById("epList");
+  if (!list) return;
+  try {
+    const doc = await fetch("/api/mycore/endpoints").then(r => r.json());
+    if (!doc || typeof doc !== "object" || !Array.isArray(doc.endpoints))
+      throw new Error("shape");
+    epData = doc;
+    epFailed = false;
+    epPresence = (doc.key_presence && typeof doc.key_presence === "object")
+      ? doc.key_presence : {};
+    if (!epDirty) {                 // an in-progress edit is never clobbered
+      epPrim = doc.endpoints.find(e => e && e.primary) || null;
+      epRows = doc.endpoints.filter(e => e && !e.primary).map(e => ({
+        url: String(e.url || ""),
+        model: String(e.model || ""),
+        keys: (Array.isArray(e.keys) ? e.keys : [])
+          .map(k => String((k && k.slot) || "")).filter(Boolean),
+      }));
+    }
+    renderEndpoints();
+    if (epKeysOpen) renderKeyPool();
+  } catch (e) {
+    epData = null;
+    epFailed = true;
+    list.textContent = "";
+    const note = document.createElement("div");
+    note.className = "stat-note";
+    note.textContent = t("myc.epUnavailable",
+      "endpoint manager unavailable on this build");
+    list.appendChild(note);
+    const chip = document.getElementById("epSourceChip");
+    if (chip) chip.hidden = true;
+  }
+}
+
+function epSetMsg(text, isErr) {
+  const msg = document.getElementById("epMsg");
+  if (!msg) return;
+  msg.className = isErr ? "save-state err" : "save-state";
+  msg.textContent = text || "";
+}
+
+function renderEndpoints() {
+  const list = document.getElementById("epList");
+  const chip = document.getElementById("epSourceChip");
+  if (!list) return;
+  if (!epData) {                  // not loaded yet / load failed: no fake rows
+    list.textContent = "";
+    if (chip) chip.hidden = true;
+    if (epFailed) {                // the honest failure note survives repaints
+      const note = document.createElement("div");
+      note.className = "stat-note";
+      note.textContent = t("myc.epUnavailable",
+        "endpoint manager unavailable on this build");
+      list.appendChild(note);
+    }
+    return;
+  }
+  const src = epData.source || "none";
+  if (chip) {
+    const map = { env: ["envOverride", "ENV OVERRIDES", "env"],
+                  invalid: ["invalid", "CONFIG INVALID", "invalid"],
+                  endpoints: ["structured", "STRUCTURED", ""],
+                  upstreams: ["oneLine", "ONE-LINE", ""] };
+    const hit = map[src];
+    chip.hidden = !hit;
+    if (hit) {
+      chip.textContent = t("myc.src." + hit[0], hit[1]);
+      chip.className = "ep-src " + hit[2];
+    }
+  }
+  if (src === "invalid" && epData && epData.note) {
+    epSetMsg(String(epData.note).slice(0, 200), true);
+  }
+  list.textContent = "";
+  const readonly = src === "env";
+  const rowEl = (row, idx) => {
+    const el = document.createElement("div");
+    el.className = "ep-row";
+    const line = document.createElement("div");
+    line.className = "ep-line";
+    const url = document.createElement("input");
+    url.type = "text"; url.className = "ep-url";
+    url.maxLength = 512; url.spellcheck = false;
+    url.placeholder = "https://api.example/v1";
+    url.value = row.url || "";
+    url.disabled = readonly;
+    url.addEventListener("input", () => { row.url = url.value; epDirty = true; epSetMsg(""); });
+    const model = document.createElement("input");
+    model.type = "text"; model.className = "ep-model";
+    model.maxLength = 100; model.spellcheck = false;
+    model.placeholder = t("myc.epModelPh", "model (empty = inherit)");
+    model.value = row.model || "";
+    model.disabled = readonly;
+    model.addEventListener("input", () => { row.model = model.value; epDirty = true; epSetMsg(""); });
+    const del = document.createElement("button");
+    del.type = "button"; del.className = "btn ep-del";
+    del.textContent = "✕";
+    del.title = t("myc.epDel", "remove endpoint");
+    del.disabled = readonly;
+    del.addEventListener("click", () => {
+      epRows.splice(idx, 1); epDirty = true; epSetMsg(""); renderEndpoints();
+    });
+    line.appendChild(url); line.appendChild(model); line.appendChild(del);
+    el.appendChild(line);
+    // keys: slot-name chips (presence dot from the catalog), click removes
+    const keys = document.createElement("div");
+    keys.className = "ep-keys";
+    (row.keys || []).forEach((slot, ki) => {
+      const c = document.createElement("button");
+      c.type = "button";
+      c.className = "ep-key" + (epPresence[slot] ? " set" : "");
+      const dot = document.createElement("span");
+      dot.className = "dot";
+      c.appendChild(dot);
+      c.appendChild(document.createTextNode(slot));
+      c.title = t("myc.epKeyHint",
+        "click to remove this key slot from the endpoint");
+      if (!readonly) c.addEventListener("click", () => {
+        row.keys.splice(ki, 1); epDirty = true; epSetMsg(""); renderEndpoints();
+      });
+      else c.disabled = true;
+      keys.appendChild(c);
+    });
+    if (!readonly) {
+      const add = document.createElement("select");
+      add.className = "ep-key add-select";
+      const opt0 = document.createElement("option");
+      opt0.value = "";
+      opt0.textContent = t("myc.epAddKey", "+ key slot…");
+      add.appendChild(opt0);
+      EP_SLOT_OPTIONS.filter(s => !(row.keys || []).includes(s)).forEach(s => {
+        const o = document.createElement("option");
+        o.value = s; o.textContent = s + (epPresence[s] ? " ●" : "");
+        add.appendChild(o);
+      });
+      add.addEventListener("change", () => {
+        if (!add.value) return;
+        row.keys = (row.keys || []).concat([add.value]);
+        epDirty = true; epSetMsg(""); renderEndpoints();
+      });
+      keys.appendChild(add);
+    }
+    const test = document.createElement("button");
+    test.type = "button"; test.className = "btn ep-test";
+    test.textContent = t("myc.epTest", "TEST");
+    test.addEventListener("click", () => epTestRow(row, test));
+    keys.appendChild(test);
+    el.appendChild(keys);
+    const res = document.createElement("div");
+    res.className = "ep-result"; res.hidden = true;
+    el.appendChild(res);
+    return el;
+  };
+  if (epPrim) {
+    const p = rowEl({ url: epPrim.url, model: epPrim.model,
+                      keys: (epPrim.keys || []).map(k => k.slot).filter(Boolean) }, -1);
+    const badge = document.createElement("span");
+    badge.className = "ep-badge";
+    badge.textContent = t("myc.tierPrimary", "PRIMARY");
+    const line0 = p.querySelector(".ep-line");
+    if (line0) line0.insertBefore(badge, line0.firstChild);
+    // the primary row is display-only: its endpoint/model live in the
+    // Kernel endpoint / Kernel model fields above; the test button stays.
+    p.querySelectorAll("input").forEach(i => { i.disabled = true; });
+    const del0 = p.querySelector(".ep-del");
+    if (del0) del0.hidden = true;
+    const sel0 = p.querySelector(".ep-key.add-select");
+    if (sel0) sel0.remove();
+    p.querySelectorAll(".ep-key").forEach(c => { c.disabled = true; });
+    list.appendChild(p);
+  }
+  epRows.forEach((row, i) => list.appendChild(rowEl(row, i)));
+  if (!epPrim && !epRows.length) {
+    const note = document.createElement("div");
+    note.className = "stat-note";
+    note.textContent = t("myc.epEmpty",
+      "primary endpoint only — add failover endpoints below");
+    list.appendChild(note);
+  }
+}
+
+async function epTestRow(row, btn) {
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  const el = btn.closest(".ep-row");
+  const res = el ? el.querySelector(".ep-result") : null;
+  const show = (ok, text) => {
+    if (!res) return;
+    res.hidden = false;
+    res.className = "ep-result " + (ok ? "ok" : "bad");
+    res.textContent = (ok ? "✓ " : "✗ ") + text;
+  };
+  if (!token) return show(false, t("cred.needToken", "access token required — set it in Access"));
+  const url = String(row.url || "").trim();
+  if (!url) return show(false, t("myc.epNoUrl", "endpoint url required"));
+  const slot = (row.keys || []).find(s => epPresence[s]) || "";
+  btn.disabled = true;
+  try {
+    const r = await fetch("/api/mycore/upstreams/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify(slot ? { url, slot } : { url }) });
+    let body = null;
+    try { body = await r.json(); } catch (e) { body = null; }
+    if (!r.ok) {
+      const det = (body && Array.isArray(body.details)) ? body.details : [];
+      return show(false, r.status + " · " +
+        (det[0] || (body && body.error) || t("myc.testFail", "test failed")));
+    }
+    const row0 = (Array.isArray(body) && body[0]) ? body[0] : {};
+    if (row0.ok) {
+      const ms = Number.isFinite(Number(row0.latency_ms))
+        ? Math.round(Number(row0.latency_ms)) + "ms" : "—";
+      return show(true, String(row0.name || url) + " · " + ms +
+        (slot ? " · " + slot : ""));
+    }
+    return show(false, String(row0.error_class || "failed") +
+      (slot ? " · " + slot : ""));
+  } catch (e) {
+    return show(false, t("myc.testNet", "request failed — ") +
+      String((e && e.message) || e).slice(0, 60));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderKeyPool() {
+  const pool = document.getElementById("epKeyPool");
+  if (!pool) return;
+  pool.textContent = "";
+  if (!epKeysOpen) { pool.hidden = true; return; }
+  pool.hidden = false;
+  const hint = document.createElement("div");
+  hint.className = "stat-note";
+  hint.style.flexBasis = "100%";
+  hint.textContent = t("myc.poolHint",
+    "model key slots — presence only; a value is written once and never shown again");
+  pool.appendChild(hint);
+  EP_SLOT_OPTIONS.forEach(slot => {
+    const wrap = document.createElement("span");
+    wrap.className = "ep-key" + (epPresence[slot] ? " set" : "");
+    wrap.style.cursor = "default";
+    const dot = document.createElement("span");
+    dot.className = "dot";
+    wrap.appendChild(dot);
+    wrap.appendChild(document.createTextNode(slot));
+    const inp = document.createElement("input");
+    inp.type = "password"; inp.autocomplete = "new-password";
+    inp.placeholder = epPresence[slot] ? "•••• (set)" : "";
+    inp.style.width = "110px"; inp.style.fontSize = "11px";
+    inp.setAttribute("aria-label", slot + " value");
+    const set = document.createElement("button");
+    set.type = "button"; set.className = "btn";
+    set.textContent = t("myc.poolSet", "SET");
+    set.addEventListener("click", async () => {
+      const token = localStorage.getItem(TOKEN_KEY) || "";
+      if (!token) return epSetMsg(t("cred.needToken", "access token required — set it in Access"), true);
+      const val = inp.value;
+      inp.value = "";                       // value leaves the input at once
+      try {
+        const r = await fetch("/api/secrets", {
+          method: "POST",
+          headers: { "Content-Type": "application/json",
+                     "Authorization": "Bearer " + token },
+          body: JSON.stringify({ name: slot, value: val }) });
+        const body = await r.json().catch(() => null);
+        if (!r.ok) {
+          const det = (body && Array.isArray(body.details)) ? body.details : [];
+          return epSetMsg(slot + ": " + (det[0] || (body && body.error) || "error"), true);
+        }
+        epPresence[slot] = Boolean(val);
+        epSetMsg(slot + (val ? " set ✓" : " cleared ✓"));
+        renderKeyPool(); renderEndpoints();
+      } catch (e) {
+        epSetMsg(String(e).slice(0, 80), true);
+      }
+    });
+    wrap.appendChild(inp); wrap.appendChild(set);
+    pool.appendChild(wrap);
+  });
+}
+
+function epToggleKeys() {
+  epKeysOpen = !epKeysOpen;
+  renderKeyPool();
+  if (epKeysOpen) {
+    const pool = document.getElementById("epKeyPool");
+    const first = pool && pool.querySelector("input");
+    if (first) first.focus();
+  }
+}
+
+/* ---- self-metered usage block (Overview, /api/usage/self) -------------- */
+let selfData = null;      // last payload — repainted on language switch
+async function refreshSelf() {
+  try {
+    const doc = await fetch("/api/usage/self").then(r => r.json());
+    selfData = (doc && typeof doc === "object") ? doc : null;
+    renderSelf(selfData);
+  } catch (e) { selfData = null; renderSelf(null); }
+}
+
+function renderSelf(doc) {
+  const head = document.getElementById("selfHead");
+  const grid = document.getElementById("selfStats");
+  const note = document.getElementById("selfNote");
+  if (!head || !grid || !note) return;
+  if (!doc || doc.available !== true) {
+    head.hidden = true; grid.hidden = true; note.hidden = true;
+    return;                     // inactive meter = silent absence (honest)
+  }
+  head.hidden = false; grid.hidden = false; note.hidden = false;
+  const d = (doc.display && typeof doc.display === "object") ? doc.display : null;
+  const rate = d && Number(d.rate_cny_per_unit) > 0 ? Number(d.rate_cny_per_unit) : 0;
+  const chip = (k, label, v) => `<div><div class="k">${escapeHtml(t(k, label))}</div>` +
+    `<div class="v">${escapeHtml(v)}</div></div>`;
+  const num = n => Number(n || 0).toLocaleString("en-US");
+  let costTxt = "—";
+  const pricing = (doc.pricing && typeof doc.pricing === "object") ? doc.pricing : {};
+  if (pricing.configured && pricing.total_cny != null) {
+    const cny = Number(pricing.total_cny);
+    if (d && d.currency !== "CNY" && rate > 0) {
+      const v = cny / rate;
+      costTxt = (d.symbol || "") + (v >= 100 ? Math.round(v).toLocaleString()
+        : v >= 1 ? v.toFixed(1) : v.toFixed(2));
+    } else {
+      costTxt = (d && d.currency === "CNY" ? "¥" : "") +
+        (cny >= 100 ? Math.round(cny).toLocaleString()
+          : cny >= 1 ? cny.toFixed(1) : cny.toFixed(2));
+    }
+  }
+  grid.innerHTML =
+    chip("usage.selfReq", "REQUESTS 7D", num(doc.requests)) +
+    chip("usage.selfOk", "OK", num(doc.ok)) +
+    chip("usage.selfFail", "FAIL", num(doc.fail)) +
+    chip("usage.selfIn", "IN TOKENS", num(doc.in_tokens)) +
+    chip("usage.selfOut", "OUT TOKENS", num(doc.out_tokens)) +
+    chip("usage.selfCost", "COST 7D", costTxt);
+  const bits = [];
+  if (Array.isArray(doc.unpriced) && doc.unpriced.length &&
+      pricing.total_cny == null) {
+    bits.push(t("usage.selfNoPrice",
+      "no price configured for {m} — cost stays unknown")
+      .replace("{m}", doc.unpriced.slice(0, 4).join(", ")));
+  }
+  if (Number(doc.no_usage) > 0) {
+    bits.push(t("usage.selfNoUsage",
+      "{n} calls reported no token usage (provider silence — not counted as 0)"
+      ).replace("{n}", String(doc.no_usage)));
+  }
+  if (doc.truncated) bits.push(t("usage.selfTrunc", "older rows truncated"));
+  note.textContent = bits.join(" · ");
+}
+
 /* X6 rows from statusData.modeltier (Wave 3 beta contract): tri-state by
    design — true = observed & not cooling, false = cooling now (with a live
    countdown), null = never observed in this process. available:false or an
@@ -2453,6 +2831,20 @@ async function saveSettings() {
       pricing_config: ((document.getElementById("usagePricingCfg") || {}).value || "").trim(),
       log_dir: ((document.getElementById("usageLogDir") || {}).value || "").trim(),
     };
+    // v0.5.55: self-metered price table — the textarea holds JSON; an
+    // unparseable value is sent as-is so the SERVER's grammar refusal
+    // ("usage.model_pricing: ...") reaches the save row verbatim instead of
+    // being silently dropped or half-parsed here.
+    const prEl = document.getElementById("usageModelPricing");
+    if (prEl) {
+      const raw = String(prEl.value || "").trim();
+      if (!raw) {
+        payload.usage.model_pricing = {};
+      } else {
+        try { payload.usage.model_pricing = JSON.parse(raw); }
+        catch (e) { payload.usage.model_pricing = raw; }
+      }
+    }
   }
   const mycExtra = mycoreExtraPayload();
   if (mycExtra) Object.assign(payload.mycore, mycExtra);
@@ -2524,12 +2916,17 @@ async function saveSettings() {
     // marks and re-read the rows the server normalized (hooks/channels/tools).
     chanDirty = false; usageDirty = false; mycDirty = false;
     mycRestartDirty = false;
+    // v0.5.55: the endpoint manager re-reads the server-normalized chain
+    // (source/rows/presence may all have changed) and drops its edit flag.
+    epDirty = false;
+    loadEndpoints();
     if (hookPatch) { hookDirty.clear(); renderHooks(); }
     if (payload.channels) { renderChannels(); loadChanStatus(); }
     if (toolsDirty) { toolsDirty = false; renderToolsOff(); }
     beep(880, 0.06);
     scheduleRefresh();
     refreshUsage();            // currency/fx may have changed (server cache cleared)
+    refreshSelf();             // v0.5.55: pricing table may have changed
     refreshCaps();             // tools_off / shell / env flags may have changed
   } catch (e) {
     state.className = "save-state err";
@@ -3454,17 +3851,54 @@ function renderEnvOverride() {
 
 function mycoreExtraPayload() {
   const out = {};
-  if (mycDirty) {
+  // v0.5.55: the endpoint manager sets epDirty (NOT mycDirty) on row edits,
+  // so the whole block must wake for either flag — otherwise an ADD + url
+  // save would ship a payload without `endpoints` and silently write nothing.
+  if (mycDirty || epDirty) {
     const g = id => ((document.getElementById(id) || {}).value || "");
     out.context_dirs = g("mycContextDirs").trim();
-    out.upstreams = g("mycUpstreams").trim();
     out.mcp = g("mycMcp").trim();
     out.shell = g("mycShell").trim();
-    // mycore.models / mycore.budget are first-class schema keys now: they
-    // join the payload only with a value, so an untouched form on a build
-    // without them can never fail the whole save with "unknown key".
+    // v0.5.55 dual-track: the endpoint manager and the one-line spec are two
+    // representations of the SAME chain — the server refuses both non-empty
+    // in one patch, so the payload always pairs a non-empty endpoints array
+    // with an empty upstreams (and vice versa). An empty array still ships
+    // when the panel had rows before (deep_merge replaces lists wholesale —
+    // that is how stored rows get CLEARED).
     const stored = (settings.mycore && typeof settings.mycore === "object")
       ? settings.mycore : {};
+    const hasRows = Array.isArray(epRows)
+      && epRows.some(r => r && String(r.url || "").trim());
+    if (epDirty || hasRows) {
+      out.endpoints = epRows
+        .filter(r => r && String(r.url || "").trim())
+        .map(r => {
+          const e = { url: String(r.url).trim() };
+          const m = String(r.model || "").trim();
+          if (m) e.model = m;
+          const k = (Array.isArray(r.keys) ? r.keys : [])
+            .filter(s => typeof s === "string" && s).slice(0, 8);
+          if (k.length) e.keys = k;
+          return e;
+        });
+      out.upstreams = "";
+    } else {
+      out.upstreams = g("mycUpstreams").trim();
+      if (Array.isArray(stored.endpoints) && stored.endpoints.length)
+        out.endpoints = [];      // rows existed server-side: clear them too
+    }
+    // rotation / rate caps: only ship what really changed (untouched form
+    // never rewrites the document — B1 discipline).
+    const rot = ((document.getElementById("mycRotation") || {}).value || "");
+    if (rot !== (stored.rotation || "")) out.rotation = rot;
+    const capOf = (id, ceiling) => {
+      const raw = parseInt(((document.getElementById(id) || {}).value || ""), 10);
+      return Number.isFinite(raw) ? Math.min(ceiling, Math.max(0, raw)) : 0;
+    };
+    const rpm = capOf("mycMaxRpm", 1000);
+    if (rpm !== (Number(stored.max_rpm) || 0)) out.max_rpm = rpm;
+    const tpm = capOf("mycMaxTpm", 10000000);
+    if (tpm !== (Number(stored.max_tpm) || 0)) out.max_tpm = tpm;
     const mEl = document.getElementById("mycModels");
     if (mEl) {
       const list = String(mEl.value || "").split(",").map(s => s.trim())
@@ -3519,6 +3953,15 @@ function initSettingsPanels() {
   setField("usageMetricsUrl", u.metrics_url);
   setField("usagePricingCfg", u.pricing_config);
   setField("usageLogDir", u.log_dir);
+  // v0.5.55: self-metered price table round-trips as pretty JSON. A value
+  // that is not an object (hand-edited junk) shows as-is — the server's
+  // refusal on save is the honest signal, never a silent rewrite here.
+  const prEl = document.getElementById("usageModelPricing");
+  if (prEl) {
+    const mp = u.model_pricing;
+    prEl.value = (mp && typeof mp === "object" && !Array.isArray(mp)
+      && Object.keys(mp).length) ? JSON.stringify(mp, null, 2) : "";
+  }
   setField("mycContextDirs", myc.context_dirs);
   setField("mycUpstreams", myc.upstreams);
   setField("mycMcp", myc.mcp);
@@ -3529,6 +3972,12 @@ function initSettingsPanels() {
   // Wave 6 delta2: the two opt-in switches round-trip like the other fields
   setField("mycPrune", myc.session_prune_days);
   setField("mycEffort", myc.reasoning_effort || "");
+  // v0.5.55 gateway knobs + the endpoint manager's first load
+  setField("mycRotation", myc.rotation || "");
+  setField("mycMaxRpm", Number(myc.max_rpm) || 0);
+  setField("mycMaxTpm", Number(myc.max_tpm) || 0);
+  epDirty = false;
+  loadEndpoints();
   chanDirty = false; usageDirty = false; mycDirty = false; toolsDirty = false;
   mycRestartDirty = false;
   hookDirty.clear();
@@ -3564,6 +4013,7 @@ function settingsRelang() {
   paintCredHint();
   repaintCredStatuses();   // "set / empty / {n} chars" follows the language too
   repaintSaveState();      // activation car: saved row + restart hint follow
+  renderEndpoints();       // v0.5.55: manager rows rebuilt with pack strings
   paintChanChips();
   updateHookCounts();
   document.querySelectorAll(".cred-status[data-err-detail]").forEach(el => {
@@ -6510,6 +6960,26 @@ if (exCapSaveBtnEl) exCapSaveBtnEl.addEventListener("click", exCapSave);
   const el = document.getElementById(id);
   if (el) el.addEventListener("input", () => { mycDirty = true; });
 });
+// v0.5.55 gateway knobs: select fires change, number inputs fire input
+["mycMaxRpm", "mycMaxTpm"].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener("input", () => { mycDirty = true; });
+});
+const rotEl = document.getElementById("mycRotation");
+if (rotEl) rotEl.addEventListener("change", () => { mycDirty = true; });
+const epAddBtnEl = document.getElementById("epAddBtn");
+if (epAddBtnEl) epAddBtnEl.addEventListener("click", () => {
+  epRows.push({ url: "", model: "", keys: [] });
+  epDirty = true; epSetMsg(""); renderEndpoints();
+  const rows = document.querySelectorAll("#epList .ep-row");
+  const last = rows[rows.length - 1];
+  const firstInput = last && last.querySelector("input.ep-url");
+  if (firstInput) firstInput.focus();
+});
+const epKeysBtnEl = document.getElementById("epSaveChk");
+if (epKeysBtnEl) epKeysBtnEl.addEventListener("click", epToggleKeys);
+const prTextEl = document.getElementById("usageModelPricing");
+if (prTextEl) prTextEl.addEventListener("input", () => { usageDirty = true; });
 const toolsOffEl = document.getElementById("toolsOffList");
 if (toolsOffEl) toolsOffEl.addEventListener("change", () => { toolsDirty = true; });
 const chanListEl = document.getElementById("chanList");
@@ -6704,7 +7174,7 @@ runBoot();
 setView(currentView, false);      // deep link applied before the first paint
 loadLang(startLang);
 loadSettings().then(() => { scheduleRefresh(); renderVoice(); initSettingsPanels(); });
-refreshStatus(); refreshUsage(); refreshEvents(); refreshVersion(); refreshSkills();
+refreshStatus(); refreshUsage(); refreshSelf(); refreshEvents(); refreshVersion(); refreshSkills();
 loadSkillsRemote();  // car 5: per-skill availability for the ORCHESTRATION row
 refreshEvolution();
 refreshCron();           // cron list for the Overview card (+ delete row)
@@ -6719,6 +7189,7 @@ renderExchange();    // exchange panel paints its honest fallback at once
 setInterval(tickClock, 1000); tickClock();
 setInterval(tickModeltier, 1000);   // X6 cooling countdown (hidden = no-op)
 setInterval(refreshUsage, 60000);
+setInterval(refreshSelf, 60000);   // v0.5.55 self-metered block rides along
 setInterval(refreshEvolution, 60000);
 setInterval(refreshEvents, 10000);
 setInterval(refreshVersion, 300000);

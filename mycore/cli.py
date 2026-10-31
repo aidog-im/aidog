@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 from .assembly import build_system_stack, resolve_context_dirs, stack_digest
-from .modeltier import parse_upstreams
+from .modeltier import parse_upstreams, parse_endpoints, MAX_RPM, MAX_TPM
 from .loop import run_turn
 from .model import ChatClient, ModelConfig, ModelError
 from .session import Session
@@ -33,12 +33,17 @@ from lib import profile_paths as pp  # noqa: E402  (car F: per-profile settings)
 def resolve_model_config() -> ModelConfig:
     """Endpoint precedence (owner 2026-10-18 user-configurable decision):
     env MYCORE_* > CONSOLE settings (web/settings.json mycore block) > defaults.
-    Failover chain (car 1-D4): settings mycore.upstreams, overridden by env
-    MYCORE_UPSTREAMS (same precedence rule). An invalid spec never raises —
-    the chain turns off and the reason is reported through
-    ModelConfig.upstreams_note (visible in describe(), i.e. never silent)."""
+    Failover chain precedence (v0.5.55 gateway car, dual-track):
+    env MYCORE_UPSTREAMS > settings mycore.endpoints (structured list) >
+    settings mycore.upstreams (one-line spec, unchanged grammar). An invalid
+    spec never raises — the chain turns off and the reason is reported through
+    ModelConfig.upstreams_note (visible in describe(), i.e. never silent).
+    The structured path is STRICTER about key slots (KEY_SLOT_ALLOW_RE) while
+    the one-line/env path keeps its operator-level grammar — both are
+    deliberate, see mycore.modeltier.parse_endpoints."""
     cfg = ModelConfig()
     raw_upstreams: str | None = None
+    structured: object | None = None
     try:
         stored = json.loads(pp.settings_path(REPO).read_text())
         mc = stored.get("mycore") if isinstance(stored, dict) else None
@@ -47,8 +52,19 @@ def resolve_model_config() -> ModelConfig:
                 cfg.base_url = mc["base_url"]
             if isinstance(mc.get("model"), str) and mc["model"]:
                 cfg.model = mc["model"]
+            if isinstance(mc.get("endpoints"), list) and mc["endpoints"]:
+                structured = mc["endpoints"]
             if isinstance(mc.get("upstreams"), str) and mc["upstreams"].strip():
                 raw_upstreams = mc["upstreams"]
+            # v0.5.55: candidate rotation + global rate caps. Anything not
+            # exactly on the allowlist leaves the default (today's behavior).
+            if mc.get("rotation") in ("ordered", "round_robin"):
+                cfg.rotation = mc["rotation"]
+            for key, attr, ceiling in (("max_rpm", "max_rpm", MAX_RPM),
+                                       ("max_tpm", "max_tpm", MAX_TPM)):
+                val = mc.get(key)
+                if type(val) is int and 0 <= val <= ceiling:
+                    setattr(cfg, attr, val)
             # X15 (Wave 6 delta2): opt-in per-model request param. Settings
             # mycore.reasoning_effort is the only producer; anything else
             # (absent / "" / hand-edited junk) leaves extra_body empty, so the
@@ -64,7 +80,14 @@ def resolve_model_config() -> ModelConfig:
         cfg.model = os.environ["MYCORE_MODEL"]
     if os.environ.get("MYCORE_UPSTREAMS", "").strip():
         raw_upstreams = os.environ["MYCORE_UPSTREAMS"]
-    if raw_upstreams:
+        structured = None              # env wins over BOTH settings tracks
+    if structured is not None:
+        try:
+            cfg.upstreams = parse_endpoints(structured)
+        except ValueError as e:
+            cfg.upstreams = ()
+            cfg.upstreams_note = str(e)
+    elif raw_upstreams:
         try:
             cfg.upstreams = parse_upstreams(raw_upstreams)
         except ValueError as e:
@@ -93,6 +116,10 @@ def main(argv: list[str] | None = None) -> int:
 
     cfg = resolve_model_config()
     client = ChatClient(cfg)
+    # v0.5.55: one-shot runs meter too (same state dir as the service; a
+    # never-activated meter would silently drop these rows).
+    from . import meter as _meter
+    _meter.activate()
 
     # ---- message stack: persisted history + body layer + extra system + user ----
     sess: Session | None = None

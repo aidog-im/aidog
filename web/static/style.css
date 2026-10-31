@@ -1196,3 +1196,43 @@ a.comm-title:hover { text-decoration: underline; }
 .cred-verify .stat-note { overflow-wrap: anywhere; }
 #commChecked { margin-top: 10px; }
 #commCat { max-width: 240px; }
+
+/* ---- v0.5.55 gateway car: endpoint manager + self-metered block -------- */
+.sub-head { margin-top: 14px; padding-top: 8px;
+  border-top: 1px dashed var(--line); font-size: 11px; letter-spacing: .1em;
+  color: var(--muted); font-weight: 700; }
+.ep-list { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+.ep-row { border: 1px solid var(--line); border-radius: 8px; padding: 8px;
+  background: #fbfcfe; display: flex; flex-direction: column; gap: 6px; }
+.ep-row .ep-line { display: flex; gap: 6px; align-items: center; }
+.ep-row .ep-line input[type="text"] { flex: 1 1 auto; min-width: 0;
+  font-family: var(--mono); font-size: 12px; }
+.ep-row .ep-line input.ep-model { flex: 0 1 190px; }
+.ep-row .ep-badge { flex: 0 0 auto; font-size: 10px; letter-spacing: .08em;
+  font-weight: 700; color: var(--muted); border: 1px solid var(--line);
+  border-radius: 4px; padding: 2px 5px; }
+.ep-row .ep-del { flex: 0 0 auto; padding: 3px 8px; font-size: 12px; }
+.ep-keys { display: flex; gap: 5px; flex-wrap: wrap; align-items: center; }
+.ep-key { display: inline-flex; align-items: center; gap: 4px; font-family: var(--mono);
+  font-size: 10.5px; border: 1px solid var(--line); border-radius: 10px;
+  padding: 2px 7px; background: #fff; color: var(--muted); cursor: pointer; }
+.ep-key .dot { width: 7px; height: 7px; border-radius: 50%;
+  background: var(--line); display: inline-block; }
+.ep-key.set { color: var(--blue-ink); border-color: #bcd7f5; }
+.ep-key.set .dot { background: var(--ok); }
+.ep-key.add { border-style: dashed; cursor: pointer; }
+.ep-row .ep-test { flex: 0 0 auto; padding: 3px 8px; font-size: 11px; }
+.ep-row .ep-result { font-family: var(--mono); font-size: 11.5px; }
+.ep-row .ep-result.ok { color: var(--ok); }
+.ep-row .ep-result.bad { color: var(--red); }
+.ep-pool { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px;
+  padding: 8px; border: 1px dashed var(--line); border-radius: 8px; }
+.ep-rate { display: inline-flex; gap: 6px; }
+.ep-rate input { width: 92px; text-align: right; }
+.ep-adv { margin-top: 8px; }
+.ep-adv > summary { cursor: pointer; font-size: 12px; color: var(--muted); }
+.ep-adv[open] > summary { margin-bottom: 4px; }
+.ep-src { font-size: 11px; font-weight: 700; letter-spacing: .06em;
+  padding: 2px 7px; border-radius: 10px; border: 1px solid var(--line); }
+.ep-src.env { color: var(--blue-ink); border-color: #bcd7f5; }
+.ep-src.invalid { color: var(--red); border-color: #f3c2c2; }

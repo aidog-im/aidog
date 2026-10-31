@@ -260,6 +260,7 @@ sys.path.insert(0, str(REPO))
 from lib import i18n  # noqa: E402
 from lib import profile_paths  # noqa: E402  (car F §13.1: per-profile path seams)
 from mycore import checkpoint, cli, evolution, hooks, mission, mcp, modeltier, terminal  # noqa: E402  (X10 snapshots + config + MCP/ hooks/ terminal/ mission grammar)
+from mycore import meter as model_meter  # noqa: E402  (v0.5.55 self-metering)
 from mycore.assembly import build_system_stack, resolve_context_dirs  # noqa: E402
 from mycore.compact import measure  # noqa: E402  (X14 context usage: the loop's own payload metric)
 from mycore.loop import run_turn  # noqa: E402
@@ -390,10 +391,12 @@ DEFAULT_SETTINGS: dict = {
     # group E + mimo-v2.6-flash; user-configurable via CONSOLE (P4-1b),
     # env MYCORE_BASE_URL / MYCORE_MODEL still override at call time.
     "mycore": {"base_url": "http://127.0.0.1:3460/v1",
-               "model": "mimo-v2.6-flash"},
+               "model": "mimo-v2.6-flash",
+               # v0.5.55 gateway panel: absent == these defaults == today's
+               # behavior (empty chain extras, fixed order, no rate caps).
+               "endpoints": [], "rotation": "", "max_rpm": 0, "max_tpm": 0},
     "usage": {"metrics_url": "http://127.0.0.1:3456/metrics",
-              "pricing_config": "",
-              "log_dir": ""},
+              "pricing_config": "", "log_dir": "", "model_pricing": {}},
     # Inbound/outbound channel adapters (car C): non-secret config only —
     # credentials live in secrets.env slots (CHANNEL_*), never here.
     "channels": {
@@ -438,10 +441,18 @@ DEFAULT_SETTINGS: dict = {
 ALLOWED_TOP = ("language", "refresh_sec", "sound", "voice_volume",
                "alert_preview", "currency", "fx_rate", "mycore", "usage",
                "evolution", "channels", "hooks", "media", "web3", "mission")
-USAGE_KEYS = ("metrics_url", "pricing_config", "log_dir")
+USAGE_KEYS = ("metrics_url", "pricing_config", "log_dir", "model_pricing")
 MYCORE_KEYS = ("base_url", "model", "context_dirs", "upstreams", "mcp", "shell",
                "tools_off", "models", "budget", "session_prune_days",
-               "reasoning_effort")
+               "reasoning_effort", "endpoints", "rotation", "max_rpm",
+               "max_tpm")
+# v0.5.55: structured endpoint slots the console form may reference — the
+# SAME allowlist mycore.modeltier enforces at parse time (single source of
+# truth is the regex; this tuple only documents it for the route layer).
+MODEL_KEY_SLOTS = ("MODEL_API_KEY", "OPENAI_API_TOKEN",
+                   "MODEL_UP_K1", "MODEL_UP_K2", "MODEL_UP_K3", "MODEL_UP_K4",
+                   "MODEL_UP_K5", "MODEL_UP_K6", "MODEL_UP_K7", "MODEL_UP_K8")
+MODEL_KEY_SLOT_RE = re.compile(r"^(?:MODEL_API_KEY|OPENAI_API_TOKEN|MODEL_UP_K[1-8])$")
 MYCORE_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$")
 # mycore.models / mycore.budget join the schema (activation car §1.6): the
 # raw-file consumers (service._allowed_models / service._budget /
@@ -885,6 +896,35 @@ def _is_loopback_http(url: str) -> bool:
     return parts.scheme == "http" and parts.hostname in ("127.0.0.1", "localhost", "::1")
 
 
+def _validate_model_pricing(val) -> str:
+    """usage.model_pricing shape check (v0.5.55). Returns "" when clean,
+    else the refusal reason (safe: field names and limits only).
+
+    Grammar: {model_id | "default": {"in": number >= 0, "out": number >= 0}}
+    with at most 64 entries; keys <= 100 chars; CNY per 1M tokens (the same
+    unit mycore.meter.estimate_cost consumes). Empty dict = table off."""
+    if not isinstance(val, dict):
+        return "must be an object {model_or_default: {in, out}}"
+    if len(val) > 64:
+        return "at most 64 entries"
+    for name, row in val.items():
+        if not isinstance(name, str) or not name or len(name) > 100:
+            return "keys must be non-empty strings of at most 100 chars"
+        if not isinstance(row, dict):
+            return f"{name}: must be an object with in/out"
+        unknown = [k for k in row if k not in ("in", "out")]
+        if unknown:
+            return f"{name}: unknown field"
+        for side in ("in", "out"):
+            if side not in row:
+                return f"{name}: missing {side}"
+            p = row[side]
+            if isinstance(p, bool) or not isinstance(p, (int, float)) \
+                    or not 0 <= p <= 1_000_000:
+                return f"{name}: {side} must be a number in 0..1000000"
+    return ""
+
+
 def validate_settings_patch(patch) -> tuple[dict, list[str]]:
     """Allow-list validation. Returns (clean patch, errors); all-or-nothing."""
     if not isinstance(patch, dict):
@@ -1101,6 +1141,46 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                         continue
                     clean_mc[key] = val
                     continue
+                if key == "endpoints":
+                    # v0.5.55 structured chain: grammar lives in
+                    # mycore.modeltier.parse_endpoints (the validator reports
+                    # its exact chat-safe reason). A BOTH-non-empty check runs
+                    # after the loop (one error, order-independent) — for a
+                    # POST patch the 400 refuses the write; for load_settings
+                    # (hand-edited document) the errors are ignored and BOTH
+                    # tracks survive into clean, matching cli's endpoints-
+                    # win precedence instead of silently dropping one side.
+                    try:
+                        modeltier.parse_endpoints(val)
+                    except ValueError as e:
+                        errors.append(f"mycore.endpoints: {e}")
+                        continue
+                    clean_mc[key] = val
+                    continue
+                if key == "rotation":
+                    # candidate ordering: ""/ordered = the historical fixed
+                    # order, round_robin = walking start offset.
+                    if not isinstance(val, str) or val not in (
+                            "", "ordered", "round_robin"):
+                        errors.append(
+                            "mycore.rotation must be one of: (empty)|ordered|"
+                            "round_robin")
+                        continue
+                    clean_mc[key] = val
+                    continue
+                if key in ("max_rpm", "max_tpm"):
+                    # global sliding-window caps (0 = off). bool is an int
+                    # subclass — rejected explicitly (True is not a cap).
+                    ceiling = (modeltier.MAX_RPM if key == "max_rpm"
+                               else modeltier.MAX_TPM)
+                    if isinstance(val, bool) or not isinstance(val, int) \
+                            or not 0 <= val <= ceiling:
+                        errors.append(
+                            f"mycore.{key} must be an integer in 0..{ceiling} "
+                            "(0 = off)")
+                        continue
+                    clean_mc[key] = val
+                    continue
                 if not isinstance(val, str) or not val or len(val) > 256 or "\x00" in val:
                     errors.append(f"mycore.{key} must be a non-empty string of at most 256 chars")
                     continue
@@ -1113,6 +1193,18 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                     errors.append("mycore.model must match [A-Za-z0-9._:/-] (1..100 chars)")
                     continue
                 clean_mc[key] = val
+            # v0.5.55 dual-track mutex: ONE non-empty chain representation per
+            # write. A POST carrying both is refused (400, order-independent);
+            # load_settings ignores errors, so a hand-edited document keeping
+            # both still loads and cli.resolve prefers `endpoints` — the same
+            # precedence collect_endpoints() renders.
+            _mc_ep = mc.get("endpoints")
+            _mc_up = mc.get("upstreams")
+            if _mc_ep and isinstance(_mc_up, str) and _mc_up.strip():
+                errors.append(
+                    "mycore.endpoints and mycore.upstreams are two "
+                    "representations of the chain — send only one "
+                    "non-empty (the console clears the other on save)")
             if clean_mc:
                 clean["mycore"] = clean_mc
     if "usage" in patch:
@@ -1126,6 +1218,17 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                     errors.append(f"unknown usage key: {key}")
                     continue
                 val = usage[key]
+                if key == "model_pricing":
+                    # v0.5.55: per-model CNY price table for the self-metered
+                    # panel — {model_id|"default": {"in": ¥/1M, "out": ¥/1M}}.
+                    # Unknown fields / non-numeric prices are refused here so
+                    # estimate_cost() only ever sees clean numbers.
+                    err = _validate_model_pricing(val)
+                    if err:
+                        errors.append(f"usage.model_pricing: {err}")
+                        continue
+                    clean_usage[key] = val
+                    continue
                 if not isinstance(val, str) or len(val) > 512 or "\x00" in val:
                     errors.append(f"usage.{key} must be a string of at most 512 chars")
                     continue
@@ -1753,6 +1856,48 @@ def collect_usage(settings: dict) -> dict:
         }
         _usage_cache["ts"], _usage_cache["data"] = now, data
         return data
+
+
+def collect_usage_self() -> dict:
+    """GET /api/usage/self (v0.5.55) — the SELF-METERED panel: rows the
+    mycore meter wrote for chat attempts in this profile (last 7 days), plus
+    a CNY cost from settings usage.model_pricing.
+
+    Independent of the external metrics source the legacy /api/usage reads,
+    so an end user without that infrastructure still sees real numbers.
+    Degradations stay honest: inactive meter -> available:false; a model
+    with no configured price -> cost null + listed unpriced (never 0);
+    display currency conversion reuses the FX machinery of /api/usage."""
+    settings = load_settings()
+    usage = model_meter.read()
+    out: dict = {"available": False}
+    if not usage.get("available"):
+        return {**out, "reason": usage.get("reason") or "inactive"}
+    pricing = (settings.get("usage") or {}).get("model_pricing")
+    pricing = pricing if isinstance(pricing, dict) else {}
+    cost = model_meter.estimate_cost(usage, pricing)
+    out.update({
+        "available": True,
+        "window_days": usage.get("days") or [],
+        "files": usage.get("files", 0),
+        "truncated": bool(usage.get("truncated")),
+        "requests": usage.get("requests", 0),
+        "ok": usage.get("ok", 0),
+        "fail": usage.get("fail", 0),
+        "in_tokens": usage.get("in_tokens", 0),
+        "out_tokens": usage.get("out_tokens", 0),
+        "cached_tokens": usage.get("cached", 0),
+        "no_usage": usage.get("no_usage", 0),
+        "by_endpoint": usage.get("by_endpoint") or [],
+        "by_model": usage.get("by_model") or [],
+        "by_day": usage.get("by_day") or {},
+        "pricing": {"configured": bool(pricing),
+                    "total_cny": cost["total_cny"],
+                    "per_model": cost["per_model"],
+                    "unpriced": cost["unpriced"]},
+        "display": display_fx(settings),
+    })
+    return out
 
 
 # ----------------------------------------------------------------- events ----
@@ -3384,12 +3529,21 @@ def collect_capabilities() -> dict:
     from config presence: no credential value, no token-bearing URL, nothing
     from secrets.env ever serializes here (the smoke asserts it)."""
     settings = load_settings()
+    cfg = None
     try:
         cfg = cli.resolve_model_config()
         model, upstreams_ok = cfg.model, bool(getattr(cfg, "upstreams", ()))
     except Exception as e:  # noqa: BLE001 — catalog must not fail the console
         sys.stderr.write(f"capabilities model config failed err={type(e).__name__}\n")
         model, upstreams_ok = None, False
+    # v0.5.55 gateway knobs: rotation mode, global rate caps and the size of
+    # the resolved chain — names/counts/booleans only (same catalog contract).
+    gateway_blk = {
+        "rotation": getattr(cfg, "rotation", ""),
+        "max_rpm": getattr(cfg, "max_rpm", 0),
+        "max_tpm": getattr(cfg, "max_tpm", 0),
+        "endpoints_count": len(getattr(cfg, "upstreams", ()) or ()),
+    }
     # MCP: server NAMES + count only (config carries urls/env-slot refs —
     # the parse is ours; the catalog never echoes the raw config).
     mcp_block: dict = {"count": 0, "names": []}
@@ -3559,6 +3713,7 @@ def collect_capabilities() -> dict:
         "version": VERSION,
         "mycore": {"model": model, "upstreams_configured": upstreams_ok,
                    "mcp_servers": mcp_block,
+                   "gateway": gateway_blk,
                    "known_tools": known_tools},
         "env_overrides": env_overrides,
         "tools": tools,
@@ -3996,6 +4151,98 @@ def upstream_probe_targets(url: str | None = None
             for base, key_env, _model in cfg.chain()[1:]], None
 
 
+def _slot_present(name: str) -> bool:
+    """Presence of ONE model-key slot: process env first (operator override
+    wins), then the secrets.env slot the console writes. Value never leaves
+    this boolean."""
+    try:
+        return bool(os.environ.get(name) or read_env_slot(name))
+    except Exception:  # noqa: BLE001 — an unreadable store reads as absent
+        return False
+
+
+def collect_endpoints() -> dict:
+    """GET /api/mycore/endpoints (v0.5.55) — the normalized chain for the
+    Model panel. `source` names which track configured it:
+    env | endpoints (structured) | upstreams (one-line) | none | invalid.
+
+    Each row is {url, model, keys:[{slot, set}], primary:bool} — slot NAMES
+    and presence booleans only, never a value (zero-echo), so the panel can
+    render chips and route per-key probes without ever seeing a secret.
+    The one-line track parses into the SAME row shape (dual-track UI: an old
+    config looks identical to a new one). Fail-soft: a parse problem answers
+    200 with source=invalid + note, never a 500."""
+    settings = load_settings()
+    mc = settings.get("mycore") if isinstance(settings.get("mycore"), \
+                                               dict) else {}
+    out: dict = {"source": "none", "endpoints": [],
+                 "rotation": "", "max_rpm": 0, "max_tpm": 0,
+                 "note": ""}
+    if isinstance(mc, dict):
+        out["rotation"] = mc.get("rotation") if mc.get("rotation") in (
+            "ordered", "round_robin") else ""
+        for key, attr, ceiling in (("max_rpm", "max_rpm", modeltier.MAX_RPM),
+                                   ("max_tpm", "max_tpm", modeltier.MAX_TPM)):
+            val = mc.get(key)
+            if type(val) is int and 0 <= val <= ceiling:
+                out[attr] = val
+    env_spec = (os.environ.get("MYCORE_UPSTREAMS") or "").strip()
+    structured = mc.get("endpoints") if isinstance(mc, dict) else None
+    line_spec = (mc.get("upstreams") if isinstance(mc, dict) else "") or ""
+    chain: list[tuple[str, str, str]] = []
+    try:
+        cfg = cli.resolve_model_config()
+        primary = (cfg.base_url, cfg.api_key_env, cfg.model)
+    except Exception as e:  # noqa: BLE001 — class name only
+        return {**out, "note": f"model config unavailable: {type(e).__name__}"}
+    if env_spec:
+        chain = [primary] + list(cfg.upstreams)
+        if cfg.upstreams or not cfg.upstreams_note:
+            out["source"] = "env"
+        else:
+            out["source"] = "invalid"
+            out["note"] = f"MYCORE_UPSTREAMS: {cfg.upstreams_note}"
+    elif isinstance(structured, list) and structured:
+        chain = [primary] + list(cfg.upstreams)
+        if cfg.upstreams or not cfg.upstreams_note:
+            out["source"] = "endpoints"
+        else:
+            out["source"] = "invalid"
+            out["note"] = f"mycore.endpoints: {cfg.upstreams_note}"
+    elif line_spec.strip():
+        chain = [primary] + list(cfg.upstreams)
+        if cfg.upstreams or not cfg.upstreams_note:
+            out["source"] = "upstreams"
+        else:
+            out["source"] = "invalid"
+            out["note"] = f"mycore.upstreams: {cfg.upstreams_note}"
+    else:
+        chain = [primary]
+    rows: list[dict] = []
+    for idx, item in enumerate(chain):
+        # chain mixes the primary (plain 3-tuple) with cfg.upstreams entries
+        # (Upstream dataclasses) — normalize to (base, key_env, model).
+        if isinstance(item, modeltier.Upstream):
+            base, key_env, model = (item.base_url, item.key_env, item.model)
+        else:
+            base, key_env, model = item
+        slots = [s for s in (key_env or "").split(",") if s] or [""]
+        rows.append({
+            "url": base,
+            "model": model,
+            "primary": idx == 0,
+            "keys": [{"slot": s, "set": _slot_present(s)} if s else
+                     {"slot": "", "set": False} for s in slots],
+        })
+    out["endpoints"] = rows
+    # full model-key catalog presence (10 slots) so the panel can render
+    # pool chips for slots no endpoint references yet — presence booleans
+    # only, values never (zero-echo).
+    out["key_presence"] = {name: _slot_present(name)
+                           for name in MODEL_KEY_SLOTS}
+    return out
+
+
 def collect_setup() -> dict:
     """GET /api/setup — the activation checklist (loopback READ, no auth).
 
@@ -4207,6 +4454,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(collect_setup())
         if path == "/api/usage":
             return self._json(collect_usage(load_settings()))
+        if path == "/api/usage/self":
+            return self._json(collect_usage_self())
+        if path == "/api/mycore/endpoints":
+            return self._json(collect_endpoints())
         if path == "/api/events":
             return self._json(collect_events())
         if path == "/api/evolution":
@@ -4395,6 +4646,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "validation failed",
                                "details": ["name must be a non-empty string"]}, 400)
         group = SECRET_SLOTS.get(name)
+        if group is None and MODEL_KEY_SLOT_RE.match(name):
+            # v0.5.55: the 8 model-key pool slots (MODEL_UP_K1..K8) are
+            # writable here but deliberately NOT listed by GET /api/secrets
+            # (the fixed catalog stays 34 rows) — the Model endpoints panel
+            # shows their presence instead. Same value rules as every slot.
+            group = "model"
         if group is None:
             detail = ("slot is not writable: WEB_TOKEN"
                       if name in SECRET_PRESENCE_ONLY
@@ -4416,6 +4673,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "validation failed",
                                "details": ["value must not start or end with whitespace"]}, 400)
         fmt_pat = SLOT_WRITE_PATTERNS.get(name)
+        if fmt_pat is None and MODEL_KEY_SLOT_RE.match(name):
+            # same shape rule as MODEL_API_KEY (the wizard's mirror): a model
+            # key is at least 8 non-space chars, one line.
+            fmt_pat = SLOT_PATTERNS["MODEL_API_KEY"]
         if value and fmt_pat and not re.match(fmt_pat, value):
             # per-slot shape rule (activation car §1.9): mirrors the setup
             # wizard; the stored value is NEVER echoed back in the refusal.
@@ -4822,19 +5083,50 @@ class Handler(BaseHTTPRequestHandler):
                            "lines": rel})
 
     def _handle_upstreams_test(self) -> None:
-        """POST /api/mycore/upstreams/test {url?} — Bearer gate, then ONE 5s
-        probe per configured failover endpoint (or only `url` when given),
-        answered as a bare JSON array [{name, ok, latency_ms, error_class}].
+        """POST /api/mycore/upstreams/test {url?, slot?} — Bearer gate, then
+        ONE 5s probe per target, answered as a bare JSON array
+        [{name, ok, latency_ms, error_class}].
+
+        Target selection (v0.5.55):
+          {}            -> the configured failover chain (unchanged);
+          {url}         -> that endpoint, NO credential (unchanged);
+          {url, slot}   -> that endpoint with the slot's KEY VALUE for one
+                           probe header (per-key TEST from the Model panel).
+                           `slot` must be a console MODEL slot — the value
+                           never travels beyond this frame (same X5 rule:
+                           no body, no query, no echo), and the capability
+                           is no more than save-then-test: the same admin
+                           could store the pair in settings and probe it.
+          {slot} (bare) -> 400: a key probe always needs its endpoint.
         `error_class` is an exception class name or 'HTTP <status>' and
-        NOTHING else: never the probed query/userinfo, never a response body,
-        never a key — endpoint credentials resolve inside this frame for one
-        request header and are dropped."""
+        NOTHING else: never the probed query/userinfo, never a response
+        body, never a key."""
         if not self._require_token():
             return
         doc = self._read_json_body()
         if doc is None:
             return
         url = doc.get("url")
+        slot = doc.get("slot")
+        if slot is not None:
+            if not isinstance(slot, str) or not slot.strip():
+                return self._json({"error": "validation failed",
+                                   "details": ["slot must be a non-empty "
+                                               "string"]}, 400)
+            slot = slot.strip()
+            if not MODEL_KEY_SLOT_RE.match(slot):
+                # defense in depth: only model slots are probeable — any
+                # other credential name is refused before a value resolves.
+                return self._json({"error": "validation failed",
+                                   "details": ["slot must be a model key "
+                                               "slot (MODEL_API_KEY|"
+                                               "OPENAI_API_TOKEN|MODEL_UP_K*)"]},
+                                  400)
+            if url is None:
+                return self._json({"error": "validation failed",
+                                   "details": ["slot requires url (a key "
+                                               "probe needs its endpoint)"]},
+                                  400)
         if url is not None:
             if not isinstance(url, str) or not url.strip():
                 return self._json({"error": "validation failed",
@@ -4850,11 +5142,18 @@ class Handler(BaseHTTPRequestHandler):
         if detail:
             return self._json({"error": "validation failed",
                                "details": [detail]}, 400)
+        if slot is not None and url is not None:
+            key = os.environ.get(slot, "") or (read_env_slot(slot) or "")
+            if not key:
+                return self._json({"error": "validation failed",
+                                   "details": [f"slot {slot} is not set"]}, 400)
+            targets = [(url, key)]           # value lives in this frame only
         results = [probe_endpoint(base, key=key) for base, key in targets]
         # counts only — URL, key and body never enter this line
-        sys.stderr.write("upstream test n=%d ok=%d\n" %
+        sys.stderr.write("upstream test n=%d ok=%d slot=%s\n" %
                          (len(results),
-                          sum(1 for r in results if r.get("ok"))))
+                          sum(1 for r in results if r.get("ok")),
+                          "yes" if slot else "no"))
         return self._json(results)
 
     def _handle_mission_post(self) -> None:
@@ -6169,6 +6468,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
+    # v0.5.55: console-run chat legs meter into the same state-dir log the
+    # service writes (per-day files, O_APPEND-safe across both processes).
+    model_meter.activate()
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"I'm AiDog console -> http://{HOST}:{PORT}/  (loopback only, {VERSION})")
     srv.serve_forever()

@@ -513,6 +513,154 @@ def main() -> int:
     check("POST mycore chain/context back to off -> 200", s == 200,
           f"got {s} {body}")
 
+    # --- v0.5.55 gateway car: structured endpoints + rotation + rate caps ---
+    s, eps = get("/api/mycore/endpoints")
+    check("GET /api/mycore/endpoints shape",
+          s == 200 and isinstance(eps, dict)
+          and eps.get("source") in ("none", "env", "endpoints", "upstreams",
+                                     "invalid")
+          and isinstance(eps.get("endpoints"), list)
+          and eps.get("endpoints")
+          and eps["endpoints"][0].get("primary") is True
+          and isinstance(eps["endpoints"][0].get("keys"), list)
+          and "slot" in eps["endpoints"][0]["keys"][0],
+          str(eps)[:300])
+    _ep0 = eps["endpoints"][0]
+    check("GET endpoints: presence booleans only, no values",
+          all(isinstance(k.get("set"), bool) for k in _ep0["keys"])
+          and len(json.dumps(eps)) < 4000, json.dumps(eps)[:200])
+    if token:
+        s, body = post("/api/settings", {"mycore": {"endpoints": [
+            {"url": "https://gw.example/v1", "model": "m",
+             "keys": ["MODEL_API_KEY", "MODEL_UP_K1"]}]}}, token)
+        check("POST mycore structured endpoints -> 200", s == 200,
+              f"got {s} {body}")
+        s, eps = get("/api/mycore/endpoints")
+        check("GET endpoints source=endpoints + row echo",
+              s == 200 and eps.get("source") == "endpoints"
+              and len(eps.get("endpoints") or []) == 2
+              and eps["endpoints"][1].get("url") == "https://gw.example/v1"
+              and [k.get("slot") for k in eps["endpoints"][1].get("keys")]
+              == ["MODEL_API_KEY", "MODEL_UP_K1"], str(eps)[:300])
+        s, caps = get("/api/capabilities")
+        check("capabilities mycore.gateway block follows",
+              s == 200 and isinstance((caps.get("mycore") or {})
+                                      .get("gateway"), dict)
+              and caps["mycore"]["gateway"].get("endpoints_count") == 1,
+              str((caps.get("mycore") or {}).get("gateway")))
+        s, body = post("/api/settings", {"mycore": {"endpoints": [
+            {"url": "ftp://bad"}]}}, token)
+        check("POST bad endpoints (bad url) -> 400 + entry number",
+              s == 400 and "entry 1" in str(body), f"got {s} {body}")
+        s, body = post("/api/settings", {"mycore": {"endpoints": [{}]}},
+                       token)
+        check("POST endpoints missing url -> 400 + entry number",
+              s == 400 and "entry 1" in str(body) and "url" in str(body),
+              f"got {s} {body}")
+        s, body = post("/api/settings", {"mycore": {"endpoints": [
+            {"url": "https://x.example/v1", "keys": ["WEB_TOKEN"]}]}}, token)
+        check("POST endpoints non-model slot refused -> 400",
+              s == 400 and "key slot not allowed" in str(body)
+              and "WEB_TOKEN" not in str(body), f"got {s} {body}")
+        s, body = post("/api/settings", {
+            "mycore": {"endpoints": [{"url": "https://y.example/v1"}],
+                       "upstreams": "http://z.example/v1"}}, token)
+        check("POST both tracks non-empty -> 400 (dual-track mutex)",
+              s == 400 and "endpoints" in str(body)
+              and "upstreams" in str(body), f"got {s} {body}")
+        # rotation + rate caps: closed enums, ranges, bools refused
+        s, body = post("/api/settings", {"mycore": {"rotation": "sideways"}},
+                       token)
+        check("POST bad rotation -> 400", s == 400 and "rotation" in str(body),
+              f"got {s} {body}")
+        s, body = post("/api/settings", {"mycore": {"rotation": "round_robin",
+                                                     "max_rpm": 10,
+                                                     "max_tpm": 50000}}, token)
+        check("POST rotation + caps -> 200", s == 200, f"got {s} {body}")
+        s, eps = get("/api/mycore/endpoints")
+        check("GET endpoints carries rotation/caps",
+              s == 200 and eps.get("rotation") == "round_robin"
+              and eps.get("max_rpm") == 10 and eps.get("max_tpm") == 50000,
+              str({k: eps.get(k) for k in ("rotation", "max_rpm", "max_tpm")}))
+        s, body = post("/api/settings", {"mycore": {"max_rpm": 99999}}, token)
+        check("POST max_rpm over ceiling -> 400", s == 400, f"got {s} {body}")
+        s, body = post("/api/settings", {"mycore": {"max_tpm": True}}, token)
+        check("POST max_tpm bool -> 400", s == 400, f"got {s} {body}")
+        # usage.model_pricing: object grammar for the self-metered panel
+        s, body = post("/api/settings", {"usage": {"model_pricing": [
+            "not-an-object"]}}, token)
+        check("POST model_pricing list -> 400", s == 400 and "model_pricing"
+              in str(body), f"got {s} {body}")
+        s, body = post("/api/settings", {"usage": {"model_pricing": {
+            "m": {"in": 5}}}}, token)
+        check("POST model_pricing missing out -> 400", s == 400,
+              f"got {s} {body}")
+        s, body = post("/api/settings", {"usage": {"model_pricing": {
+            "m": {"in": 5, "out": 30}, "default": {"in": 1, "out": 2}}}},
+                       token)
+        check("POST model_pricing valid -> 200", s == 200,
+              f"got {s} {body}")
+        # self-metered usage panel (works with zero rows — honest zeros)
+        s, mine = get("/api/usage/self")
+        check("GET /api/usage/self shape",
+              s == 200 and isinstance(mine, dict)
+              and mine.get("available") is True
+              and isinstance(mine.get("requests"), int)
+              and isinstance(mine.get("pricing"), dict)
+              and "display" in mine, str(mine)[:300])
+        # per-key probe: model slots only, endpoint required, unset = 400
+        s, body = post("/api/mycore/upstreams/test",
+                       {"url": "http://127.0.0.1:9/v1", "slot": "WEB_TOKEN"},
+                       token)
+        check("probe non-model slot -> 400", s == 400 and "model key slot"
+              in str(body), f"got {s} {body}")
+        s, body = post("/api/mycore/upstreams/test", {"slot": "MODEL_UP_K1"},
+                       token)
+        check("probe bare slot (no url) -> 400", s == 400 and "requires url"
+              in str(body), f"got {s} {body}")
+        s, body = post("/api/mycore/upstreams/test",
+                       {"url": "http://127.0.0.1:9/v1", "slot": "MODEL_UP_K1"},
+                       token)
+        check("probe unset model slot -> 400 (no request made)",
+              s == 400 and "not set" in str(body), f"got {s} {body}")
+        # model-key slot write via POST /api/secrets (group=model, catalog
+        # unchanged); cleared immediately — the value never echoes anywhere.
+        s, body = post("/api/secrets",
+                       {"name": "MODEL_UP_K1", "value": "gwtest-key-123456"},
+                       token)
+        check("POST secrets MODEL_UP_K1 -> 200 (group=model)",
+              s == 200 and isinstance(body, dict)
+              and body.get("slot", {}).get("group") == "model"
+              and "gwtest-key-123456" not in json.dumps(body),
+              f"got {s} {body}")
+        s, secs = get("/api/secrets")
+        _rows = secs.get("slots") if isinstance(secs, dict) else None
+        check("GET /api/secrets catalog UNCHANGED (34 rows, no model slots)",
+              isinstance(_rows, list) and len(_rows) == 34
+              and not any(str(r.get("name", "")).startswith("MODEL_UP_K")
+                          for r in _rows),
+              f"rows={len(_rows) if isinstance(_rows, list) else _rows}")
+        s, eps = get("/api/mycore/endpoints")
+        _k1 = [k for row in (eps.get("endpoints") or [])
+               for k in (row.get("keys") or []) if k.get("slot") == "MODEL_UP_K1"]
+        check("GET endpoints shows MODEL_UP_K1 presence=True after write",
+              s == 200 and _k1 and _k1[0].get("set") is True, str(_k1))
+        s, body = post("/api/secrets", {"name": "MODEL_UP_K1", "value": ""},
+                       token)
+        check("clear MODEL_UP_K1 -> 200", s == 200, f"got {s} {body}")
+        # reset every knob this leg touched (leave settings as found)
+        s, body = post("/api/settings", {
+            "mycore": {"endpoints": [], "rotation": "", "max_rpm": 0,
+                       "max_tpm": 0},
+            "usage": {"model_pricing": {}}}, token)
+        check("gateway leg cleanup -> 200", s == 200, f"got {s} {body}")
+        s, eps = get("/api/mycore/endpoints")
+        check("cleanup verified: source back to none/primary-only",
+              s == 200 and eps.get("source") in ("none", "upstreams")
+              and len(eps.get("endpoints") or []) == 1
+              and eps.get("rotation") == "" and eps.get("max_rpm") == 0,
+              str(eps)[:300])
+
     # --- car 2-D5: mcp (empty = off, JSON grammar, exact parser reason) ---
     s, body = post("/api/settings", {"mycore": {"mcp": ""}}, token)
     check("POST mycore empty mcp (off) -> 200", s == 200, f"got {s} {body}")
