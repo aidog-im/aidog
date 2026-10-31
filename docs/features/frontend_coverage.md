@@ -255,7 +255,7 @@ the restart handler logs a tmux session name and a return code only.
   pre-existing control, U4 no token/slot value in the DOM or any input
   value, U5 zero `pageerror`, U6 production console health. Run:
   `PW_PATH=<playwright node path> node tmp/e2e_settings_matrix_ui.js`.
-- Standing gates (after the activation car): `mycore/tests/run.py` **1180** ·
-  `tests/web_console_p3.py` **234** · `tests/source_lang_check.py` **0/66**
-  (locale packs **536/536**). The 0.5.39 baseline of this page was
+- Standing gates (after the mission car): `mycore/tests/run.py` **1318** ·
+  `tests/web_console_p3.py` **234** · `tests/source_lang_check.py` **0/67**
+  (locale packs **562/562**). The 0.5.39 baseline of this page was
   1168 · 197 · 480/480.

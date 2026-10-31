@@ -12,9 +12,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/aidog-im/aidog/releases"><img src="https://img.shields.io/badge/release-0.5.43-blue?style=flat-square" alt="release 0.5.43"></a>
+  <a href="https://github.com/aidog-im/aidog/releases"><img src="https://img.shields.io/badge/release-0.5.44-blue?style=flat-square" alt="release 0.5.44"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
-  <img src="https://img.shields.io/badge/core_tests-1180%2F1180-brightgreen?style=flat-square" alt="核心测试 1180/1180">
+  <img src="https://img.shields.io/badge/core_tests-1318%2F1318-brightgreen?style=flat-square" alt="核心测试 1318/1318">
   <img src="https://img.shields.io/badge/console_smoke-234%2F234-brightgreen?style=flat-square" alt="控制台冒烟 234/234">
   <img src="https://img.shields.io/badge/permanently-free-ff6f00?style=flat-square" alt="永久免费">
 </p>
@@ -48,7 +48,7 @@ I'm AiDog 是一个**跑在你自己机器上的个人具身 AI 伙伴**。它�
   归档分层）+ 数字记忆体协议：唯一真值、跨内核可恢复、每次 reflect 回写。
   没有你读不了、审不动的向量库。
 - **自研核心**：运行时内核 `mycore` 从零自研——诚实的函数调用循环（停止
-  原因明示）、**28 模块 ≈13.4k 代码行、1180 项测试**，换芯后零上游依赖。
+  原因明示）、**29 模块 ≈14.5k 代码行、1318 项测试**，换芯后零上游依赖。
   换的是内核，永远不换「我」。
 
 它通过 **Telegram**、**回环 Web 控制台**、**桌面 HUD 壳**和**语音**与你
@@ -70,7 +70,7 @@ I'm AiDog 是一个**跑在你自己机器上的个人具身 AI 伙伴**。它�
 
 |  | 能力 | 提供什么 |
 |---|---|---|
-| 🧬 | **自研核心** | `mycore`：诚实停止原因的 FC 循环、fail-closed（默认拒绝）服务、看门狗、doctor 体检——28 模块、1180 测试、零上游 |
+| 🧬 | **自研核心** | `mycore`：诚实停止原因的 FC 循环、fail-closed（默认拒绝）服务、看门狗、doctor 体检——29 模块、1318 测试、零上游 |
 | 🎭 | **宪法人格** | `SOUL.md` 在系统栈最顶端；红线与语气每轮生效，而非抽样自人设提示词 |
 | 🧠 | **策展记忆** | 有界 Markdown 预算 + 归档分层 + 数字记忆体协议；`memory` 套件 58/58 |
 | 🧩 | **技能 + 确定性路由** | `SKILL.md` frontmatter（业界标准字段），路由预筛先选 TOP3 **再**加载正文——30/30 |
@@ -174,7 +174,7 @@ python3 deploy/aidog_update.py check # 版本通道：up to date
 
 | 套件 | 结果 |
 |---|---|
-| `mycore` 核心套件 | **1180/1180** |
+| `mycore` 核心套件 | **1318/1318** |
 | 控制台冒烟（真实 HTTP） | **234/234** |
 | 技能路由 | **30/30** |
 | 记忆持久化 | **58/58** |
@@ -183,27 +183,27 @@ python3 deploy/aidog_update.py check # 版本通道：up to date
 | 桌面壳（`node --test`） | **15/15** |
 | `aidog doctor` | **0 FAIL · 0 WARN**（出站全断时如实报环境 WARN） |
 | 发布闸（deny-by-default 清单） | **READY** |
-| 真机 E2E | profiles **18/18** · channels **8/8** · 国内渠道 **44/44** · 管线 **35/35** · web3 只读 **33/33** · web3 审批 **61/61** · 前端覆盖 **62/62** · 前端 UI **33/33** · 激活 **81/81** · 激活 UI **50/50** · 设置矩阵 **57/57** + UI **17/17** |
+| 真机 E2E | profiles **18/18** · channels **8/8** · 国内渠道 **44/44** · 管线 **35/35** · web3 只读 **33/33** · web3 审批 **61/61** · 前端覆盖 **62/62** · 前端 UI **33/33** · 激活 **81/81** · 激活 UI **50/50** · 设置矩阵 **63/63** + UI **20/20** · 守夜任务 **54/54** |
 
-目录规模：**25 个注册工具** · **9 家交易所场所** · **12 腿真机
+目录规模：**25 个注册工具** · **9 家交易所场所** · **13 腿真机
 E2E**——全部全绿。
 
-语言包：`en`（默认）+ `zh` 各 **536 键**，parity lint 把关；官网另有
+语言包：`en`（默认）+ `zh` 各 **562 键**，parity lint 把关；官网另有
 **217 键**双语站包。
 
 ## 文档
 
 - [`docs/installation.md`](docs/installation.md) — 安装、槽位、向导
-- [`docs/features/`](docs/features/) — **31 份能力文档**，一项能力一档
+- [`docs/features/`](docs/features/) — **32 份能力文档**，一项能力一档
   （渠道、记忆、定时、子代理、MCP、语音、桌面、profile、工具开关……），
   每份都写明诚实边界
 - [`docs/manual_verification.md`](docs/manual_verification.md) — 人工验收清单
 - [`docs/security_checklist.md`](docs/security_checklist.md) — 安全审查清单
 - **[aidog.im](https://aidog.im)** — 产品官网（双语、PWA、AI 可读 `llms.txt`）
 
-**31 份一览**（分五组，每组一行）：
+**32 份一览**（分五组，每组一行）：
 
-- **代理循环与工具** — [`acp`](docs/features/acp.md)（ACP v1 stdio 服务器）· [`openai_api_server`](docs/features/openai_api_server.md)（OpenAI 兼容 `/v1` 网关）· [`terminal_backends`](docs/features/terminal_backends.md)（7 后端 `run_bash` 矩阵）· [`execute_code`](docs/features/execute_code.md) · [`subagents`](docs/features/subagents.md) · [`mcp`](docs/features/mcp.md) · [`tool_toggles`](docs/features/tool_toggles.md) · [`browser_automation`](docs/features/browser_automation.md) · [`model_failover`](docs/features/model_failover.md)
+- **代理循环与工具** — [`acp`](docs/features/acp.md)（ACP v1 stdio 服务器）· [`openai_api_server`](docs/features/openai_api_server.md)（OpenAI 兼容 `/v1` 网关）· [`terminal_backends`](docs/features/terminal_backends.md)（7 后端 `run_bash` 矩阵）· [`execute_code`](docs/features/execute_code.md) · [`subagents`](docs/features/subagents.md) · [`mcp`](docs/features/mcp.md) · [`tool_toggles`](docs/features/tool_toggles.md) · [`browser_automation`](docs/features/browser_automation.md) · [`model_failover`](docs/features/model_failover.md) · [`missions`](docs/features/missions.md)（永不睡觉的任务守夜循环）
 - **知识与记忆** — [`memory_and_routing`](docs/features/memory_and_routing.md) · [`checkpoints`](docs/features/checkpoints.md) · [`context_files`](docs/features/context_files.md)（项目指令文件）· [`evolution_loop`](docs/features/evolution_loop.md) · [`connectors`](docs/features/connectors.md)（只读 Linear/Notion 搜索）
 - **渠道与媒体** — [`channels`](docs/features/channels.md) · [`channels_domestic`](docs/features/channels_domestic.md) · [`console_chat`](docs/features/console_chat.md) · [`voice_session`](docs/features/voice_session.md) · [`voice_announcements`](docs/features/voice_announcements.md) · [`tts_engines`](docs/features/tts_engines.md) · [`image_generation`](docs/features/image_generation.md)
 - **运维与控制台** — [`setup_wizard`](docs/features/setup_wizard.md) · [`frontend_coverage`](docs/features/frontend_coverage.md) · [`capabilities`](docs/features/capabilities.md) · [`desktop_client`](docs/features/desktop_client.md) · [`profiles`](docs/features/profiles.md) · [`site_visibility`](docs/features/site_visibility.md) · [`zero_key_onboarding`](docs/features/zero_key_onboarding.md) · [`natural_language_cron`](docs/features/natural_language_cron.md) · [`event_hooks`](docs/features/event_hooks.md)

@@ -9045,6 +9045,786 @@ def test_exchanges_w2() -> None:
         ex._bj_day = saved_day
 
 
+def test_mission() -> None:
+    """0.5.44 mission car (Lane E): state machine + registry (atomic write,
+    caps) + budget guards sealing with evidence + reporter tiers/throttle/
+    merge/scrub + slice prompt & capability manifest honesty + the service
+    mission leg (fake transport, injected model, mark-first, four-tier
+    fallback) + the console API (GET/POST /api/mission 200/400/401/404/409)
+    + the settings partition. Offline and hermetic: temp state dirs, a temp
+    profile pinned before the console import; no production file is written."""
+    from mycore import mission as ms
+    from mycore.service import state_dir as _state_dir
+    from mycore.tg import POLL_BOT_ENV
+
+    # ---- 0. consciousness layer: the SOUL section itself -------------------
+    soul = (REPO / "overlay" / "constitution" / "SOUL.md").read_text(
+        encoding="utf-8")
+    check("mission: SOUL gains Mission conduct with clauses C0-C5",
+          "## Mission conduct (autonomous ops)" in soul
+          and all(f"(C{i})" in soul for i in range(6))
+          and "extends hard constitution §9" in soul)
+    check("mission: the nine hard rules stay intact around it",
+          soul.count("## Hard constitution") == 1
+          and "**Capability honesty**" in soul
+          and "9. **Capability honesty**" in soul
+          and "## Stance (how I behave)" in soul)
+
+    # ---- A. state machine: legal edges, illegal edges, reserved slots -----
+    rec = ms.create([], "grow the tool site", reporting="all", now=1000.0)
+    check("mission: create lands planned with defaults",
+          rec["state"] == "planned" and rec["reporting"] == "all"
+          and rec["tasks"] == [] and rec["evidence"] == []
+          and rec["budget"] == ms.DEFAULT_BUDGET
+          and isinstance(rec["manifest"], dict), str(rec.get("state")))
+    ms.transition(rec, "running", 1001.0)
+    ms.transition(rec, "paused_user", 1002.0)
+    ms.transition(rec, "running", 1003.0)
+    check("mission: legal chain planned->running<->paused_user->running",
+          rec["state"] == "running")
+
+    def _at(state: str) -> dict:
+        """A fresh mission parked in `state` via legal moves only."""
+        m0 = ms.create([], "g", now=1000.0)
+        if state == "planned":
+            return m0
+        ms.transition(m0, "running", 1000.0)
+        if state == "running":
+            return m0
+        if state == "paused_user":
+            ms.transition(m0, "paused_user", 1000.0)
+            return m0
+        if state == "done":
+            ms.transition(m0, "done", 1000.0)
+            return m0
+        ms.transition(m0, "sealed", 1000.0, evidence=["retired"])
+        return m0
+
+    for cur, nxt in (("planned", "done"), ("planned", "paused_user"),
+                     ("running", "planned"), ("done", "running"),
+                     ("done", "sealed"), ("sealed", "running"),
+                     ("sealed", "paused_user"), ("paused_user", "planned"),
+                     ("paused_user", "done")):
+        m0 = _at(cur)
+        try:
+            ms.transition(m0, nxt, 1001.0, evidence=["x"])
+            check(f"mission: illegal transition {cur}->{nxt} refused",
+                  False, "accepted")
+        except ms.MissionError:
+            check(f"mission: illegal transition {cur}->{nxt} refused", True)
+
+    m0 = _at("running")
+    try:
+        ms.transition(m0, "sealed", 1001.0)
+        check("mission: seal without evidence refused", False, "accepted")
+    except ms.MissionError:
+        check("mission: seal without evidence refused", True)
+    ms.transition(m0, "sealed", 1001.0, evidence=["budget guard reached"])
+    check("mission: sealed stores its evidence pack",
+          m0["state"] == "sealed" and m0["evidence"] == ["budget guard reached"]
+          and m0["ended_at"] == 1001.0)
+    m_deg = _at("running")
+    m_deg["state"] = "degraded"          # reserved car-2 slot, read defensively
+    check("mission: reserved degraded counts as active",
+          ms.active_mission({"missions": [m_deg]}) is m_deg)
+    try:
+        m_run = _at("running")
+        ms.transition(m_run, "degraded", 1001.0, evidence=["x"])
+        check("mission: entry into degraded stays closed in car 1",
+              False, "accepted")
+    except ms.MissionError:
+        check("mission: entry into degraded stays closed in car 1", True)
+    ms.transition(m_deg, "running", 1002.0)
+    check("mission: reserved degraded may exit to running",
+          m_deg["state"] == "running")
+    check("mission: terminal states are exactly done+sealed",
+          ms.TERMINAL_STATES == frozenset({"done", "sealed"}))
+    try:
+        ms.create([], "x" * (ms.MAX_GOAL_CHARS + 1))
+        check("mission: oversized goal refused", False, "accepted")
+    except ms.MissionError:
+        check("mission: oversized goal refused", True)
+    try:
+        ms.create([], "g", reporting="sometimes")
+        check("mission: bad reporting tier refused", False, "accepted")
+    except ms.MissionError:
+        check("mission: bad reporting tier refused", True)
+    for bad_goal in ("", "   "):
+        try:
+            ms.create([], bad_goal)
+            check(f"mission: empty goal {bad_goal!r} refused", False, "accepted")
+        except ms.MissionError:
+            check(f"mission: empty goal {bad_goal!r} refused", True)
+    try:
+        ms.create([_at("running")], "second")
+        check("mission: a second active mission refused", False, "accepted")
+    except ms.MissionError as e:
+        check("mission: a second active mission refused",
+              "already exists" in str(e), str(e))
+    full: list[dict] = []
+    for i in range(ms.MAX_MISSIONS):
+        m0 = ms.create(full, f"goal-{i}", now=1000.0 + i)
+        ms.transition(m0, "sealed", 1001.0 + i, evidence=["retired"])
+    try:
+        ms.create(full, "one more")
+        check("mission: history cap refuses #51", False, "accepted")
+    except ms.MissionError as e:
+        check("mission: history cap refuses #51",
+              "full" in str(e) and len(full) == ms.MAX_MISSIONS, str(e))
+
+    # ---- B. registry: atomic write, fail-soft load, event stream -----------
+    td = tempfile.mkdtemp(prefix="mission_")
+    try:
+        path = Path(td) / ms.STATE_FILE_NAME
+        ms.save(path, {"missions": [rec], "last_tick": 123.5})
+        back = ms.load(path)
+        check("mission: registry round-trips atomically",
+              len(back["missions"]) == 1
+              and back["missions"][0]["id"] == rec["id"]
+              and back["missions"][0]["goal"] == "grow the tool site"
+              and back["last_tick"] == 123.5)
+        check("mission: save leaves no temp file behind",
+              not [n for n in os.listdir(td)
+                   if n.startswith(ms.STATE_FILE_NAME + ".tmp")],
+              str(os.listdir(td)))
+        path.write_text("{ this is not json", encoding="utf-8")
+        check("mission: corrupt registry loads empty (fail-soft)",
+              ms.load(path) == {"missions": [], "last_tick": None})
+        check("mission: default path follows the cron state convention",
+              ms.default_path() == _state_dir() / ms.STATE_FILE_NAME)
+        check("mission: event stream sits beside the registry",
+              ms.events_path(path).name == ms.EVENTS_FILE_NAME)
+        ms.save(path, {"missions": [rec], "last_tick": 1.0})
+        ms.append_event(path, rec["id"], "slice", {"n": 1})
+        ev_lines = ms.events_path(path).read_text(encoding="utf-8").splitlines()
+        first = json.loads(ev_lines[0])
+        check("mission: event stream appends parseable JSONL",
+              len(ev_lines) == 1 and first["kind"] == "slice"
+              and first["mission"] == rec["id"] and first["n"] == 1
+              and isinstance(first["ts"], float))
+        ms.append_event(path, rec["id"], "garbage", {"obj": object()})
+        check("mission: unserializable event never raises",
+              len(ms.events_path(path).read_text(encoding="utf-8")
+                  .splitlines()) == 1)
+
+        # ---- C. budget guards ----------------------------------------------
+        b = ms.create([], "g", budget={"max_slices": 3, "max_wall_hours": 1.5},
+                      now=0.0)
+        check("mission: budget merges with defaults",
+              b["budget"] == {"max_slices": 3, "max_wall_hours": 1.5,
+                              "max_daily_model_calls":
+                                  ms.DEFAULT_BUDGET["max_daily_model_calls"]},
+              str(b["budget"]))
+        check("mission: fresh mission breaches nothing",
+              ms.budget_breach(b, 10.0) is None)
+        b["counters"]["slices"] = 2
+        check("mission: below max_slices breaches nothing",
+              ms.budget_breach(b, 10.0) is None)
+        b["counters"]["slices"] = 3
+        check("mission: max_slices reached -> breach",
+              ms.budget_breach(b, 10.0) == "max_slices")
+        check("mission: budget evidence names guard and counts",
+              ms.budget_evidence(b, "max_slices")
+              == "budget guard max_slices reached (3/3)")
+        b_wall = ms.create([], "w", budget={"max_wall_hours": 1.5}, now=0.0)
+        check("mission: wall guard silent just before the limit",
+              ms.budget_breach(b_wall, 5399.0) is None)
+        check("mission: wall guard trips at the limit",
+              ms.budget_breach(b_wall, 5400.0) == "max_wall_hours")
+        b_day = ms.create([], "d",
+                          budget={"max_daily_model_calls": 5,
+                                  "max_wall_hours": 720.0},
+                          now=1700000000.0)
+        ms.note_model_calls(b_day, 4, 1700000000.0)
+        check("mission: daily calls counted toward the guard",
+              ms.budget_breach(b_day, 1700000001.0) is None
+              and b_day["counters"]["daily_calls"] == 4)
+        ms.note_model_calls(b_day, 1, 1700000100.0)
+        check("mission: max_daily_model_calls reached -> breach",
+              ms.budget_breach(b_day, 1700000101.0)
+              == "max_daily_model_calls")
+        ms.note_model_calls(b_day, 0, 1700000100.0 + 86400)
+        check("mission: daily counter rolls over on the calendar day",
+              b_day["counters"]["daily_calls"] == 0
+              and ms.budget_breach(b_day, 1700000100.0 + 86400) is None)
+        for why, bad in (("unknown key", {"nope": 1}),
+                         ("out of range", {"max_slices": 0}),
+                         ("non-number", {"max_slices": "many"})):
+            try:
+                ms.validate_budget(bad)
+                check(f"mission: budget {why} refused", False, "accepted")
+            except ms.MissionError:
+                check(f"mission: budget {why} refused", True)
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+    # ---- D. reporter: three tiers, throttle, merge, scrub ------------------
+    sent: list[str] = []
+    m_all = ms.create([], "goal", reporting="all", now=0.0)
+    ev = {"kind": "task_done", "level": "INFO", "fact": "F", "impact": "I",
+          "next": "N"}
+    frag = ms.fmt_event(m_all["id"], ev)
+    check("mission: event fragment carries the remonstrance format",
+          frag == f"[MISSION {m_all['id']}] INFO F {ms.ARROW} I {ms.ARROW} N",
+          frag)
+    check("mission: all tier sends a subtask report",
+          ms.emit(m_all, "task_done", frag, sent.append, 1000.0) == "sent"
+          and len(sent) == 1)
+    check("mission: all tier throttles inside 120s",
+          ms.emit(m_all, "task_done", "second", sent.append, 1030.0)
+          == "queued" and len(sent) == 1
+          and m_all["report_queue"] == ["second"])
+    check("mission: queued window merges into the next send",
+          ms.emit(m_all, "task_done", "third", sent.append, 1121.0) == "sent"
+          and len(sent) == 2 and sent[-1].count("\n") == 1
+          and "second" in sent[-1] and "third" in sent[-1])
+    m_ms = ms.create([], "g", reporting="milestones", now=0.0)
+    sent2: list[str] = []
+    check("mission: milestones tier drops plain subtask reports",
+          ms.emit(m_ms, "task_done", "x", sent2.append, 1000.0)
+          == "suppressed" and sent2 == [] and m_ms["report_queue"] == [])
+    check("mission: milestones tier reports degradation",
+          ms.emit(m_ms, "degraded", "gap-line", sent2.append, 1000.0)
+          == "sent" and sent2 == ["gap-line"])
+    check("mission: milestones tier throttles to 900s",
+          ms.emit(m_ms, "degraded", "gap-2", sent2.append, 1500.0)
+          == "queued" and len(sent2) == 1)
+    check("mission: escalation bypasses the throttle and flushes the window",
+          ms.emit(m_ms, "decision", "dec", sent2.append, 1510.0) == "sent"
+          and len(sent2) == 2 and "gap-2" in sent2[-1])
+    m_fin = ms.create([], "g", reporting="final", now=0.0)
+    sent3: list[str] = []
+    check("mission: final tier drops progress and degradation",
+          ms.emit(m_fin, "task_done", "x", sent3.append, 1.0) == "suppressed"
+          and ms.emit(m_fin, "degraded", "y", sent3.append, 1.0)
+          == "suppressed" and sent3 == [] and m_fin["report_queue"] == [])
+    check("mission: final tier still carries escalation and the outcome",
+          ms.emit(m_fin, "decision", "d", sent3.append, 2.0) == "sent"
+          and ms.emit(m_fin, "final", "f", sent3.append, 3.0) == "sent"
+          and sent3 == ["d", "f"])
+    m_byp = ms.create([], "g", reporting="all", now=0.0)
+    sent4: list[str] = []
+    ms.emit(m_byp, "task_done", "one", sent4.append, 100.0)
+    check("mission: decision never waits behind the throttle",
+          ms.emit(m_byp, "decision", "two", sent4.append, 101.0) == "sent"
+          and sent4 == ["one", "two"])
+    tok_sentinel = "999888777:AAAAvwxyzAAAAvwxyzAAAAvwxyzAAAA"
+    path_sentinel = "/mnt/" + "d/private/creds.env"
+    m_scr = ms.create([], "g", reporting="all", now=0.0)
+    sent5: list[str] = []
+    bad_ev = {"kind": "degraded", "level": "WARN",
+              "fact": f"gap {tok_sentinel} at {path_sentinel}",
+              "impact": "i", "next": "n"}
+    ms.emit(m_scr, "degraded", ms.fmt_event(m_scr["id"], bad_ev),
+            sent5.append, 10.0)
+    out = sent5[0]
+    check("mission: reports scrub credential shapes and machine paths",
+          tok_sentinel not in out and path_sentinel not in out
+          and "/mnt/" not in out and "[redacted]" in out and "[path]" in out,
+          out)
+
+    def _boom(_t):
+        raise RuntimeError("delivery down")
+
+    check("mission: a failing delivery never raises",
+          ms.emit(m_scr, "final", "f", _boom, 11.0) == "error")
+    check("mission: unknown event kinds are dropped fail-closed",
+          ms.emit(m_scr, "mystery", "m", sent5.append, 12.0) == "suppressed")
+
+    # ---- E. markers, queue folding, prompt, manifest -----------------------
+    marks = ms.parse_slice("\n".join([
+        "Plan below.", "SUBTASK: write the article",
+        "- SUBTASK: publish it", "GAP: no ad account",
+        "METHOD: free channels", "TRIED: free channels",
+        "BLOCKER: rate limit", "NEED DECISION: buy a domain",
+        "UNBLOCK: t9", "TASK DONE", "MISSION DONE"]))
+    check("mission: marker parse harvests every protocol line",
+          marks["tasks"] == ["write the article", "publish it"]
+          and marks["gaps"] == ["no ad account"]
+          and marks["methods"] == ["free channels"]
+          and marks["tried"] == ["free channels"]
+          and marks["blockers"] == ["rate limit"]
+          and marks["decisions"] == ["buy a domain"]
+          and marks["unblock"] == ["t9"]
+          and marks["task_done"] and marks["mission_done"], str(marks))
+    check("mission: prose without markers yields empty marks",
+          ms.parse_slice("just talking, no protocol lines at all")
+          == {"tasks": [], "task_done": False, "mission_done": False,
+              "gaps": [], "decisions": [], "blockers": [], "methods": [],
+              "tried": [], "unblock": []})
+    m_plan = ms.create([], "publish daily", now=0.0)
+    evs = ms.apply_slice(m_plan, ms.parse_slice("no structure here"), 1.0,
+                         mode="plan")
+    check("mission: plan without SUBTASK lines falls back to the goal",
+          [t["text"] for t in m_plan["tasks"]] == ["publish daily"]
+          and [e["kind"] for e in evs] == ["plan_ready"])
+    m_plan2 = ms.create([], "goal", now=0.0)
+    evs2 = ms.apply_slice(m_plan2,
+                          ms.parse_slice("SUBTASK: alpha\nSUBTASK: beta"),
+                          1.0, mode="plan")
+    check("mission: plan slice builds the serial queue + milestone event",
+          [(t["id"], t["status"]) for t in m_plan2["tasks"]]
+          == [("t1", "pending"), ("t2", "pending")]
+          and [e["kind"] for e in evs2] == ["plan_ready"])
+    check("mission: MISSION DONE before a plan exists finishes nothing",
+          not ms.should_finish(ms.create([], "gx", now=0.0),
+                               {"mission_done": True}))
+    m_ex = ms.create([], "goal", tasks=["write", "publish"], now=0.0)
+    m_ex["tasks"][0]["status"] = "in_progress"
+    evs3 = ms.apply_slice(m_ex, ms.parse_slice(
+        "GAP: no CDN\nGAP: no CDN\nMETHOD: mirror\nTRIED: mirror\n"
+        "NEED DECISION: paid ads"), 2.0)
+    kinds3 = [e["kind"] for e in evs3]
+    check("mission: a new gap reports once, duplicates drop",
+          kinds3.count("degraded") == 1 and m_ex["gaps"] == ["no CDN"])
+    check("mission: TRIED marks the method-exhaustion entry",
+          m_ex["methods"] == [{"text": "mirror", "marked": True}])
+    check("mission: escalation suspends only the current subtask (C5)",
+          m_ex["tasks"][0]["status"] == "blocked"
+          and m_ex["tasks"][1]["status"] == "pending"
+          and "decision" in kinds3)
+    m_ex2 = ms.create([], "goal", tasks=["only one"], now=0.0)
+    ms.set_current(m_ex2)
+    check("mission: set_current promotes exactly one subtask",
+          [t["status"] for t in m_ex2["tasks"]] == ["in_progress"])
+    ms.set_current(m_ex2)
+    check("mission: set_current keeps the in-flight subtask",
+          [t["status"] for t in m_ex2["tasks"]] == ["in_progress"])
+    evs4 = ms.apply_slice(m_ex2, ms.parse_slice("TASK DONE"), 3.0)
+    check("mission: TASK DONE completes the current subtask with a report",
+          [t["status"] for t in m_ex2["tasks"]] == ["done"]
+          and [e["kind"] for e in evs4] == ["task_done"]
+          and ms.should_finish(m_ex2, {"mission_done": False}))
+    m_un = ms.create([], "g", tasks=["x"], now=0.0)
+    ms.set_current(m_un)
+    ms.apply_slice(m_un, ms.parse_slice("NEED DECISION: y"), 1.0)
+    check("mission: escalation suspends the current subtask",
+          m_un["tasks"][0]["status"] == "blocked")
+    ms.apply_slice(m_un, ms.parse_slice("UNBLOCK: t1"), 2.0)
+    check("mission: UNBLOCK returns a suspended subtask to pending",
+          m_un["tasks"][0]["status"] == "pending")
+
+    man = ms.build_manifest(
+        {"mycore": {"tools_off": ["delegate"]},
+         "channels": {"discord": {"enabled": True},
+                      "slack": {"enabled": False}}},
+        ["OPENAI_API_KEY", "OTHER_SLOT"],
+        lambda name: "SENTINEL-VALUE-XYZ" if name == "OPENAI_API_KEY" else "",
+        browser_ok=False, connector_ok=False, exchange_ok=False)
+    blob = json.dumps(man)
+    check("mission: manifest tools honor tools_off and probe gates",
+          "delegate" not in man["tools"] and "read_file" in man["tools"]
+          and not any(t.startswith("browser_") for t in man["tools"])
+          and "connector_search" not in man["tools"]
+          and "exchange_portfolio" not in man["tools"]
+          and "exchange_markets" in man["tools"], str(man["tools"]))
+    check("mission: manifest channels = enabled routes only",
+          man["channels"] == ["discord"])
+    check("mission: manifest credentials are key names + presence bools",
+          man["credentials"] == {"OPENAI_API_KEY": True, "OTHER_SLOT": False}
+          and all(isinstance(v, bool) for v in man["credentials"].values()))
+    check("mission: manifest serializes no credential value",
+          "SENTINEL-VALUE-XYZ" not in blob and "/mnt/" not in blob)
+    check("mission: web3 block stays fail-closed in the manifest",
+          man["web3"]["withdrawals"] is False
+          and man["web3"]["onchain_transfers"] is False
+          and man["web3"]["paid_actions"] is False
+          and man["web3"]["order_gate"].startswith("prepare"))
+    check("mission: manifest marks community MCP disabled",
+          man["mcp"] == "disabled")
+    m_pr = ms.create([], "build the site", tasks=["write the article"],
+                     reporting="all", now=0.0)
+    m_pr["manifest"] = man
+    m_pr["gaps"] = ["no ad account"]
+    m_pr["methods"] = [{"text": "free channels", "marked": False}]
+    m_pr["counters"]["slices"] = 7
+    prompt = ms.build_slice_prompt(m_pr, mode="exec")
+    check("mission: slice prompt grounds goal + subtask + gaps + manifest",
+          "build the site" in prompt and "write the article" in prompt
+          and "no ad account" in prompt and "free channels" in prompt
+          and "read_file" in prompt)
+    check("mission: slice prompt declares that no answer will ever come",
+          ms.NO_ANSWER_DECLARATION in prompt and "no one to ask" in prompt)
+    check("mission: slice prompt carries the marker protocol",
+          "TASK DONE" in prompt and "MISSION DONE" in prompt
+          and ms.MARK_GAP in prompt and ms.MARK_DECISION in prompt
+          and ms.MARK_METHOD in prompt)
+    check("mission: prompt keeps credentials as names only",
+          "SENTINEL-VALUE-XYZ" not in prompt and "OPENAI_API_KEY" in prompt)
+    check("mission: prompt carries the method-exhaustion list",
+          "[open] free channels" in prompt)
+    plan_prompt = ms.build_slice_prompt(ms.create([], "g2", now=0.0),
+                                        mode="plan")
+    check("mission: planning prompt demands SUBTASK lines",
+          ms.MARK_SUBTASK in plan_prompt and "decompose" in plan_prompt)
+    m_blk = ms.create([], "g3", tasks=["blocked one"], now=0.0)
+    m_blk["tasks"][0]["status"] = "blocked"
+    blk_prompt = ms.build_slice_prompt(m_blk, mode="exec")
+    check("mission: blocked-only prompt asks for UNBLOCK or escalation",
+          ms.MARK_UNBLOCK in blk_prompt and ms.MARK_DECISION in blk_prompt)
+
+    # ---- F. service mission leg (fake transport, injected model) -----------
+    saved_tok = os.environ.get(POLL_BOT_ENV)
+    saved_wd = os.environ.get("MYCORE_WD_CHAT")
+    os.environ[POLL_BOT_ENV] = "mission-bot-TEST-token"
+    os.environ.pop("MYCORE_WD_CHAT", None)
+    try:
+        from mycore.service import ChatService
+        clock = [1800000000.0]
+        nowf = lambda: clock[0]  # noqa: E731
+        fake = FakeTgTransport()
+        with tempfile.TemporaryDirectory() as td2:
+            svc = ChatService(Path(td2), frozenset({111}), transport=fake,
+                              chat=lambda messages=None, tools=None, **kw:
+                              fake_response(text="ok"), now=nowf)
+            reg_path = Path(td2) / ms.STATE_FILE_NAME
+            doc = {"missions": [], "last_tick": clock[0] - 700.0}
+            m_svc = ms.create(doc["missions"], "publish daily",
+                              reporting="all", origin=424242,
+                              manifest=man, now=clock[0])
+            ms.transition(m_svc, "running", clock[0])
+            ms.save(reg_path, doc)
+            script = ScriptedChat([
+                fake_response(text="plan\nSUBTASK: write the article\n"
+                                   "SUBTASK: publish"),
+                fake_response(text="wrote it\nGAP: no CDN (token "
+                                   + tok_sentinel + " at " + path_sentinel
+                                   + ")\nTASK DONE"),
+                fake_response(text="published\nTASK DONE\nMISSION DONE"),
+            ])
+            svc.chat = script.chat
+            # tick 1: catch-up line + plan slice + first milestone report
+            svc._mission_check = 0.0
+            svc._maybe_tick_missions()
+            mrow = ms.load(reg_path)["missions"][0]
+            check("mission leg: catch-up noted after a long leg absence",
+                  "MISSION_CATCHUP" in svc.log.read_text())
+            check("mission leg: plan slice ran, queue built, report sent",
+                  len(fake.sends) == 1
+                  and fake.sends[0][0] == "424242"
+                  and ms.ZH["plan_ready"] in fake.sends[0][1]
+                  and "[MISSION " in fake.sends[0][1]
+                  and len(mrow["tasks"]) == 2
+                  and mrow["counters"]["slices"] == 1)
+            check("mission leg: constitution stack leads the slice",
+                  script.seen[0][0].get("role") == "system"
+                  and len(str(script.seen[0][0].get("content", ""))) > 200)
+            u1 = str(script.seen[0][-1].get("content", ""))
+            check("mission leg: planning prompt carries goal + no-answer rule",
+                  "publish daily" in u1 and "no one to ask" in u1
+                  and ms.MARK_SUBTASK in u1)
+            # within the 5s cadence the leg must do nothing at all
+            svc._maybe_tick_missions()
+            check("mission leg: tick throttles to the 5s cadence",
+                  ms.load(reg_path)["missions"][0]["counters"]["slices"] == 1)
+            clock[0] += 130.0
+            svc._mission_check = 0.0
+            svc._maybe_tick_missions()
+            mrow = ms.load(reg_path)["missions"][0]
+            u2 = str(script.seen[1][-1].get("content", ""))
+            check("mission leg: exec prompt names the current subtask",
+                  "write the article" in u2 and "TASK DONE" in u2)
+            check("mission leg: first subtask done, degradation reported",
+                  [t["status"] for t in mrow["tasks"]] == ["done", "pending"]
+                  and len(fake.sends) == 2
+                  and ms.ZH["gap"] in fake.sends[1][1])
+            check("mission leg: model-derived gap is scrubbed at storage",
+                  tok_sentinel not in mrow["gaps"][0]
+                  and path_sentinel not in mrow["gaps"][0]
+                  and "[redacted]" in mrow["gaps"][0]
+                  and "[path]" in mrow["gaps"][0])
+            check("mission leg: subtask report stayed credential-free",
+                  tok_sentinel not in fake.sends[1][1]
+                  and path_sentinel not in fake.sends[1][1])
+            # tick 3: second subtask + MISSION DONE + final report
+            clock[0] += 130.0
+            svc._mission_check = 0.0
+            svc._maybe_tick_missions()
+            mrow = ms.load(reg_path)["missions"][0]
+            check("mission leg: mission reaches done through the two exits",
+                  mrow["state"] == "done"
+                  and all(t["status"] == "done" for t in mrow["tasks"]))
+            check("mission leg: final four-section report delivered",
+                  len(fake.sends) == 4
+                  and ms.ZH["done_report"] in fake.sends[3][1]
+                  and ms.ZH["sec_gaps"] in fake.sends[3][1])
+            check("mission leg: exactly three slices ran (script guard)",
+                  script.calls == 3)
+            fake.sends.clear()
+            svc._mission_check = 0.0
+            svc._maybe_tick_missions()
+            check("mission leg: idle when no mission is active",
+                  fake.sends == [] and script.calls == 3)
+            ev_text = ms.events_path(reg_path).read_text(encoding="utf-8")
+            ev_rows = [json.loads(line) for line in ev_text.splitlines()]
+            kinds_seen = {r["kind"] for r in ev_rows}
+            check("mission leg: event stream records slices + reports + states",
+                  {"slice", "report", "state"} <= kinds_seen
+                  and tok_sentinel not in ev_text
+                  and path_sentinel not in ev_text
+                  and all(r["mission"] == m_svc["id"] for r in ev_rows))
+
+            # budget guard: max_slices=1 seals on the next tick, with evidence
+            doc_b = {"missions": [], "last_tick": None}
+            m_bud = ms.create(doc_b["missions"], "bounded work",
+                              reporting="final", origin=424242,
+                              budget={"max_slices": 1}, now=clock[0])
+            ms.transition(m_bud, "running", clock[0])
+            ms.save(reg_path, doc_b)
+            b_script = ScriptedChat([fake_response(text="SUBTASK: only one")])
+            svc.chat = b_script.chat
+            fake.sends.clear()
+            svc._mission_check = 0.0
+            svc._maybe_tick_missions()
+            check("mission leg: bounded mission spends its single slice",
+                  ms.load(reg_path)["missions"][0]["counters"]["slices"] == 1
+                  and fake.sends == [])   # final tier drops plan_ready
+            clock[0] += 6.0
+            svc._mission_check = 0.0
+            svc._maybe_tick_missions()
+            m_bud_now = ms.load(reg_path)["missions"][0]
+            check("mission leg: max_slices seal lands with evidence",
+                  m_bud_now["state"] == "sealed"
+                  and bool(m_bud_now["evidence"])
+                  and "max_slices" in m_bud_now["evidence"][0])
+            check("mission leg: seal report delivered (never silent)",
+                  len(fake.sends) == 1
+                  and ms.ZH["sealed_report"] in fake.sends[0][1]
+                  and ms.ZH["sec_open"] in fake.sends[0][1])
+            log_txt = svc.log.read_text()
+            check("mission leg: seal logged with its guard",
+                  "MISSION_SEAL" in log_txt and "guard=max_slices" in log_txt)
+
+            # paused mission: the leg does zero work
+            doc_p = {"missions": [], "last_tick": clock[0] - 700.0}
+            m_pau = ms.create(doc_p["missions"], "paused work",
+                              reporting="all", origin=424242, now=clock[0])
+            ms.transition(m_pau, "running", clock[0])
+            ms.transition(m_pau, "paused_user", clock[0])
+            ms.save(reg_path, doc_p)
+            p_script = ScriptedChat([])   # any model call would blow up
+            svc.chat = p_script.chat
+            fake.sends.clear()
+            svc._mission_check = 0.0
+            svc._maybe_tick_missions()
+            check("mission leg: paused mission never executes or reports",
+                  p_script.calls == 0 and fake.sends == []
+                  and ms.load(reg_path)["missions"][0]["counters"]["slices"] == 0)
+            check("mission leg: paused registry still records the tick mark",
+                  ms.load(reg_path)["last_tick"] == clock[0])
+
+            # four-tier delivery fallback, same chain as the cron leg
+            check("mission leg: no channel at all -> log-only, no raise",
+                  svc._mission_deliver({"origin": None}, "nobody-here")
+                  == "none")
+            fake.sends.clear()
+            check("mission leg: origin chat uses the shared chain",
+                  svc._mission_deliver({"origin": 424242}, "origin-ping")
+                  == "origin" and fake.sends == [("424242", "origin-ping")])
+            os.environ["MYCORE_WD_CHAT"] = "777099"
+            fake.sends.clear()
+            check("mission leg: falls back to MYCORE_WD_CHAT",
+                  svc._mission_deliver({"origin": None}, "wd-ping") == "wd"
+                  and fake.sends == [("777099", "wd-ping")])
+            os.environ.pop("MYCORE_WD_CHAT", None)
+
+        # ---- G. console API + settings partition (temp profile) ------------
+        prof_root = Path(tempfile.mkdtemp(prefix="mission_prof_"))
+        (prof_root / "slots").mkdir(parents=True)
+        (prof_root / "slots" / "settings.json").write_text("{}",
+                                                           encoding="utf-8")
+        (prof_root / "slots" / "secrets.env").write_text(
+            "WEB_TOKEN=mission-gate-token-0123456789\n", encoding="utf-8")
+        saved_keys = {k: os.environ.get(k)
+                      for k in ("AIDOG_PROFILES_DIR", "AIDOG_PROFILE")}
+        os.environ["AIDOG_PROFILES_DIR"] = str(prof_root)
+        os.environ["AIDOG_PROFILE"] = "slots"
+        srv = None
+        try:
+            import threading as _threading
+            import urllib.error
+            import urllib.request
+            from http.server import ThreadingHTTPServer
+            import web.server as ws
+
+            srv = ThreadingHTTPServer(("127.0.0.1", 0), ws.Handler)
+            _threading.Thread(target=srv.serve_forever, daemon=True).start()
+            base = f"http://127.0.0.1:{srv.server_address[1]}"
+            token = "mission-gate-token-0123456789"
+
+            def call(path, payload=None, auth=None):
+                data = json.dumps(payload).encode() if payload is not None \
+                    else None
+                req = urllib.request.Request(
+                    base + path, data=data,
+                    headers={"Content-Type": "application/json",
+                             **({"Authorization": "Bearer " + auth}
+                                if auth else {})})
+                try:
+                    with urllib.request.urlopen(req, timeout=20) as resp:
+                        return resp.status, json.loads(resp.read().decode())
+                except urllib.error.HTTPError as e:
+                    raw = e.read().decode()
+                    try:
+                        return e.code, json.loads(raw)
+                    except ValueError:
+                        return e.code, raw
+
+            s, board = call("/api/mission")
+            check("mission api: GET board shape on an empty registry",
+                  s == 200 and board.get("reporting") == "milestones"
+                  and board.get("active") is None
+                  and board.get("recent") == [] and board.get("count") == 0,
+                  f"{s} {board}")
+            s, _body = call("/api/mission",
+                            {"action": "start", "goal": "g"})
+            check("mission api: POST without bearer -> 401", s == 401, str(s))
+            for payload, why in (
+                    ({"action": "explode"}, "unknown action"),
+                    ({"action": "start"}, "start without a goal"),
+                    ({"action": "start", "goal": " "}, "blank goal"),
+                    ({"action": "start", "goal": "g", "reporting": "loud"},
+                     "bad reporting tier"),
+                    ({"action": "pause"}, "pause without an id")):
+                s, body = call("/api/mission", payload, auth=token)
+                check(f"mission api: 400 on {why}",
+                      s == 400 and "details" in body, f"{s} {body}")
+            s, body = call("/api/mission",
+                           {"action": "pause", "id": "nope00"}, auth=token)
+            check("mission api: 404 on an unknown id", s == 404, str(body))
+            s, body = call("/api/mission",
+                           {"action": "start", "goal": "grow the tool site"},
+                           auth=token)
+            mrow = body.get("mission") or {}
+            check("mission api: start -> running mission row",
+                  s == 200 and body.get("ok") is True
+                  and mrow.get("state") == "running"
+                  and mrow.get("goal") == "grow the tool site"
+                  and mrow.get("reporting") == "milestones"
+                  and isinstance(mrow.get("id"), str) and bool(mrow["id"]),
+                  f"{s} {body}")
+            mid = mrow["id"]
+            s, board = call("/api/mission")
+            check("mission api: GET shows the active mission",
+                  isinstance(board.get("active"), dict)
+                  and board["active"].get("id") == mid
+                  and board.get("count") == 1
+                  and board["active"]["progress"]["total"] == 0,
+                  str(board.get("active")))
+            s, caps = call("/api/capabilities")
+            check("mission api: capabilities carries the mission summary",
+                  s == 200 and isinstance(caps.get("mission"), dict)
+                  and caps["mission"].get("active") == 1
+                  and caps["mission"].get("running") is True,
+                  str(caps.get("mission")))
+            s, body = call("/api/mission",
+                           {"action": "start", "goal": "second"}, auth=token)
+            check("mission api: second start -> 409 with the active id",
+                  s == 409 and body.get("mission_id") == mid, f"{s} {body}")
+            s, body = call("/api/mission",
+                           {"action": "pause", "id": mid}, auth=token)
+            check("mission api: pause -> paused_user",
+                  s == 200 and body["mission"]["state"] == "paused_user",
+                  f"{s} {body}")
+            s, body = call("/api/mission",
+                           {"action": "pause", "id": mid}, auth=token)
+            check("mission api: pause twice -> 409", s == 409, str(body))
+            s, body = call("/api/mission",
+                           {"action": "resume", "id": mid}, auth=token)
+            check("mission api: resume -> running",
+                  s == 200 and body["mission"]["state"] == "running",
+                  str(body))
+            s, body = call("/api/mission",
+                           {"action": "resume", "id": mid}, auth=token)
+            check("mission api: resume twice -> 409", s == 409, str(body))
+            s, body = call("/api/mission",
+                           {"action": "stop", "id": mid}, auth=token)
+            check("mission api: stop seals with evidence",
+                  s == 200 and body["mission"]["state"] == "sealed"
+                  and bool(body["mission"]["evidence"]), f"{s} {body}")
+            s, body = call("/api/mission",
+                           {"action": "stop", "id": mid}, auth=token)
+            check("mission api: stop of a terminal mission -> 409",
+                  s == 409, str(body))
+            s, body = call("/api/mission",
+                           {"action": "stop", "id": "nope00"}, auth=token)
+            check("mission api: stop of an unknown id -> 404",
+                  s == 404, str(body))
+            s, body = call("/api/mission",
+                           {"action": "start", "goal": "tiered",
+                            "reporting": "final"}, auth=token)
+            check("mission api: start can pin the reporting tier",
+                  s == 200 and body["mission"]["reporting"] == "final",
+                  str(body))
+            mid2 = body["mission"]["id"]
+            call("/api/mission", {"action": "stop", "id": mid2}, auth=token)
+            s, board = call("/api/mission")
+            board_text = json.dumps(board, ensure_ascii=False)
+            check("mission api: board is credential- and path-free",
+                  token not in board_text and "/mnt/" not in board_text
+                  and board.get("active") is None
+                  and len(board.get("recent") or []) == 2,
+                  board_text[:200])
+            # settings partition: three tiers + refusals (temp profile file)
+            for tier in ms.REPORTING_TIERS:
+                clean, errs = ws.validate_settings_patch(
+                    {"mission": {"reporting": tier}})
+                check(f"mission settings: {tier} accepted",
+                      clean == {"mission": {"reporting": tier}}
+                      and not errs, str(errs))
+            clean, errs = ws.validate_settings_patch(
+                {"mission": {"reporting": "loud"}})
+            check("mission settings: out-of-enum tier refused",
+                  not clean and bool(errs)
+                  and "mission.reporting must be one of" in errs[0],
+                  str(errs))
+            clean, errs = ws.validate_settings_patch({"mission": {"nope": 1}})
+            check("mission settings: unknown partition key refused",
+                  not clean and bool(errs)
+                  and "unknown mission key" in errs[0], str(errs))
+            clean, errs = ws.validate_settings_patch({"mission": "all"})
+            check("mission settings: non-object partition refused",
+                  not clean and bool(errs)
+                  and "must be an object" in errs[0], str(errs))
+            s, _body = call("/api/settings",
+                            {"mission": {"reporting": "all"}}, auth=token)
+            s2, st = call("/api/settings")
+            check("mission settings: console write lands and reads back",
+                  s == 200 and s2 == 200
+                  and (st.get("mission") or {}).get("reporting") == "all",
+                  f"{s}/{s2} {st.get('mission')}")
+            s, body = call("/api/settings",
+                           {"mission": {"reporting": "loud"}}, auth=token)
+            check("mission settings: console write refuses a bad tier",
+                  s == 400 and any("mission.reporting" in str(d)
+                                   for d in body.get("details", [])),
+                  f"{s} {body}")
+            s, caps = call("/api/capabilities")
+            check("mission settings: capabilities tier follows the write",
+                  s == 200
+                  and (caps.get("mission") or {}).get("reporting") == "all",
+                  str(caps.get("mission")))
+        finally:
+            if srv is not None:
+                srv.shutdown()
+                srv.server_close()
+            for key, val in saved_keys.items():
+                if val is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = val
+            shutil.rmtree(prof_root, ignore_errors=True)
+    finally:
+        if saved_tok is None:
+            os.environ.pop(POLL_BOT_ENV, None)
+        else:
+            os.environ[POLL_BOT_ENV] = saved_tok
+        if saved_wd is None:
+            os.environ.pop("MYCORE_WD_CHAT", None)
+        else:
+            os.environ["MYCORE_WD_CHAT"] = saved_wd
+
+
 def main() -> int:
     test_model()
     test_registry_and_tools()
@@ -9095,6 +9875,7 @@ def main() -> int:
     test_tg_media()
     test_service_media()
     test_profiles()
+    test_mission()
     print(f"\n{len(PASS)} pass · {len(FAIL)} fail")
     if FAIL:
         print("failed: " + ", ".join(FAIL))

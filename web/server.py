@@ -58,6 +58,13 @@ Routes:
                                    on a non-zero exit: FAIL/WARN are honest output)
   POST /api/cron                -> Bearer; {action:"del", id} deletes one job
                                    (404 unknown id; create stays natural-language/CLI)
+  GET  /api/mission             -> mission board (0.5.44): {reporting, active,
+                                   recent}; fail-soft empty structure, no auth,
+                                   no credential/origin/manifest fields
+  POST /api/mission             -> Bearer; {action: start|stop|pause|resume,
+                                   goal?, id?, reporting?} -> mission row
+                                   (400 validation / 404 unknown id / 409
+                                   conflict — one active mission at a time)
   GET  /api/exchange/quote      -> READ-ONLY public market probe: venue +
                                    optional symbol -> {venue, symbol, lines};
                                    own 10/60s sliding window -> 429
@@ -118,7 +125,7 @@ if str(REPO) in sys.path:
 sys.path.insert(0, str(REPO))
 from lib import i18n  # noqa: E402
 from lib import profile_paths  # noqa: E402  (car F §13.1: per-profile path seams)
-from mycore import cli, evolution, hooks, mcp, modeltier, terminal  # noqa: E402  (config + MCP/ hooks/ terminal grammar)
+from mycore import cli, evolution, hooks, mission, mcp, modeltier, terminal  # noqa: E402  (config + MCP/ hooks/ terminal/ mission grammar)
 from mycore.assembly import build_system_stack, resolve_context_dirs  # noqa: E402
 from mycore.loop import run_turn  # noqa: E402
 from mycore.model import ChatClient  # noqa: E402
@@ -152,6 +159,10 @@ CHAT_HISTORY_CAP = 2000               # per-message chars returned by /history
 CHAT_SESSION_NAME = "web"             # console session file stem (numeric
                                       # chat_ids belong to the TG service)
 _state_lock = threading.Lock()
+# Mission board mutations (0.5.44): the console is a ThreadingHTTPServer, so
+# read-modify-write on the registry runs under one lock (single active mission
+# by construction — two concurrent starts must not both win).
+_mission_lock = threading.Lock()
 
 
 def _load_shim() -> dict:
@@ -253,13 +264,17 @@ DEFAULT_SETTINGS: dict = {
     # truth (copied, never invented) and this partition is always present in
     # GET /api/settings so the console never has to treat absence as default.
     "evolution": dict(evolution.DEFAULT_SETTINGS),
+    # Mission reporting tier (0.5.44): a copy of mycore.mission.DEFAULT_
+    # SETTINGS — the constant stays the source of truth; the partition is
+    # always present so the console renders the tier without an absence check.
+    "mission": dict(mission.DEFAULT_SETTINGS),
     # Event hooks partition (car 4a): {} = no hook configured. Present by
     # default for the same reason — the editor renders an honest empty set.
     "hooks": {},
 }
 ALLOWED_TOP = ("language", "refresh_sec", "sound", "voice_volume",
                "alert_preview", "currency", "fx_rate", "mycore", "usage",
-               "evolution", "channels", "hooks", "media", "web3")
+               "evolution", "channels", "hooks", "media", "web3", "mission")
 USAGE_KEYS = ("metrics_url", "pricing_config", "log_dir")
 MYCORE_KEYS = ("base_url", "model", "context_dirs", "upstreams", "mcp", "shell",
                "tools_off", "models", "budget")
@@ -1094,6 +1109,13 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
         errors.extend(evo_errors)
         if clean_evo:
             clean["evolution"] = clean_evo
+    if "mission" in patch:
+        # Mission partition (0.5.44): grammar lives in mycore.mission — one
+        # source of truth for write validation and load (evolution parity).
+        clean_mis, mis_errors = mission.validate_mission_settings(patch["mission"])
+        errors.extend(mis_errors)
+        if clean_mis:
+            clean["mission"] = clean_mis
     if "hooks" in patch:
         # Event hooks partition (car 4a): schema + argv[0] existence live in
         # mycore.hooks — one source of truth for write validation and load.
@@ -2403,6 +2425,24 @@ def collect_capabilities() -> dict:
                     "pending_plans": 0, "approved_plans": 0,
                     "spent_today_usd": 0.0, "ledger_day": "",
                     "note": "web3 probe failed"}
+    # 0.5.44 mission summary: counts + tier only (fail-soft). Goal text stays
+    # off the no-auth catalog — the board lives at GET /api/mission.
+    try:
+        _mreg = mission.load(mission.default_path())
+        _mact = mission.active_mission(_mreg)
+        _mblock = settings.get("mission")
+        _mtier = _mblock.get("reporting") if isinstance(_mblock, dict) else None
+        if _mtier not in mission.REPORTING_TIERS:
+            _mtier = mission.DEFAULT_REPORTING
+        mission_blk = {"active": 1 if _mact else 0,
+                       "running": bool(_mact
+                                        and _mact.get("state") == "running"),
+                       "total": len(_mreg.get("missions") or []),
+                       "reporting": _mtier}
+    except Exception as e:  # noqa: BLE001 — probe must never break the catalog
+        sys.stderr.write(f"capabilities mission probe failed err={type(e).__name__}\n")
+        mission_blk = {"active": 0, "running": False, "total": 0,
+                       "reporting": mission.DEFAULT_REPORTING}
     return {
         "version": VERSION,
         "mycore": {"model": model, "upstreams_configured": upstreams_ok,
@@ -2423,6 +2463,8 @@ def collect_capabilities() -> dict:
         # live exchange_* tool names + the fail-closed auto-approval caps
         "exchange": exchange_blk,
         "web3": web3_blk,
+        # 0.5.44: mission board summary (active count + reporting tier)
+        "mission": mission_blk,
     }
 
 
@@ -2461,6 +2503,33 @@ def collect_cron() -> dict:
     except Exception as e:  # noqa: BLE001 — catalog must not break the console
         sys.stderr.write(f"cron list failed err={type(e).__name__}\n")
         return {"jobs": [], "count": 0}
+
+
+def collect_mission() -> dict:
+    """GET /api/mission — the mission board (0.5.44). Fail-soft by contract:
+    an absent, unreadable or corrupt registry answers the honest empty
+    structure ({reporting, active: null, recent: [], count: 0}), never a 500.
+    Rows come from mission.public_row — a fixed field whitelist: `goal` is
+    user input and echoes back; origin (a personal chat id), the capability
+    manifest and every internal path stay out of the payload by construction."""
+    try:
+        block = load_settings().get("mission")
+        tier = block.get("reporting") if isinstance(block, dict) else None
+    except Exception:  # noqa: BLE001 — a settings hiccup must not 500 the board
+        tier = None
+    if tier not in mission.REPORTING_TIERS:
+        tier = mission.DEFAULT_REPORTING
+    rows: list[dict] = []
+    try:
+        doc = mission.load(mission.default_path())
+        rows = [mission.public_row(m) for m in (doc.get("missions") or [])]
+    except Exception as e:  # noqa: BLE001 — catalog must not break the console
+        sys.stderr.write(f"mission list failed err={type(e).__name__}\n")
+    active = next((r for r in rows if r.get("state") in mission.ACTIVE_STATES), None)
+    recent = [r for r in reversed(rows)
+              if r.get("state") not in mission.ACTIVE_STATES][:10]
+    return {"reporting": tier, "active": active, "recent": recent,
+            "count": len(rows)}
 
 
 # ------------------------------------- activation & operations (0.5.40) ----
@@ -2701,6 +2770,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_secrets_get()
         if path == "/api/cron":
             return self._json(collect_cron())
+        if path == "/api/mission":
+            return self._json(collect_mission())
         if path == "/api/exchange/quote":
             return self._handle_exchange_quote()
         if path == "/api/exchange/plans":
@@ -2743,6 +2814,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_openai_chat()
         if path == "/api/cron":
             return self._handle_cron_post()
+        if path == "/api/mission":
+            return self._handle_mission_post()
         if path == "/api/service/restart":
             return self._handle_service_restart()
         if path == "/api/update/apply":
@@ -2965,6 +3038,129 @@ class Handler(BaseHTTPRequestHandler):
         else:
             sys.stderr.write(f"cron del ok count={out.get('count')}\n")
         return self._json(out, code)
+
+    def _handle_mission_post(self) -> None:
+        """POST /api/mission {action: start|stop|pause|resume, goal?, id?,
+        reporting?} — Bearer gate, then the mycore.mission state machine.
+        400 bad action/goal/reporting · 404 unknown id · 409 conflict (an
+        active mission exists, or the move does not fit the state). This
+        route only writes the registry under the board lock: the chat
+        service's mission leg executes slices — a console action never runs
+        a model turn, and stop seals with evidence (F4: no silent ends)."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        action = doc.get("action")
+        if action not in ("start", "stop", "pause", "resume"):
+            return self._json({"error": "validation failed",
+                               "details": ["action must be one of: "
+                                           "start|stop|pause|resume"]}, 400)
+        reporting = doc.get("reporting", None)
+        if reporting is not None and reporting not in mission.REPORTING_TIERS:
+            return self._json({"error": "validation failed",
+                               "details": ["reporting must be one of: "
+                                           + "|".join(mission.REPORTING_TIERS)]},
+                              400)
+        path = mission.default_path()
+        with _mission_lock:
+            reg = mission.load(path)
+            # NOTE: load() always sets the key — never `or []` here, that
+            # would detach the very list create() appends to (empty-list bug).
+            missions = reg["missions"]
+            now = time.time()
+            if action == "start":
+                goal = doc.get("goal")
+                if not isinstance(goal, str) or not goal.strip() \
+                        or len(goal) > mission.MAX_GOAL_CHARS:
+                    return self._json({"error": "validation failed",
+                                       "details": [
+                                           f"goal must be a non-empty string of "
+                                           f"at most {mission.MAX_GOAL_CHARS} chars"]},
+                                      400)
+                active = mission.active_mission(reg)
+                if active is not None:
+                    return self._json({"error": "mission already active",
+                                       "mission_id": active.get("id"),
+                                       "state": active.get("state")}, 409)
+                if len(missions) >= mission.MAX_MISSIONS:
+                    return self._json({"error": "mission history is full",
+                                       "details": [f"at most {mission.MAX_MISSIONS} "
+                                                   "missions — retire old ones first"]},
+                                      409)
+                settings = load_settings()
+                # F1 capability manifest frozen at start: tools after the
+                # tools_off set + probe gates, enabled channels, credential
+                # slot key names with a presence BOOL (never a value), web3.
+                manifest = mission.build_manifest(
+                    settings, list(SECRET_SLOTS),
+                    lambda name: read_env_slot(name) is not None)
+                block = settings.get("mission")
+                tier = block.get("reporting") if isinstance(block, dict) else None
+                if tier not in mission.REPORTING_TIERS:
+                    tier = mission.DEFAULT_REPORTING
+                try:
+                    rec = mission.create(missions, goal,
+                                         reporting=reporting or tier,
+                                         origin=None, manifest=manifest,
+                                         now=now)
+                    mission.transition(rec, "running", now,
+                                       reason="console start")
+                    mission.save(path, reg)
+                except mission.MissionError as e:
+                    return self._json({"error": "validation failed",
+                                       "details": [str(e)]}, 400)
+                except OSError as e:  # noqa: BLE001 — type name only
+                    return self._json({"error": f"persist failed: {type(e).__name__}"},
+                                      500)
+                mission.append_event(path, rec["id"], "state",
+                                     {"to": "running", "via": "api"})
+                sys.stderr.write(f"mission start id={rec['id']} "
+                                 f"tier={rec.get('reporting')}\n")
+                return self._json({"ok": True,
+                                   "mission": mission.public_row(rec)})
+            # stop / pause / resume: id first, then the state gate
+            mid = doc.get("id")
+            if not isinstance(mid, str) or not mid.strip():
+                return self._json({"error": "validation failed",
+                                   "details": ["id must be a non-empty string"]},
+                                  400)
+            rec = mission.find(missions, mid.strip())
+            if rec is None:
+                return self._json({"error": "not found",
+                                   "details": ["unknown mission id"]}, 404)
+            state = rec.get("state")
+            if action == "pause" and state != "running":
+                return self._json({"error": "conflict",
+                                   "details": [f"pause requires a running "
+                                               f"mission (state: {state})"]}, 409)
+            if action == "resume" and state != "paused_user":
+                return self._json({"error": "conflict",
+                                   "details": [f"resume requires a paused "
+                                               f"mission (state: {state})"]}, 409)
+            if action == "stop" and state in mission.TERMINAL_STATES:
+                return self._json({"error": "conflict",
+                                   "details": [f"mission already {state}"]}, 409)
+            target = {"pause": "paused_user", "resume": "running",
+                      "stop": "sealed"}[action]
+            evidence = ["stopped via the console"] if action == "stop" else None
+            try:
+                mission.transition(rec, target, now, evidence=evidence,
+                                   reason=f"{action} via api")
+                mission.save(path, reg)
+            except mission.MissionError as e:
+                return self._json({"error": "conflict",
+                                   "details": [str(e)]}, 409)
+            except OSError as e:  # noqa: BLE001 — type name only
+                return self._json({"error": f"persist failed: {type(e).__name__}"},
+                                  500)
+            mission.append_event(path, rec["id"], "state",
+                                 {"to": target, "via": "api"})
+            sys.stderr.write(f"mission {action} id={rec['id']} "
+                             f"state={target}\n")
+            return self._json({"ok": True,
+                               "mission": mission.public_row(rec)})
 
     # ------------------------------------------------------ evolution legs ---
     def _require_token(self) -> bool:

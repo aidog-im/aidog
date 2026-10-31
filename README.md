@@ -14,9 +14,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/aidog-im/aidog/releases"><img src="https://img.shields.io/badge/release-0.5.43-blue?style=flat-square" alt="release 0.5.43"></a>
+  <a href="https://github.com/aidog-im/aidog/releases"><img src="https://img.shields.io/badge/release-0.5.44-blue?style=flat-square" alt="release 0.5.44"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
-  <img src="https://img.shields.io/badge/core_tests-1180%2F1180-brightgreen?style=flat-square" alt="core tests 1180/1180">
+  <img src="https://img.shields.io/badge/core_tests-1318%2F1318-brightgreen?style=flat-square" alt="core tests 1318/1318">
   <img src="https://img.shields.io/badge/console_smoke-234%2F234-brightgreen?style=flat-square" alt="console smoke 234/234">
   <img src="https://img.shields.io/badge/permanently-free-ff6f00?style=flat-square" alt="permanently free">
 </p>
@@ -55,7 +55,7 @@ machine. It is built around three ideas that most assistants skip:
   No vector store you cannot read or audit.
 - **A self-developed core.** The runtime kernel (`mycore`) is written from
   scratch in this repository — an honest function-calling loop with explicit
-  stop reasons, **28 modules ≈ 13.4k LOC, 1,180 tests**, and zero upstream
+  stop reasons, **29 modules ≈ 14.5k LOC, 1,318 tests**, and zero upstream
   dependencies after the core swap. Swap the kernel, never swap "me".
 
 It talks to you over **Telegram**, a **loopback web console**, a
@@ -81,7 +81,7 @@ model key (or use the zero-key trial path) and the whole product activates.
 
 |  | Capability | What it provides |
 |---|---|---|
-| 🧬 | **Self-developed core** | `mycore`: FC loop with honest stop reasons, fail-closed service, watchdog, doctor health gate — 28 modules, 1,180 tests, zero upstream |
+| 🧬 | **Self-developed core** | `mycore`: FC loop with honest stop reasons, fail-closed service, watchdog, doctor health gate — 29 modules, 1,318 tests, zero upstream |
 | 🎭 | **Constitution persona** | `SOUL.md` first in the system stack; red lines and tone enforced every reply, not sampled from a persona prompt |
 | 🧠 | **Curated memory** | Bounded Markdown budgets + archive tiers + digital-memory protocol; `memory` suite 58/58 |
 | 🧩 | **Skills + deterministic router** | `SKILL.md` frontmatter (industry-standard fields), route pre-filter picks TOP3 *before* any body loads — 30/30 |
@@ -190,7 +190,7 @@ Every release is cut only after these run green on a clean tree:
 
 | Suite | Result |
 |---|---|
-| `mycore` core suite | **1180/1180** |
+| `mycore` core suite | **1318/1318** |
 | Console smoke (live HTTP) | **234/234** |
 | Skill router | **30/30** |
 | Memory persistence | **58/58** |
@@ -199,18 +199,18 @@ Every release is cut only after these run green on a clean tree:
 | Desktop shell (`node --test`) | **15/15** |
 | `aidog doctor` | **0 FAIL · 0 WARN** (honest environment WARN only when egress is fully gone) |
 | Publish gate (deny-by-default manifest) | **READY** |
-| Real-machine E2E | profiles **18/18** · channels **8/8** · domestic channels **44/44** · pipeline **35/35** · web3 read-only **33/33** · web3 approval **61/61** · frontend coverage **62/62** · frontend UI **33/33** · activation **81/81** · activation UI **50/50** · settings matrix **57/57** + UI **17/17** |
+| Real-machine E2E | profiles **18/18** · channels **8/8** · domestic channels **44/44** · pipeline **35/35** · web3 read-only **33/33** · web3 approval **61/61** · frontend coverage **62/62** · frontend UI **33/33** · activation **81/81** · activation UI **50/50** · settings matrix **63/63** + UI **20/20** · missions **54/54** |
 
-Catalog scope: **25 registered tools** · **9 exchange venues** · **12
+Catalog scope: **25 registered tools** · **9 exchange venues** · **13
 real-machine E2E legs** — all green.
 
-Locale packs: `en` (default) + `zh`, **536 keys** each, parity lint in CI;
+Locale packs: `en` (default) + `zh`, **562 keys** each, parity lint in CI;
 the marketing site ships its own **217-key** bilingual pack.
 
 ## Documentation
 
 - [`docs/installation.md`](docs/installation.md) — install, slots, wizard
-- [`docs/features/`](docs/features/) — **31 capability documents**, one per
+- [`docs/features/`](docs/features/) — **32 capability documents**, one per
   feature (channels, memory, cron, subagents, MCP, voice, desktop,
   profiles, tool toggles, …), each with its honest boundaries
 - [`docs/manual_verification.md`](docs/manual_verification.md) — manual
@@ -220,9 +220,9 @@ the marketing site ships its own **217-key** bilingual pack.
 - **[aidog.im](https://aidog.im)** — product site (bilingual, PWA,
   AI-readable `llms.txt`)
 
-**All 31 at a glance** (grouped, one line per group):
+**All 32 at a glance** (grouped, one line per group):
 
-- **Agent loop & tools** — [`acp`](docs/features/acp.md) (ACP v1 stdio server) · [`openai_api_server`](docs/features/openai_api_server.md) (OpenAI-compatible `/v1` gateway) · [`terminal_backends`](docs/features/terminal_backends.md) (7-backend `run_bash` matrix) · [`execute_code`](docs/features/execute_code.md) · [`subagents`](docs/features/subagents.md) · [`mcp`](docs/features/mcp.md) · [`tool_toggles`](docs/features/tool_toggles.md) · [`browser_automation`](docs/features/browser_automation.md) · [`model_failover`](docs/features/model_failover.md)
+- **Agent loop & tools** — [`acp`](docs/features/acp.md) (ACP v1 stdio server) · [`openai_api_server`](docs/features/openai_api_server.md) (OpenAI-compatible `/v1` gateway) · [`terminal_backends`](docs/features/terminal_backends.md) (7-backend `run_bash` matrix) · [`execute_code`](docs/features/execute_code.md) · [`subagents`](docs/features/subagents.md) · [`mcp`](docs/features/mcp.md) · [`tool_toggles`](docs/features/tool_toggles.md) · [`browser_automation`](docs/features/browser_automation.md) · [`model_failover`](docs/features/model_failover.md) · [`missions`](docs/features/missions.md) (never-sleeps mission loop)
 - **Knowledge & memory** — [`memory_and_routing`](docs/features/memory_and_routing.md) · [`checkpoints`](docs/features/checkpoints.md) · [`context_files`](docs/features/context_files.md) (project instruction files) · [`evolution_loop`](docs/features/evolution_loop.md) · [`connectors`](docs/features/connectors.md) (read-only Linear/Notion search)
 - **Channels & media** — [`channels`](docs/features/channels.md) · [`channels_domestic`](docs/features/channels_domestic.md) · [`console_chat`](docs/features/console_chat.md) · [`voice_session`](docs/features/voice_session.md) · [`voice_announcements`](docs/features/voice_announcements.md) · [`tts_engines`](docs/features/tts_engines.md) · [`image_generation`](docs/features/image_generation.md)
 - **Ops & console** — [`setup_wizard`](docs/features/setup_wizard.md) · [`frontend_coverage`](docs/features/frontend_coverage.md) · [`capabilities`](docs/features/capabilities.md) · [`desktop_client`](docs/features/desktop_client.md) · [`profiles`](docs/features/profiles.md) · [`site_visibility`](docs/features/site_visibility.md) · [`zero_key_onboarding`](docs/features/zero_key_onboarding.md) · [`natural_language_cron`](docs/features/natural_language_cron.md) · [`event_hooks`](docs/features/event_hooks.md)

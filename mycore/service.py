@@ -35,6 +35,9 @@ State directory (default <repo>/data/mycore_service, env AIDOG_MC_STATE):
                               only when web/settings.json evolution.enabled;
                               the poll loop checks is_due() once a minute,
                               catch-up after downtime, one run per window)
+    missions.json             mission registry (0.5.44 mission leg: one active
+                              mission, mark-first slices, budget seals)
+    mission_events.jsonl      append-only mission event stream (slices/reports)
     sessions/archive/         sessions rotated by /reset
 
 Commands (parsed only when message text starts with "/", and only after the
@@ -117,6 +120,7 @@ from . import cli
 from . import envslots
 from . import evolution
 from . import hooks as hooks_mod
+from . import mission as mission_mod
 from . import scheduler
 from .assembly import build_system_stack, resolve_context_dirs
 from .loop import run_turn
@@ -150,6 +154,8 @@ DENY_WARN_THROTTLE = 60.0              # seconds between WARN lines per chat
 MAX_POLL_ERRORS = 20                   # bounded backoff, then give up (tg.py parity)
 DEFAULT_POLL_TIMEOUT = 30              # long-poll seconds (0 in --once mode)
 REFLECT_CHECK_SEC = 60.0               # evolution cron evaluation cadence
+MISSION_TICK_SEC = 5.0                 # mission leg cadence (design 3.2: ~5s)
+MISSION_CATCHUP_SEC = 600.0            # leg absence worth one honest CATCHUP line
 TYPING_INTERVAL_SEC = 4.0               # TG typing heartbeat (5s Telegram TTL)
 CHANNEL_POLL_SEC = 30                   # channel inbound leg cadence (seconds)
 VOICE_MAX_SECONDS = 60                  # TG voice/audio cap before STT (car 4c)
@@ -389,6 +395,7 @@ class ChatService:
         self._deny_stamp: dict[str, float] = {}
         self._reflect_check = 0.0       # last evolution cron evaluation (clock)
         self._cron_check = 0.0          # last scheduler evaluation (clock)
+        self._mission_check = 0.0       # last mission tick evaluation (clock)
         self._chan_check = 0.0          # last channel inbound poll (clock)
         self.log = ServiceLog(self.state / LOG_NAME, now=now)
         self.lang = self._load_lang()
@@ -483,6 +490,7 @@ class ChatService:
                 errors = 0
                 self._maybe_reflect()          # evolution cron leg (no-op when off)
                 self._maybe_fire_cron()        # scheduler leg (no-op with no due jobs)
+                self._maybe_tick_missions()    # mission leg (0.5.44; no-op without an active mission)
                 self._maybe_poll_channels()    # channel leg (throttled, fail-soft)
                 if once and not updates:
                     break                          # nothing pending: exit 0
@@ -1130,24 +1138,26 @@ class ChatService:
         raw = envslots.wd_chat_target()
         return int(raw) if WD_CHAT_RE.fullmatch(raw) else None
 
-    def _cron_deliver(self, job: dict, text: str) -> str:
-        """One fired job's output -> origin chat, else MYCORE_WD_CHAT, else
-        log-only. Returns the delivery label for CRON_FIRE (observed fact).
-
-        A string origin is a channel endpoint `route:target` (the job was
-        created inside a channel turn): it answers on the same route, and an
-        unknown route or an honest send failure falls back to the existing
-        int-origin > MYCORE_WD_CHAT > log-only chain."""
-        origin = job.get("origin")
-        self._fire_hooks("cron_fire",
-                         origin if isinstance(origin, (int, str)) else None)
+    def _origin_deliver(self, origin, text: str, *,
+                        hook_event: str | None = None) -> str:
+        """The ONE outbound fallback chain (two callers, never a parallel
+        copy): a str origin is a channel endpoint `route:target` (the message
+        was created inside that channel turn — it answers on the same route,
+        and an unknown route or an honest send failure falls through), then
+        an int origin, then env/slot MYCORE_WD_CHAT, then log-only ("none").
+        `hook_event`, when set, fires hooks before delivery — the cron leg
+        passes "cron_fire"; mission reports fire none (mission_tick joins the
+        whitelist in car 3). Returns the delivery label (observed fact)."""
+        if hook_event:
+            self._fire_hooks(hook_event,
+                             origin if isinstance(origin, (int, str)) else None)
         if isinstance(origin, str):
             route, sep, dest = origin.partition(":")
             if sep and dest:
                 try:
                     chan = self._channel_map().get(route)
                 except Exception as e:  # noqa: BLE001 — fallback below, loop lives
-                    self.log.write("CHANNEL_ERR", "phase=cron",
+                    self.log.write("CHANNEL_ERR", "phase=deliver",
                                    f"err={type(e).__name__}")
                     chan = None
                 if chan is not None and \
@@ -1158,6 +1168,12 @@ class ChatService:
             return "none"
         self._send(target, text)
         return "origin" if target == origin else "wd"
+
+    def _cron_deliver(self, job: dict, text: str) -> str:
+        """One fired job's output -> the shared fallback chain, with the
+        cron_fire hook event (observed contract of the scheduler leg)."""
+        return self._origin_deliver(job.get("origin"), text,
+                                    hook_event="cron_fire")
 
     def _cron_prompt_text(self, job: dict) -> str:
         """kind=prompt: run ONE fresh model turn (constitution stack + the
@@ -1213,6 +1229,149 @@ class ChatService:
                                f"delivered={label}", f"preview={preview}")
         except Exception as e:  # noqa: BLE001 — a fire failure never kills the loop
             self.log.write("CRON_ERR", f"err={type(e).__name__}")
+
+    # ------------------------------------------------------------- missions --
+    def _mission_deliver(self, mission_rec: dict, text: str) -> str:
+        """One mission report -> the SAME four-tier fallback chain the cron
+        leg owns (origin -> route:target -> MYCORE_WD_CHAT -> log-only), via
+        the single _origin_deliver implementation — nothing is re-copied here.
+        Mission reports fire no hook event (car 3 adds `mission_tick`).
+        Reporter egress (credential/path scrub) already ran in
+        mycore.mission.emit before the text arrives."""
+        return self._origin_deliver(mission_rec.get("origin"), text)
+
+    def _maybe_tick_missions(self) -> None:
+        """Mission leg (0.5.44 minimal loop, design 3.2): throttled to
+        MISSION_TICK_SEC; at most one slice per tick; the mark (slice count +
+        tick stamp) is persisted BEFORE execution — a crash loses at most one
+        slice, never duplicates one (the cron leg's philosophy); a budget
+        guard reached seals the mission with evidence and a final report
+        (never a silent stop). No active mission = one fail-soft read and
+        return (near-zero overhead); a pause never executes. A fire failure
+        never kills the poll loop."""
+        nowt = self._now()
+        if nowt - self._mission_check < MISSION_TICK_SEC:
+            return
+        self._mission_check = nowt
+        path = self.state / mission_mod.STATE_FILE_NAME
+        try:
+            doc = mission_mod.load(path)
+        except OSError:
+            return
+        missions = doc.get("missions") or []
+        if not any(m.get("state") in mission_mod.ACTIVE_STATES for m in missions):
+            return
+        last = doc.get("last_tick")
+        if isinstance(last, (int, float)) and nowt - last > MISSION_CATCHUP_SEC:
+            self.log.write("MISSION_CATCHUP", f"gap={int(nowt - last)}s")
+        doc["last_tick"] = nowt
+        for rec in missions:
+            if rec.get("state") not in mission_mod.ACTIVE_STATES:
+                continue
+            try:
+                self._tick_one_mission(doc, rec, path, nowt)
+            except Exception as e:  # noqa: BLE001 — one bad mission, one line
+                self.log.write("MISSION_ERR", f"id={rec.get('id', '?')}",
+                               f"err={type(e).__name__}")
+                try:
+                    mission_mod.save(path, doc)
+                except OSError:
+                    pass
+
+    def _tick_one_mission(self, doc: dict, rec: dict, path: Path,
+                          nowt: float) -> None:
+        """Exactly one tick of one mission: promote -> budget gate -> mark
+        first -> one run_turn slice -> fold markers -> report -> persist.
+        Reports go through mission_mod.emit (tier + throttle + merge + scrub)
+        into the shared fallback chain; delivery is best-effort by design."""
+        state = rec.get("state")
+        if state == "planned":        # defensive promote (the API lands running)
+            mission_mod.transition(rec, "running", nowt, reason="executor tick")
+            mission_mod.append_event(path, rec["id"], "state",
+                                     {"to": "running", "via": "tick"})
+            state = "running"
+        if state != "running":        # paused_user / reserved dormant states
+            mission_mod.save(path, doc)   # persist the mark only, no work
+            return
+        guard = mission_mod.budget_breach(rec, nowt)
+        if guard is not None:
+            evidence = [mission_mod.budget_evidence(rec, guard)]
+            mission_mod.transition(rec, "sealed", nowt, evidence=evidence)
+            mission_mod.save(path, doc)       # seal lands BEFORE the report
+            mission_mod.append_event(path, rec["id"], "sealed",
+                                     {"guard": guard})
+            label = mission_mod.emit(
+                rec, "final", mission_mod.fmt_final(rec, done=False),
+                lambda text: self._mission_deliver(rec, text), nowt)
+            mission_mod.save(path, doc)       # persist throttle state
+            self.log.write("MISSION_SEAL", f"id={rec['id']}",
+                           f"guard={guard}", f"delivered={label}")
+            return
+        # mark first: slice count + tick stamp persisted BEFORE execution
+        counters = rec.setdefault("counters", {})
+        counters["slices"] = int(counters.get("slices") or 0) + 1
+        rec["last_tick"] = nowt
+        rec["updated_at"] = nowt
+        mission_mod.save(path, doc)
+        mode = "plan" if not rec.get("tasks") else "exec"
+        if mode == "exec":
+            mission_mod.set_current(rec)
+        prompt = mission_mod.build_slice_prompt(rec, mode=mode)
+        # constitution stack: assembly puts SOUL.md first; the goal text only
+        # ever enters the USER layer (design 3.3).
+        messages = build_system_stack(context_dirs=resolve_context_dirs()) \
+            + [{"role": "user", "content": prompt}]
+        chat_fn = self.chat or ChatClient(cli.resolve_model_config()).chat
+        try:
+            res = run_turn(messages, chat_fn, self.registry,
+                           max_iters=int(rec.get("slice_iters") or 25),
+                           budget_chars=self._budget())
+        except Exception as e:  # noqa: BLE001 — run_turn never raises; belt anyway
+            self.log.write("MISSION_ERR", f"id={rec['id']}",
+                           f"err={type(e).__name__}")
+            mission_mod.save(path, doc)
+            return
+        mission_mod.note_model_calls(rec, res.iterations, nowt)
+        output = res.text or ""
+        marks = mission_mod.parse_slice(output)
+        events = mission_mod.apply_slice(rec, marks, nowt, mode=mode)
+        if res.stop == "model_error":
+            events.append({"kind": "error", "level": "WARN",
+                           "fact": mission_mod.ZH["error_fact"],
+                           "impact": mission_mod.ZH["error_impact"],
+                           "next": mission_mod.ZH["error_next"]})
+        mission_mod.append_event(path, rec["id"], "slice",
+                                 {"n": counters["slices"], "mode": mode,
+                                  "stop": res.stop, "iters": res.iterations,
+                                  "preview": mission_mod.scrub(output)[:300]})
+        finished = mode == "exec" and mission_mod.should_finish(rec, marks)
+        if finished:
+            mission_mod.transition(rec, "done", nowt)
+            mission_mod.append_event(path, rec["id"], "state",
+                                     {"to": "done", "via": "slice"})
+        deliver = lambda text: self._mission_deliver(rec, text)  # noqa: E731
+        for ev in events:
+            label = mission_mod.emit(rec, ev["kind"],
+                                     mission_mod.fmt_event(rec["id"], ev),
+                                     deliver, nowt)
+            mission_mod.append_event(path, rec["id"], "report",
+                                     {"event": ev["kind"],
+                                      "delivered": label,
+                                      "tier": rec.get("reporting")})
+        if finished:
+            label = mission_mod.emit(rec, "final",
+                                     mission_mod.fmt_final(rec, done=True),
+                                     deliver, nowt)
+            mission_mod.append_event(path, rec["id"], "report",
+                                     {"event": "final", "delivered": label,
+                                      "tier": rec.get("reporting")})
+        tasks = rec.get("tasks") or []
+        done_n = sum(1 for t in tasks if t.get("status") == "done")
+        self.log.write("MISSION_SLICE", f"id={rec['id']}",
+                       f"n={counters['slices']}", f"mode={mode}",
+                       f"stop={res.stop}", f"iters={res.iterations}",
+                       f"tasks={done_n}/{len(tasks)}")
+        mission_mod.save(path, doc)
 
     # ------------------------------------------------------------ channels --
     def _channel_map(self) -> dict:

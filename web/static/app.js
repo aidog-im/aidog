@@ -3022,6 +3022,7 @@ function settingsRelang() {
   renderCapGrid();             // B2: system card + cron list follow the pack
   renderCronList();
   renderSetup();               // activation car: checklist rows re-translate
+  renderMission();             // mission card: dynamic lines follow the pack
   evoCrossCheck();
 }
 
@@ -3768,8 +3769,225 @@ async function cronDel(id) {
   }
 }
 
+/* ------------------------------------------------ mission board (0.5.44) --
+   Settings MISSIONS card (autonomous-ops car, Lane F): reads
+   GET /api/mission -> {reporting, active|null, recent[≤10], count} and
+   drives POST /api/mission {action: start|pause|resume|stop} with the
+   Bearer token. The reporting tier select writes its own settings partition
+   (POST /api/settings {mission:{reporting}} — the same validated merge every
+   other block uses) AND rides along with start, so the displayed tier is
+   never a guess: it is what GET /api/mission reports. Honest states only:
+   no active mission renders `mission.idle`, an unreachable board renders
+   `mission.unavail`, a server 400/409 detail passes through VERBATIM (it
+   names the state rule — never a value). `goal` is user input: escaped here,
+   never a credential, and capped at the server's 4000-char limit. */
+let missionData = null, missionSeen = false, missionBusy = false;
+
+function missionTrunc(s, n) {
+  const str = String(s == null ? "" : s);
+  return str.length > n ? str.slice(0, n) + "…" : str;
+}
+
+function missionStateLabel(st) {
+  return t("mission.st." + st, String(st == null ? "" : st));
+}
+
+async function refreshMission() {
+  try {
+    const d = await fetch("/api/mission").then(r => r.json());
+    if (d && typeof d === "object") { missionData = d; missionSeen = true; }
+    else throw new Error("bad payload");
+  } catch (e) {
+    // keep the last honest snapshot after the first success (setup parity)
+    if (!missionSeen) missionData = null;
+  }
+  renderMission();
+}
+
+function renderMission() {
+  const stateEl = document.getElementById("missionState");
+  const recentEl = document.getElementById("missionRecent");
+  const sel = document.getElementById("missionReporting");
+  const startBtn = document.getElementById("missionStartBtn");
+  const pauseBtn = document.getElementById("missionPauseBtn");
+  const resumeBtn = document.getElementById("missionResumeBtn");
+  const stopBtn = document.getElementById("missionStopBtn");
+  if (!stateEl) return;
+
+  if (!missionData) {
+    stateEl.hidden = !missionSeen;          // before the first probe: no claim
+    if (missionSeen) {
+      stateEl.textContent = t("mission.unavail", "mission board unavailable");
+    }
+    if (recentEl) { recentEl.hidden = true; recentEl.innerHTML = ""; }
+    if (startBtn) startBtn.disabled = missionBusy;
+    [pauseBtn, resumeBtn, stopBtn].forEach(b => { if (b) b.disabled = true; });
+    return;
+  }
+
+  const active = missionData.active || null;
+  // the select shows the STORED tier — never a local guess
+  if (sel && typeof missionData.reporting === "string" && sel.value !== missionData.reporting
+      && document.activeElement !== sel) {
+    sel.value = missionData.reporting;
+  }
+
+  if (!active) {
+    stateEl.hidden = false;
+    stateEl.textContent = t("mission.idle", "no active mission — idle");
+  } else {
+    const prog = (active.progress && typeof active.progress === "object")
+      ? active.progress : {};
+    const goal = missionTrunc(active.goal, 120);
+    const meta = [
+      String(active.id || ""),
+      missionStateLabel(active.state),
+      t("mission.tasks", "tasks {d}/{t}")
+        .replace("{d}", String(prog.done == null ? 0 : prog.done))
+        .replace("{t}", String(prog.total == null ? 0 : prog.total)),
+      String(active.reporting || missionData.reporting || ""),
+    ].map(escapeHtml).join(" · ");
+    stateEl.hidden = false;
+    stateEl.innerHTML = `<div>${meta}</div>` +
+      `<div style="opacity:.85;">${escapeHtml(goal)}</div>`;
+  }
+
+  // recent tail: a compact honest table, never invented rows
+  if (recentEl) {
+    const rows = Array.isArray(missionData.recent) ? missionData.recent : [];
+    if (!rows.length) {
+      recentEl.hidden = true;
+      recentEl.innerHTML = "";
+    } else {
+      recentEl.hidden = false;
+      recentEl.innerHTML = rows.map(r => {
+        const row = (r && typeof r === "object") ? r : {};
+        const meta = [String(row.id || ""), missionStateLabel(row.state)]
+          .map(escapeHtml).join(" · ");
+        return `<div class="ctl-row" style="align-items:flex-start;">` +
+          `<label style="flex:1;min-width:0;overflow-wrap:anywhere;">` +
+          `${escapeHtml(missionTrunc(row.goal, 90))}</label>` +
+          `<span class="stat-note" style="margin-top:0;">${meta}</span></div>`;
+      }).join("");
+    }
+  }
+
+  if (startBtn) startBtn.disabled = missionBusy || !!active;
+  if (pauseBtn) pauseBtn.disabled = missionBusy || !active || active.state !== "running";
+  if (resumeBtn) resumeBtn.disabled = missionBusy || !active || active.state !== "paused_user";
+  if (stopBtn) stopBtn.disabled = missionBusy || !active;
+}
+
+async function missionAction(action) {
+  const msg = document.getElementById("missionMsg");
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    if (msg) { msg.className = "save-state err";
+      msg.textContent = t("save.needToken", "token required"); }
+    return;
+  }
+  const payload = { action: action };
+  if (action === "start") {
+    const goalEl = document.getElementById("missionGoal");
+    const goal = goalEl ? goalEl.value.trim() : "";
+    if (!goal) {
+      if (msg) { msg.className = "save-state err";
+        msg.textContent = t("mission.needGoal",
+          "goal required — describe what to accomplish"); }
+      return;
+    }
+    payload.goal = goal;
+    const sel = document.getElementById("missionReporting");
+    if (sel) payload.reporting = sel.value;
+  } else {
+    const active = missionData && missionData.active;
+    if (!active || !active.id) return;
+    payload.id = String(active.id);
+    if (action === "stop" && !window.confirm(t("mission.stopConfirm",
+        "Stop mission {id}? It will be sealed with evidence.")
+        .replace("{id}", payload.id))) return;
+  }
+  missionBusy = true;
+  renderMission();
+  if (msg) { msg.className = "save-state"; msg.textContent = "…"; }
+  try {
+    const res = await fetch("/api/mission", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify(payload),
+    });
+    let body = {};
+    try { body = await res.json(); } catch (e) { body = {}; }
+    if (res.status === 401) {
+      if (msg) { msg.className = "save-state err";
+        msg.textContent = t("save.badToken", "401 · unauthorized"); }
+      return;
+    }
+    if (!res.ok) {
+      const err = (body && (body.error || (Array.isArray(body.details) &&
+        body.details.length && body.details.join("; ")))) || ("HTTP " + res.status);
+      if (msg) { msg.className = "save-state err";
+        msg.textContent = t("mission.err", "mission request failed: {e}")
+          .replace("{e}", String(err)); }
+      return;
+    }
+    if (msg) {
+      msg.className = "save-state";
+      msg.textContent = action === "start"
+        ? t("mission.started", "mission started ✓")
+        : t("save.ok", "saved ✓");
+    }
+    beep(880, 0.06);
+  } catch (e) {
+    if (msg) { msg.className = "save-state err";
+      msg.textContent = t("mission.err", "mission request failed: {e}")
+        .replace("{e}", String(e).slice(0, 120)); }
+  }
+  missionBusy = false;
+  await refreshMission();
+}
+
+/* tier select -> its own settings partition (live, no SAVE button) */
+async function missionTierWrite(value) {
+  const msg = document.getElementById("missionMsg");
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    if (msg) { msg.className = "save-state err";
+      msg.textContent = t("save.needToken", "token required"); }
+    return;
+  }
+  if (msg) { msg.className = "save-state"; msg.textContent = "…"; }
+  try {
+    const res = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify({ mission: { reporting: value } }),
+    });
+    let body = {};
+    try { body = await res.json(); } catch (e) { body = {}; }
+    if (res.status === 401) {
+      if (msg) { msg.className = "save-state err";
+        msg.textContent = t("save.badToken", "401 · unauthorized"); }
+    } else if (!res.ok) {
+      const details = Array.isArray(body.details) ? body.details : [];
+      if (msg) { msg.className = "save-state err";
+        msg.textContent = details.length ? details.join("; ")
+          : (body.error || "error"); }
+    } else {
+      if (msg) { msg.className = "save-state";
+        msg.textContent = t("save.ok", "saved ✓"); }
+    }
+  } catch (e) {
+    if (msg) { msg.className = "save-state err";
+      msg.textContent = String(e).slice(0, 120); }
+  }
+  await refreshMission();
+}
+
 /* --------------------------------------------------------------- polling -- */
-let statusTimer = null, usageTimer = null;
+let statusTimer = null, usageTimer = null, missionTimer = null;
 
 async function refreshStatus() {
   try {
@@ -3807,6 +4025,9 @@ function scheduleRefresh() {
   const ms = Math.max(5, parseInt(settings.refresh_sec, 10) || 10) * 1000;
   clearInterval(statusTimer);
   statusTimer = setInterval(refreshStatus, ms);
+  // mission board rides the SAME user-configured cadence as the status panel
+  clearInterval(missionTimer);
+  missionTimer = setInterval(refreshMission, ms);
 }
 
 function tickClock() {
@@ -3975,6 +4196,15 @@ if (cronListDelEl) cronListDelEl.addEventListener("click", e => {
   const btn = e.target.closest("#cronDelBtn, [data-job]");
   if (btn && btn.dataset.job) cronDel(btn.dataset.job);
 });
+/* mission card (0.5.44): four actions + the tier select, all guarded */
+[["missionStartBtn", "start"], ["missionPauseBtn", "pause"],
+ ["missionResumeBtn", "resume"], ["missionStopBtn", "stop"]].forEach(pair => {
+  const el = document.getElementById(pair[0]);
+  if (el) el.addEventListener("click", () => missionAction(pair[1]));
+});
+const missionReportingEl = document.getElementById("missionReporting");
+if (missionReportingEl) missionReportingEl.addEventListener("change",
+  e => missionTierWrite(e.target.value));
 const chanTestBtnEl = document.getElementById("chanTestBtn");
 if (chanTestBtnEl) chanTestBtnEl.addEventListener("click", chanSendTest);
 const micBtnEl = document.getElementById("micBtn");
@@ -4023,6 +4253,7 @@ loadSettings().then(() => { scheduleRefresh(); renderVoice(); initSettingsPanels
 refreshStatus(); refreshUsage(); refreshEvents(); refreshVersion(); refreshSkills();
 refreshEvolution();
 refreshCron();           // cron list for the Overview card (+ delete row)
+refreshMission();        // mission board: honest idle until the first probe
 refreshSetup();          // activation car: Overview checklist (hidden if 404)
 loadChatHistory();   // console session restored at boot (read-only route)
 refreshVoiceCap();   // engine status visible before the first orb tap (#4)

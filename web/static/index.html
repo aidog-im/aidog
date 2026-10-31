@@ -734,6 +734,45 @@
           </div>
         </div>
 
+        <!-- Mission card (0.5.44 autonomous ops): goal input + reporting
+             tier + start/pause/resume/stop against GET/POST /api/mission.
+             The board polls on the shared refresh cadence (scheduleRefresh)
+             and shows the honest `idle` line when nothing is active. The
+             goal textarea is plain user input — echoed back, escaped, and
+             never a credential. -->
+        <div class="card" id="missionCard">
+          <h2 data-i18n="mission.sec">MISSIONS</h2>
+          <div class="ctl-row token-row">
+            <label data-i18n="mission.goalLabel">Ultimate goal</label>
+          </div>
+          <textarea id="missionGoal" class="evo-input evo-body" rows="3"
+                    maxlength="4000" spellcheck="false"
+                    data-i18n-ph="mission.goalPh"
+                    placeholder="describe what to accomplish tonight — natural language, no syntax"></textarea>
+          <div class="ctl-row">
+            <label data-i18n="mission.reporting">Reporting tier</label>
+            <select id="missionReporting" aria-label="reporting tier">
+              <option value="all" data-i18n="mission.tierAll">all — every report</option>
+              <option value="milestones" data-i18n="mission.tierMilestones">milestones — stage results (default)</option>
+              <option value="final" data-i18n="mission.tierFinal">final — only the outcome</option>
+            </select>
+          </div>
+          <div class="ctl-actions">
+            <button class="btn primary" id="missionStartBtn" type="button"
+                    data-i18n="mission.start">START</button>
+            <button class="btn" id="missionPauseBtn" type="button"
+                    data-i18n="mission.pause" disabled>PAUSE</button>
+            <button class="btn" id="missionResumeBtn" type="button"
+                    data-i18n="mission.resume" disabled>RESUME</button>
+            <button class="btn" id="missionStopBtn" type="button"
+                    data-i18n="mission.stop" disabled>STOP</button>
+            <span class="save-state" id="missionMsg" role="status"></span>
+          </div>
+          <div class="stat-note" id="missionState" hidden></div>
+          <div id="missionRecent" hidden></div>
+          <div class="stat-note" data-i18n="mission.hint">runs overnight on its own · reports go through your configured bot · a missing capability degrades into an honest report, never a question</div>
+        </div>
+
         <div class="card">
           <h2 data-i18n="sec.creds">CREDENTIALS</h2>
           <div class="stat-note" id="credTokenHint" hidden></div>
