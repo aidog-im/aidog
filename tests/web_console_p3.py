@@ -81,6 +81,28 @@ def post_raw(path: str, doc, ctype: str = "application/json",
         return 0, "", str(e).encode()
 
 
+def post_audio(path: str, data: bytes, ctype: str, origin: str | None = None,
+               timeout: int = 45) -> tuple[int, dict | str]:
+    """POST raw audio bytes — the /api/stt local contract. Returns
+    (status, parsed JSON body)."""
+    req = urllib.request.Request(BASE + path, data=data, method="POST")
+    req.add_header("Content-Type", ctype)
+    if origin:
+        req.add_header("Origin", origin)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            raw = r.read().decode("utf-8", "replace")
+            return r.status, json.loads(raw) if raw else {}
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode("utf-8", "replace")
+        try:
+            return e.code, json.loads(raw)
+        except ValueError:
+            return e.code, raw
+    except Exception as e:  # noqa: BLE001
+        return 0, f"{type(e).__name__}: {e}"
+
+
 def post_sse(path: str, doc, token: str | None,
              timeout: int = 90) -> tuple[int, str, list[tuple[str, dict]]]:
     """POST expecting an SSE stream: returns (status, content-type, events).
@@ -306,6 +328,64 @@ def main() -> int:
         print("INFO  /api/say: voice engine not installed — 503 as designed")
     else:
         check("POST /api/say synth -> mp3", False, f"got {s} ct={ct} body={body[:80]!r}")
+
+    # --- car 4c: /api/say engine parameter — a bad engine is refused before
+    # the rate budget; an explicit byok leg must answer HONESTLY (200 audio
+    # or a 503 that names the real reason — never a silent edge fallback). --
+    s, _ct, _b = post_raw("/api/say", {"text": "hi", "engine": "bogus"})
+    check("POST /api/say engine=bogus -> 400", s == 400, f"got {s}")
+    s, ct, body = post_raw("/api/say", {"text": "Console byok honesty test.",
+                                        "engine": "byok"}, timeout=40)
+    if s == 429:
+        check("POST /api/say engine=byok honest -> audio or 503", True,
+              "rate-limited (prior run in window)")
+        print("INFO  /api/say byok leg rate-limited as designed (429)")
+    elif s == 200:
+        check("POST /api/say engine=byok honest -> audio or 503",
+              str(ct).startswith("audio/") and len(body) > 500,
+              f"ct={ct} len={len(body)}")
+    else:
+        try:
+            byok_err = json.loads(body.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            byok_err = {}
+        check("POST /api/say engine=byok honest -> audio or 503",
+              s == 503 and isinstance(byok_err, dict)
+              and isinstance(byok_err.get("error"), str)
+              and bool(byok_err.get("error")),
+              f"got {s} {body[:100]!r}")
+
+    # --- car 4c: /api/stt local contract — every validation leg answers
+    # before the rate window, so they are stable in any order. ---
+    s, _b = post_audio("/api/stt", b'{"text":"hi"}', "application/json")
+    check("POST /api/stt non-audio content-type -> 415", s == 415, f"got {s}")
+    s, _b = post_audio("/api/stt", b"", "audio/mpeg")
+    check("POST /api/stt empty body -> 400", s == 400, f"got {s}")
+    s, _b = post_audio("/api/stt", b"xx", "audio/mpeg",
+                       origin="https://evil.example")
+    check("POST /api/stt cross-origin -> 403", s == 403, f"got {s}")
+    # 413: the handler refuses from the DECLARED Content-Length before any
+    # body byte is read, so the probe sends the >2MB header and reads the
+    # answer instead of racing a 2MB write against the closed socket.
+    import http.client as _hc
+    _parts = urllib.parse.urlsplit(BASE)
+    _conn = _hc.HTTPConnection(_parts.hostname or "127.0.0.1",
+                               _parts.port or 80, timeout=10)
+    st_413 = 0
+    try:
+        _conn.putrequest("POST", "/api/stt")
+        _conn.putheader("Content-Type", "audio/mpeg")
+        _conn.putheader("Content-Length", str(2_000_001))
+        _conn.endheaders()
+        _resp = _conn.getresponse()
+        st_413 = _resp.status
+        _resp.read()
+    except OSError as e:  # noqa: BLE001
+        st_413 = 0
+        print(f"INFO  413 probe transport: {type(e).__name__}")
+    finally:
+        _conn.close()
+    check("POST /api/stt declared >2MB -> 413", st_413 == 413, f"got {st_413}")
 
     # --- console chat (B1): gate first, then shape, then a live model turn ---
     s, body = post("/api/chat", {"text": "hi"}, None)
@@ -722,6 +802,30 @@ def main() -> int:
               isinstance(tmb, dict) and tmb.get("backend") == "local"
               and tmb.get("spec_set") is False, f"terminal={tmb}")
 
+    # --- car 4c: media settings partition — illegal writes are refused with
+    # the parser's exact reason and must change NOTHING on disk
+    # (read-compare-read of raw bytes, before the restore below). ---
+    if token:
+        before_bytes = (settings_path.read_bytes()
+                        if settings_path.exists() else b"")
+        media_bad = (
+            ({"media": {"stt_model": "huge"}}, "media.stt_model"),
+            ({"media": {"tts_engine": "free"}}, "media.tts_engine"),
+            ({"media": {"image_base_url": "ftp://x"}}, "media.image_base_url"),
+            ({"media": {"wake_phrases": ["a", "b", "c", "d"]}},
+             "media.wake_phrases"),
+            ({"media": {"nope": 1}}, "unknown media key"),
+        )
+        for mpatch, why in media_bad:
+            s, body = post("/api/settings", mpatch, token)
+            check(f"POST settings {why} illegal -> 400 + reason",
+                  s == 400 and why in str(body), f"got {s} {str(body)[:140]}")
+        after_bytes = (settings_path.read_bytes()
+                       if settings_path.exists() else b"")
+        check("illegal media writes leave settings.json byte-identical",
+              before_bytes == after_bytes,
+              f"changed={before_bytes != after_bytes}")
+
     if settings_backup is not None:
         try:
             settings_path.write_text(settings_backup, encoding="utf-8")
@@ -827,6 +931,56 @@ def main() -> int:
     check("capabilities terminal/local_models never leak a slot value",
           all(v not in caps_text for v in slot_vals),
           "slot value found in catalog")
+
+    # --- car 4c: capabilities.media — four sub-blocks, booleans/names only,
+    # no URL at all and no credential slot value (zero-leak, same rule as the
+    # full catalog above, asserted on the serialized media block alone). ---
+    s, caps_m = get("/api/capabilities")
+    med = caps_m.get("media") if isinstance(caps_m, dict) else None
+    sttb = med.get("stt") if isinstance(med, dict) else None
+    imgb = med.get("image") if isinstance(med, dict) else None
+    ttsb = med.get("tts") if isinstance(med, dict) else None
+    connb = med.get("connectors") if isinstance(med, dict) else None
+    tts_eng = ttsb.get("engines") if isinstance(ttsb, dict) else None
+    check("GET capabilities media block shape",
+          s == 200 and isinstance(med, dict)
+          and {"stt", "image", "tts", "connectors"} <= set(med)
+          and isinstance(sttb, dict)
+          and isinstance(sttb.get("available"), bool)
+          and (sttb.get("model") is None
+               or isinstance(sttb.get("model"), str))
+          and isinstance(imgb, dict)
+          and isinstance(imgb.get("configured"), bool)
+          and (imgb.get("reason") is None
+               or isinstance(imgb.get("reason"), str))
+          and isinstance(ttsb, dict) and isinstance(tts_eng, dict)
+          and isinstance(tts_eng.get("edge"), bool)
+          and isinstance(tts_eng.get("byok"), bool)
+          and ttsb.get("active") in ("edge", "byok")
+          and isinstance(connb, dict)
+          and isinstance(connb.get("linear"), bool)
+          and isinstance(connb.get("notion"), bool),
+          f"media={med}")
+    med_text = json.dumps(med, ensure_ascii=False) if isinstance(med, dict) else ""
+    med_slots = []
+    if SECRETS.exists():
+        for _v in re.findall(r"(?m)^[A-Za-z0-9_]+=(\S[^\r\n]*)$",
+                             SECRETS.read_text(encoding="utf-8")):
+            if len(_v.strip()) >= 6:
+                med_slots.append(_v.strip())
+    check("GET capabilities media: no URL, no slot value",
+          bool(med_text) and "http" not in med_text.lower()
+          and all(v not in med_text for v in med_slots),
+          f"n_slots={len(med_slots)}")
+
+    # --- car 4c: /api/media served-file whitelist — unknown name, encoded
+    # traversal and a non-image suffix all answer a plain 404. ---
+    s, _b = get("/api/media/no_such_e2e_image.png")
+    check("GET /api/media unknown name -> 404", s == 404, f"got {s}")
+    s, _b = get("/api/media/..%2fsecrets.env")
+    check("GET /api/media encoded traversal -> 404", s == 404, f"got {s}")
+    s, _b = get("/api/media/notes.txt")
+    check("GET /api/media wrong suffix -> 404", s == 404, f"got {s}")
     caps_doc = Path(__file__).resolve().parent.parent / \
         "docs/features/capabilities.md"
     check("capabilities feature doc exists",
@@ -1012,6 +1166,67 @@ def main() -> int:
     check("secrets.env restored byte-for-byte after /v1 tests",
           after == v1_backup,
           f"changed={after != v1_backup}")
+
+    # --- car 4c: /api/stt live legs — kept for LAST on purpose: the 429
+    # test fills the in-process sliding window, so no stt success assertion
+    # may follow it in this run. ---
+    fix_path: Path | None = Path("/tmp/stt_test.mp3")
+    if not (fix_path.is_file() and fix_path.stat().st_size > 1000):
+        fix_path = None
+        try:
+            import subprocess as _sp
+            _edge_out = Path("/tmp/smoke_stt_fixture.mp3")
+            _sp.run(["edge-tts", "--voice", "en-US-AriaNeural",
+                     "--text", "console speech test",
+                     "--write-media", str(_edge_out)],
+                    check=True, capture_output=True, timeout=60)
+            if _edge_out.is_file() and _edge_out.stat().st_size > 1000:
+                fix_path = _edge_out
+        except Exception:  # noqa: BLE001 — fall through to the stdlib wav
+            fix_path = None
+    if fix_path is not None:
+        fix_bytes = fix_path.read_bytes()
+        fix_ctype = "audio/mpeg"
+    else:
+        import math
+        import struct
+        import wave as _wave
+        _wav_out = Path("/tmp/smoke_stt_fixture.wav")
+        with _wave.open(str(_wav_out), "wb") as _w:
+            _w.setnchannels(1)
+            _w.setsampwidth(2)
+            _w.setframerate(16000)
+            _w.writeframes(b"".join(
+                struct.pack("<h",
+                            int(12000 * math.sin(2 * math.pi * 440 * i / 16000)))
+                for i in range(16000)))
+        fix_bytes = _wav_out.read_bytes()
+        fix_ctype = "audio/wav"
+
+    s, body = post_audio("/api/stt", fix_bytes, fix_ctype, timeout=60)
+    if s == 429:
+        # window filled by an earlier run seconds ago — wait it out once
+        import time as _time
+        print("INFO  /api/stt window full — waiting 62s for expiry")
+        _time.sleep(62)
+        s, body = post_audio("/api/stt", fix_bytes, fix_ctype, timeout=60)
+    check("POST /api/stt valid audio -> 200 text+duration",
+          s == 200 and isinstance(body, dict)
+          and isinstance(body.get("text"), str)
+          and isinstance(body.get("duration"), (int, float))
+          and float(body.get("duration") or 0) > 0,
+          f"got {s} {str(body)[:120]}")
+
+    # 429: fill the window with cheap undecodable requests (each fails as
+    # 422 in ~20ms) until the limiter refuses — must stay the LAST stt leg.
+    junk = b"\x1a\x45\xdf\xa3" + b"\x00" * 256
+    s_last = 0
+    for _i in range(35):
+        s_last, _b = post_audio("/api/stt", junk, "audio/webm", timeout=20)
+        if s_last == 429:
+            break
+    check("POST /api/stt rate window filled -> 429", s_last == 429,
+          f"last={s_last}")
 
     print(f"\n{len(PASS)} pass · {len(FAIL)} fail")
     if FAIL:

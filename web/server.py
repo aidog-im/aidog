@@ -47,7 +47,17 @@ Routes:
   GET  /api/chat/history        -> current console session (read, loopback)
   GET  /api/voice               -> voice engine capability (edge-tts presence)
   POST /api/say                 -> synthesize speech -> audio/mpeg (cached,
-                                   rate-limited, sanitized, JSON-only origin-guarded)
+                                   rate-limited, sanitized, JSON-only origin-guarded;
+                                   optional {engine: edge|byok}, default = the
+                                   settings media.tts_engine choice)
+  POST /api/stt                 -> local speech-to-text: audio/* body on the
+                                   independent STT_MAX_BODY budget, same loopback
+                                   origin guard + own sliding rate window ->
+                                   {text, language, duration} (honest 503/422)
+  POST /api/image               -> Bearer WEB_TOKEN; {prompt, size?} ->
+                                   {images: [{name, url}]} via imagegen (honest 503)
+  GET  /api/media/<name>        -> one generated image from data/images/ (strict
+                                   name whitelist, no traversal)
   GET  /static/i18n/<lang>.json -> locale packs served from the SSOT
                                    overlay/locales/ (en default, zh switchable)
 """
@@ -65,6 +75,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from collections import deque
@@ -99,6 +110,14 @@ SECRETS = REPO / "secrets.env"
 SETTINGS_FILE = WEB_DIR / "settings.json"
 STATE_FILE = WEB_DIR / ".state.json"  # runtime state (gitignored): boot history
 MAX_BODY = 16384
+# Car 4c media face: binary payloads carry their OWN budgets — a voice note or
+# a generated image is not JSON, and the transcriber enforces its own limits.
+STT_MAX_BODY = 2_000_000        # raw audio bytes per /api/stt request
+STT_MAX_DURATION = 60           # decoded seconds accepted (transcriber cap)
+IMAGE_MAX_PROMPT = 2000         # chars in one image trial prompt
+IMAGE_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")   # served-file whitelist
+MEDIA_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".webp": "image/webp"}
+MEDIA_DIR = REPO / "data" / "images"        # imagegen's output dir (read-only here)
 CHAT_MAX_CHARS = 4000                 # one console chat message (input cap)
 CHAT_HISTORY_CAP = 2000               # per-message chars returned by /history
 CHAT_SESSION_NAME = "web"             # console session file stem (numeric
@@ -185,10 +204,18 @@ DEFAULT_SETTINGS: dict = {
         "feishu": {"enabled": False, "allow": [], "chat_ids": []},
         "wechat": {"enabled": False},
     },
+    # Media face (car 4c): console voice/image configuration — non-secret only
+    # (credential slots TTS_API_KEY / IMAGE_API_KEY live in secrets.env and
+    # never serialize). Wake phrases are user data with a bilingual default;
+    # the zh phrase is \u-escaped so this source file stays ASCII per the
+    # source-language lint (locale packs are the only CJK-bearing files).
+    "media": {"image_base_url": "", "image_model": "", "tts_base_url": "", "tts_model": "",
+              "stt_model": "base", "tts_engine": "edge",
+              "wake_phrases": ["hey aidog", "\u4f60\u597d\u827e\u591a"]},
 }
 ALLOWED_TOP = ("language", "refresh_sec", "sound", "voice_volume",
                "alert_preview", "currency", "fx_rate", "mycore", "usage",
-               "evolution", "channels", "hooks")
+               "evolution", "channels", "hooks", "media")
 USAGE_KEYS = ("metrics_url", "pricing_config", "log_dir")
 MYCORE_KEYS = ("base_url", "model", "context_dirs", "upstreams", "mcp", "shell")
 MYCORE_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$")
@@ -212,6 +239,15 @@ _CHANNEL_SCHEMA = {
     "feishu": ("enabled", "allow", "chat_ids"),
     "wechat": ("enabled",),
 }
+# Media partition (car 4c): field schema validated like the other blocks —
+# URLs must be http(s)+host (empty = off), models/engines are closed enums,
+# wake phrases are a short list of single-line strings.
+MEDIA_KEYS = ("image_base_url", "image_model", "tts_base_url", "tts_model",
+              "stt_model", "tts_engine", "wake_phrases")
+STT_MODELS = ("tiny", "base", "small")
+TTS_ENGINES = ("edge", "byok")
+WAKE_PHRASES_MAX = 3
+WAKE_PHRASE_MAX_LEN = 64
 
 # ---------------------------------------------------------------- helpers ----
 
@@ -715,6 +751,64 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                     clean_ch[name] = clean_sub
             if clean_ch:
                 clean["channels"] = clean_ch
+    if "media" in patch:
+        med = patch["media"]
+        if not isinstance(med, dict):
+            errors.append("media must be an object")
+        else:
+            clean_med: dict = {}
+            for key in med:
+                if key not in MEDIA_KEYS:
+                    errors.append(f"unknown media key: {key}")
+                    continue
+                val = med[key]
+                if key in ("image_base_url", "tts_base_url"):
+                    if not isinstance(val, str) or len(val) > 256 \
+                            or "\x00" in val or "\n" in val or "\r" in val:
+                        errors.append(f"media.{key} must be a single-line string "
+                                      "of at most 256 chars (empty = off)")
+                        continue
+                    if val:
+                        parts = urllib.parse.urlparse(val)
+                        if parts.scheme not in ("http", "https") or not parts.hostname:
+                            errors.append(f"media.{key} must be an http(s) URL with a "
+                                          "host (empty = off)")
+                            continue
+                    clean_med[key] = val
+                elif key == "tts_model" or key == "image_model":
+                    if not isinstance(val, str) or len(val) > 64 \
+                            or "\x00" in val or "\n" in val or "\r" in val:
+                        errors.append(f"media.{key} must be a single-line string "
+                                      "of at most 64 chars (empty = engine default)")
+                        continue
+                    clean_med[key] = val
+                elif key == "stt_model":
+                    if val not in STT_MODELS:
+                        errors.append("media.stt_model must be one of: "
+                                      + "|".join(STT_MODELS))
+                        continue
+                    clean_med[key] = val
+                elif key == "tts_engine":
+                    if val not in TTS_ENGINES:
+                        errors.append("media.tts_engine must be one of: "
+                                      + "|".join(TTS_ENGINES))
+                        continue
+                    clean_med[key] = val
+                elif key == "wake_phrases":
+                    if not isinstance(val, list) or len(val) > WAKE_PHRASES_MAX:
+                        errors.append("media.wake_phrases must be a list of at most "
+                                      f"{WAKE_PHRASES_MAX} phrases")
+                        continue
+                    if any(not isinstance(p, str) or not p.strip()
+                           or len(p) > WAKE_PHRASE_MAX_LEN or "\x00" in p
+                           or "\n" in p or "\r" in p for p in val):
+                        errors.append("media.wake_phrases entries must be non-empty "
+                                      "single-line strings of at most "
+                                      f"{WAKE_PHRASE_MAX_LEN} chars")
+                        continue
+                    clean_med[key] = [p.strip() for p in val]
+            if clean_med:
+                clean["media"] = clean_med
     if "evolution" in patch:
         clean_evo, evo_errors = evolution.validate_evolution_settings(
             patch["evolution"])
@@ -1436,6 +1530,149 @@ def _synth_say(text: str, lang: str) -> bytes:
         tmp.unlink(missing_ok=True)  # no-op after successful os.replace
 
 
+# ------------------------------------------------------------ media face --
+# Car 4c (console): local speech-to-text, the image trial panel, the BYOK
+# speech leg, and the `media` capability block. Rules of this face: lazy
+# imports (the mycore media modules may land in a parallel wave — absent =
+# honest 503, never a fake), booleans and engine/model NAMES only in the
+# catalog (no credential value, no URL ever serializes), and explicit
+# failures — byok never silently falls back to edge.
+
+STT_RATE_LIMIT = 30            # transcription requests per sliding minute
+STT_RATE_WINDOW = 60.0
+_stt_times: deque = deque()
+_stt_lock = threading.Lock()
+BYOK_VOICE = "alloy"           # single OpenAI-compatible voice slot (both langs)
+BYOK_MAX_AUDIO = 5_000_000     # upstream speech bytes read cap
+
+
+def _stt_rate_ok() -> bool:
+    """Independent sliding window — /api/stt must not spend /api/say's
+    budget (the console can listen and speak at the same time)."""
+    now = time.time()
+    with _stt_lock:
+        while _stt_times and now - _stt_times[0] > STT_RATE_WINDOW:
+            _stt_times.popleft()
+        if len(_stt_times) >= STT_RATE_LIMIT:
+            return False
+        _stt_times.append(now)
+        return True
+
+
+def _no_url(text: str) -> str:
+    """Catalog reasons are names and sentences — never a URL: the smoke
+    asserts zero credential material, and we go further (no URL at all)."""
+    return re.sub(r"[A-Za-z][A-Za-z0-9+.-]*://\S+", "url", text).strip()
+
+
+def media_capability(settings: dict) -> dict:
+    """`media` block of GET /api/capabilities — presence/booleans plus
+    engine and model NAMES only: no key, no URL, no path, no slot value."""
+    med = settings.get("media") if isinstance(settings.get("media"), dict) else {}
+    # speech-to-text: lazy import + weight probe (module may be absent)
+    stt_blk: dict = {"available": False}
+    try:
+        from mycore import stt as _stt
+        if _stt.available():
+            stt_blk = {"available": True,
+                       "model": str(med.get("stt_model") or "base")}
+    except Exception as e:  # noqa: BLE001 — absent module = unavailable, honestly
+        sys.stderr.write(f"capabilities stt probe failed err={type(e).__name__}\n")
+    # image generation: configured flag + honest, URL-stripped reason
+    img_blk: dict = {"configured": False}
+    try:
+        from mycore import imagegen as _imagegen
+        ok, reason = _imagegen.configured()
+        img_blk = {"configured": bool(ok)}
+        if not ok:
+            why = _no_url(str(reason or ""))[:160]
+            if why:
+                img_blk["reason"] = why
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write(f"capabilities image probe failed err={type(e).__name__}\n")
+    # tts: engine presence on this host; byok counts as configured when its
+    # base URL exists and the credential policy passes (same policy as the
+    # synth leg below — a loopback endpoint may run keyless, remote is closed).
+    byok_ok = _tts_byok_cfg(settings)[1]
+    active = med.get("tts_engine")
+    active = active if active in TTS_ENGINES else "edge"
+    tts_blk = {"engines": {"edge": bool(shutil.which("edge-tts")),
+                           "byok": bool(byok_ok)},
+               "active": active}
+    # connectors: slot presence booleans (values never leave mycore.connectors)
+    conn_blk: dict = {"linear": False, "notion": False}
+    try:
+        from mycore import connectors as _connectors
+        st = _connectors.status()
+        conn_blk = {"linear": bool(st.get("linear")),
+                    "notion": bool(st.get("notion"))}
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write(f"capabilities connectors probe failed err={type(e).__name__}\n")
+    return {"stt": stt_blk, "image": img_blk, "tts": tts_blk,
+            "connectors": conn_blk}
+
+
+def _tts_byok_cfg(settings: dict) -> tuple[str, bool, str]:
+    """(base, ok, key) for the BYOK speech leg. Base URL priority: env
+    AIDOG_TTS_URL > settings media.tts_base_url > mycore.base_url. Key = the
+    TTS_API_KEY slot falling back to MODEL_API_KEY (value never echoed, never
+    logged, never part of a reason string). A LOOPBACK base may run keyless —
+    the same policy imagegen already applies to local gateways; any remote
+    endpoint without a slot is fail-closed (ok=False)."""
+    med = settings.get("media") if isinstance(settings.get("media"), dict) else {}
+    mc = settings.get("mycore") if isinstance(settings.get("mycore"), dict) else {}
+    base = (os.environ.get("AIDOG_TTS_URL", "").strip()
+            or str(med.get("tts_base_url") or "").strip()
+            or str(mc.get("base_url") or "").strip()).rstrip("/")
+    if not base:
+        return "", False, ""
+    key = read_env_slot("TTS_API_KEY") or read_env_slot("MODEL_API_KEY") or ""
+    if key:
+        return base, True, key
+    return base, _is_loopback_http(base), ""
+
+
+def _synth_say_byok(text: str, settings: dict) -> tuple[bytes, str]:
+    """BYOK OpenAI-compatible speech leg (car 4c). Raises RuntimeError with
+    an honest reason — the caller answers 503; there is NO edge fallback."""
+    base, ok, key = _tts_byok_cfg(settings)
+    if not base:
+        raise RuntimeError("byok tts: no base URL (set AIDOG_TTS_URL or "
+                           "media.tts_base_url in settings)")
+    if not ok:
+        raise RuntimeError("byok tts: no credential slot for a remote endpoint "
+                           "(TTS_API_KEY in secrets.env)")
+    med = settings.get("media") if isinstance(settings.get("media"), dict) else {}
+    model = str(med.get("tts_model") or "").strip() or "tts-1"
+    payload = json.dumps({"model": model, "voice": BYOK_VOICE,
+                          "input": text}).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if key:
+        headers["Authorization"] = "Bearer " + key
+    req = urllib.request.Request(base + "/audio/speech", data=payload,
+                                 method="POST", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=SAY_TIMEOUT) as resp:
+            ctype = (resp.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+            data = resp.read(BYOK_MAX_AUDIO + 1)
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read(512).decode("utf-8", "replace").strip()
+        except OSError:
+            pass
+        raise RuntimeError(f"byok tts upstream HTTP {e.code}: "
+                           f"{sanitize_event_text(detail)[:120]}") from None
+    except Exception as e:  # noqa: BLE001 — DNS/timeout/refused, honest type only
+        raise RuntimeError(f"byok tts unreachable: {type(e).__name__}") from None
+    if not data or not ctype.startswith("audio/"):
+        raise RuntimeError(f"byok tts returned {ctype or 'no content-type'} "
+                           "(expected audio)")
+    if len(data) > BYOK_MAX_AUDIO:
+        raise RuntimeError(f"byok tts response too large (max {BYOK_MAX_AUDIO} bytes)")
+    return data, ctype
+
+
 # ----------------------------------------------------------------- version ---
 # Owner decree (2026-10-17): we cut every release; the console notifies the
 # user when origin's manifest is newer. Channel: private GitHub repo now,
@@ -1814,6 +2051,8 @@ def collect_capabilities() -> dict:
         "browser": browser,
         "terminal": terminal_blk,
         "local_models": local_models,
+        # car 4c media face: stt/image/tts/connectors — booleans and names only
+        "media": media_capability(settings),
     }
 
 
@@ -1889,6 +2128,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_openai_models()
         if path == "/api/capabilities":
             return self._json(collect_capabilities())
+        if path.startswith("/api/media/"):
+            return self._serve_media(path[len("/api/media/"):])
         if path.startswith("/static/i18n/"):
             return self._locale_pack(path[len("/static/i18n/"):])
         if path.startswith("/static/"):
@@ -1905,6 +2146,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_settings_write()
         if path == "/api/say":
             return self._handle_say()
+        if path == "/api/stt":
+            return self._handle_stt()
+        if path == "/api/image":
+            return self._handle_image()
         if path == "/api/learn":
             return self._handle_learn()
         if path == "/api/evolution":
@@ -2531,8 +2776,6 @@ class Handler(BaseHTTPRequestHandler):
                 host = ""
             if host not in ("127.0.0.1", "localhost", "::1"):
                 return self._json({"error": "cross-origin request refused"}, 403)
-        if not shutil.which("edge-tts"):
-            return self._json({"error": "voice engine not installed"}, 503)
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
@@ -2555,6 +2798,22 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "lang must be one of: " + "|".join(LANGS)}, 400)
         if len(text) > SAY_MAX_CHARS:
             return self._json({"error": f"text too long (max {SAY_MAX_CHARS} chars)"}, 400)
+        # engine selection (car 4c): explicit {engine: edge|byok} beats the
+        # settings media.tts_engine choice; absent both = "edge" (the original
+        # chain, byte-for-byte unchanged). Validation happens before the rate
+        # budget — a bad engine must not spend a synthesis slot.
+        engine = doc.get("engine", "")
+        if engine is None:
+            engine = ""
+        if not isinstance(engine, str):
+            return self._json({"error": "engine must be one of: edge|byok"}, 400)
+        say_settings = load_settings()
+        say_media = (say_settings.get("media")
+                     if isinstance(say_settings.get("media"), dict) else {})
+        engine = engine.strip() or str(say_media.get("tts_engine") or "edge")
+        if engine not in TTS_ENGINES:
+            return self._json({"error": "engine must be one of: "
+                               + "|".join(TTS_ENGINES)}, 400)
         text = sanitize_event_text(text)   # redact tokens/bearer/brand + strip
         if not text:
             return self._json({"error": "text empty after sanitization"}, 400)
@@ -2570,11 +2829,175 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if engine == "byok":
+            # Honest failure only: unconfigured/upstream problems answer 503
+            # with the real reason — we never pretend byok fell back to edge.
+            try:
+                audio, say_ctype = _synth_say_byok(text, say_settings)
+            except RuntimeError as e:
+                return self._json({"error": str(e)[:160]}, 503)
+            return self._send(200, audio, say_ctype)
+        if not shutil.which("edge-tts"):
+            return self._json({"error": "voice engine not installed"}, 503)
         try:
             audio = _synth_say(text, lang)
         except RuntimeError as e:
             return self._json({"error": str(e)}, 502)
         return self._send(200, audio, "audio/mpeg")
+
+    def _handle_stt(self) -> None:
+        """POST /api/stt — local speech-to-text (car 4c). Same local
+        contract as /api/say: no bearer (loopback console feature),
+        loopback-only Origin, JSON nowhere in this path — the body IS the
+        audio, read on the independent STT_MAX_BODY budget instead of
+        MAX_BODY, and covered by its own sliding rate window. The transcriber
+        is imported lazily (a parallel wave may not have landed it yet) and
+        every failure answers with the real reason."""
+        ctype = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        if not ctype.startswith("audio/"):
+            return self._json({"error": "Content-Type must be an audio payload "
+                               "(audio/webm, ogg, mpeg, wav, mp4)"}, 415)
+        origin = self.headers.get("Origin")
+        if origin:
+            try:
+                host = urllib.parse.urlparse(origin).netloc.split("@")[-1].split(":")[0]
+            except ValueError:
+                host = ""
+            if host not in ("127.0.0.1", "localhost", "::1"):
+                return self._json({"error": "cross-origin request refused"}, 403)
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return self._json({"error": "bad content-length"}, 400)
+        if length <= 0:
+            return self._json({"error": "empty body"}, 400)
+        if length > STT_MAX_BODY:
+            return self._json({"error": f"audio too large "
+                               f"(max {STT_MAX_BODY} bytes)"}, 413)
+        data = self.rfile.read(length)
+        if not data:
+            return self._json({"error": "empty body"}, 400)
+        if not _stt_rate_ok():
+            self.send_response(429)
+            self.send_header("Retry-After", str(int(STT_RATE_WINDOW)))
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            body = json.dumps({"error": "transcription rate limit reached",
+                               "retry_after_sec": int(STT_RATE_WINDOW)}).encode()
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        stt_settings = load_settings()
+        stt_media = (stt_settings.get("media")
+                     if isinstance(stt_settings.get("media"), dict) else {})
+        model = str(stt_media.get("stt_model") or "base")
+        try:
+            from mycore import stt as _stt   # lazy: lands with the media wave
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(f"stt import failed err={type(e).__name__}\n")
+            return self._json({"error": "speech-to-text unavailable "
+                               "(stt module not loaded)"}, 503)
+        try:
+            up = bool(_stt.available())
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(f"stt probe failed err={type(e).__name__}\n")
+            return self._json({"error": f"speech-to-text unavailable "
+                               f"({type(e).__name__})"}, 503)
+        if not up:
+            return self._json({"error": "speech-to-text unavailable "
+                               "(local model weights not present)"}, 503)
+        try:
+            res = _stt.transcribe(data, model=model)
+        except Exception as e:  # noqa: BLE001
+            reason = sanitize_event_text(str(e).strip() or type(e).__name__)[:160]
+            # SttError = bad/undecodable audio (422); a missing model or any
+            # other failure is server-side (503). Both carry the real reason.
+            code = 503 if (type(e).__name__ != "SttError"
+                           or "unavailable" in reason.lower()) else 422
+            return self._json({"error": reason}, code)
+        try:
+            text = str(res.get("text") or "")
+            lang = str(res.get("language") or "")
+            dur = float(res.get("duration") or 0.0)
+        except (AttributeError, TypeError, ValueError):
+            return self._json({"error": "speech-to-text returned an "
+                               "unexpected result"}, 503)
+        if dur > STT_MAX_DURATION:
+            return self._json({"error": f"audio too long ({dur:.0f}s — "
+                               f"limit {STT_MAX_DURATION}s)"}, 422)
+        return self._json({"text": text.strip(), "language": lang,
+                           "duration": round(max(dur, 0.0), 3)})
+
+    def _handle_image(self) -> None:
+        """POST /api/image — image trial panel (car 4c). Bearer WEB_TOKEN;
+        the prompt stays in-process (never logged); upstream failures map to
+        honest 503 (unconfigured) / 502 (upstream) / 500 (unexpected)."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        prompt = doc.get("prompt")
+        size = doc.get("size", "1024x1024")
+        if not isinstance(prompt, str) \
+                or not (1 <= len(prompt.strip()) <= IMAGE_MAX_PROMPT):
+            return self._json({"error": f"prompt must be a string of "
+                               f"1..{IMAGE_MAX_PROMPT} chars"}, 400)
+        if size is None:
+            size = "1024x1024"
+        if not isinstance(size, str) or not re.fullmatch(r"\d{2,5}x\d{2,5}",
+                                                         size.strip()):
+            return self._json({"error": "size must be WxH (e.g. 1024x1024)"}, 400)
+        try:
+            from mycore import imagegen as _imagegen  # lazy (parallel wave)
+        except Exception as e:  # noqa: BLE001
+            sys.stderr.write(f"imagegen import failed err={type(e).__name__}\n")
+            return self._json({"error": "image generation unavailable "
+                               f"({type(e).__name__})"}, 503)
+        try:
+            ok, reason = _imagegen.configured()
+        except Exception as e:  # noqa: BLE001
+            return self._json({"error": "image config check unavailable "
+                               f"({type(e).__name__})"}, 503)
+        if not ok:
+            why = sanitize_event_text(str(reason or "") or "not configured")[:160]
+            return self._json({"error": why}, 503)
+        try:
+            paths = _imagegen.generate(prompt.strip(), size=size.strip())
+            # Panel images are console-local previews: drop them from the
+            # module outbox so they never accumulate here (the TG service
+            # drains ITS own process copy; nothing consumes web's one).
+            _imagegen.drain_outbox()
+        except Exception as e:  # noqa: BLE001
+            reason = sanitize_event_text(str(e).strip() or type(e).__name__)[:160]
+            code = 502 if type(e).__name__ == "ImageError" else 500
+            return self._json({"error": reason}, code)
+        images: list[dict] = []
+        for p in paths or []:
+            name = Path(str(p)).name
+            if IMAGE_NAME_RE.match(name):
+                images.append({"name": name, "url": "/api/media/" + name})
+        return self._json({"images": images})
+
+    def _serve_media(self, name: str) -> None:
+        """GET /api/media/<name> — one generated image, and nothing else:
+        the name must match the [A-Za-z0-9_.-] whitelist, resolve to a file
+        DIRECTLY inside data/images/ (parent check kills traversal), and carry
+        a known image suffix. Anything else is a plain 404."""
+        if not IMAGE_NAME_RE.match(name):
+            return self._json({"error": "not found"}, 404)
+        try:
+            root = MEDIA_DIR.resolve()
+            target = (root / name).resolve()
+            if target.parent != root or not target.is_file():
+                return self._json({"error": "not found"}, 404)
+            mime = MEDIA_MIME.get(target.suffix.lower())
+            if mime is None:
+                return self._json({"error": "not found"}, 404)
+            data = target.read_bytes()
+        except OSError:
+            return self._json({"error": "not found"}, 404)
+        self._send(200, data, mime)
 
     def _handle_settings_write(self) -> None:
         """Validated, idempotent settings write. The token value never appears

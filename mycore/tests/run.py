@@ -51,18 +51,28 @@ BROWSER_TOOLS = frozenset({
 
 
 def expected_tool_names() -> frozenset[str]:
-    """Core 11 + the six browser_* tools IFF a browser binary is discoverable
-    (car 4b capability-honest registration). The suite must be green both on
-    hosts with a browser and without — and with AIDOG_BROWSER_BIN overridden
+    """Core 11 + generate_image (always, car 4c) + the six browser_* tools
+    IFF a browser binary is discoverable (car 4b capability-honest
+    registration) + connector_search IFF connectors.status() reports at
+    least one credential slot (car 4c, mirrors the registration gate).
+    The suite must be green both on hosts with a browser and without —
+    with or without connector slots — and with AIDOG_BROWSER_BIN overridden
     to a dead path — so every count assertion derives from this, never a
     literal."""
+    out = set(CORE_TOOLS) | {"generate_image"}   # car 4c: always registered
     try:
         from mycore import browser as _br
         if _br.available():
-            return CORE_TOOLS | BROWSER_TOOLS
+            out |= BROWSER_TOOLS
     except Exception:  # noqa: BLE001 — no browser module edge = core only
         pass
-    return CORE_TOOLS
+    try:
+        from mycore import connectors as _cn
+        if any(_cn.status().values()):
+            out |= {"connector_search"}
+    except Exception:  # noqa: BLE001 — connectors probe must never break
+        pass
+    return frozenset(out)
 
 
 # ------------------------------------------------------------ fake model ----
@@ -6262,6 +6272,1079 @@ def test_localmodels() -> None:
             os.environ["AIDOG_LOCAL_MODEL_PROBES"] = saved_env
 
 
+# ------------------------------------------- car 4c: media-face tests ----
+
+# A real 1x1 PNG (imagegen tests assert saved bytes, never render).
+PNG_1PX = (__import__("base64").b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8"
+    "z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="))
+
+
+class _LoopbackMock:
+    """Loopback-only mock HTTP server for the car 4c media tests (offline:
+    binds 127.0.0.1:0 and nothing else). `respond(method, path, body) ->
+    (status, content_type, payload_bytes)` is injected per test; every
+    request is recorded in `.requests` for request-shape assertions."""
+
+    def __init__(self, respond) -> None:
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        self.respond = respond
+        self.requests: list[tuple[str, str, dict, bytes]] = []
+        mock = self
+
+        class _H(BaseHTTPRequestHandler):
+            def log_message(self, *a):  # noqa: D102 — keep the suite quiet
+                return
+
+            def _handle(self):
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    length = 0
+                body = self.rfile.read(length) if length else b""
+                mock.requests.append((self.command, self.path,
+                                      dict(self.headers), body))
+                status, ctype, data = mock.respond(self.command, self.path, body)
+                data = data or b""
+                try:
+                    self.send_response(status)
+                    if data:
+                        self.send_header("Content-Type", ctype)
+                        self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    if data:
+                        self.wfile.write(data)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+            do_GET = do_POST = _handle
+
+        self._srv = ThreadingHTTPServer(("127.0.0.1", 0), _H)
+        self.port = int(self._srv.server_address[1])
+        self.url = f"http://127.0.0.1:{self.port}"
+        threading.Thread(target=self._srv.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        try:
+            self._srv.shutdown()
+            self._srv.server_close()
+        except OSError:
+            pass
+
+
+def test_stt() -> None:
+    """Car 4c: local faster-whisper STT — decode + transcribe contract.
+    Structure assertions only (the fixture is a synthetic sine tone with no
+    speech): transcript ACCURACY is an E2E leg, never an offline assertion."""
+    import io
+    import math
+    import struct
+    import wave
+    from mycore import stt
+
+    check("stt: available() true on this host (weights cached)",
+          stt.available() is True)
+
+    def sine_wav(seconds: float = 0.5) -> bytes:
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(stt.SAMPLE_RATE)
+            n = int(stt.SAMPLE_RATE * seconds)
+            w.writeframes(b"".join(
+                struct.pack("<h", int(12000 * math.sin(
+                    2 * math.pi * 440 * i / stt.SAMPLE_RATE)))
+                for i in range(n)))
+        return buf.getvalue()
+
+    wav = sine_wav()
+
+    try:
+        stt.transcribe(wav, model="huge")
+        check("stt: invalid model -> SttError", False)
+    except stt.SttError as e:
+        check("stt: invalid model -> SttError",
+              "unsupported model" in str(e), str(e))
+
+    for label, blob in (("empty", b""),
+                        ("junk", b"\x00\xff- definitely not a container")):
+        try:
+            stt.transcribe(blob)
+            check(f"stt: {label} bytes -> SttError", False)
+        except stt.SttError:
+            check(f"stt: {label} bytes -> SttError", True)
+        except Exception as e:  # noqa: BLE001
+            check(f"stt: {label} bytes -> SttError", False,
+                  f"{type(e).__name__}: {e}")
+
+    # Both cached sizes run at least once (tiny is fast, base = default).
+    for size in ("tiny", "base"):
+        try:
+            got = stt.transcribe(wav, model=size)
+        except Exception as e:  # noqa: BLE001
+            check(f"stt: {size} decode+transcribe sine wav", False,
+                  f"{type(e).__name__}: {e}")
+            continue
+        check(f"stt: {size} decode+transcribe -> dict structure",
+              isinstance(got, dict)
+              and isinstance(got.get("text"), str)
+              and isinstance(got.get("language"), str)
+              and isinstance(got.get("duration"), (int, float))
+              and not isinstance(got.get("duration"), bool)
+              and got["duration"] > 0.1,
+              str({k: got.get(k) for k in ("text", "language", "duration")})[:80])
+
+
+def test_imagegen() -> None:
+    """Car 4c: BYOK image generation — config precedence, outbox contract,
+    happy/error paths against a loopback mock (zero network, zero real keys)."""
+    import base64
+    from mycore import imagegen
+
+    env_keys = ("AIDOG_IMAGE_URL", "IMAGE_API_KEY", "MODEL_API_KEY")
+    saved_env = {k: os.environ.get(k) for k in env_keys}
+    saved_settings = imagegen._settings
+    mock = None
+    created: list[Path] = []
+    try:
+        for k in env_keys:
+            os.environ.pop(k, None)
+        imagegen.drain_outbox()          # never inherit leftovers from other legs
+
+        # --- config precedence: env > settings.media > settings.mycore ---
+        os.environ["AIDOG_IMAGE_URL"] = "http://127.0.0.1:9/v1"
+        check("imagegen: env endpoint wins",
+              imagegen._base_url() == "http://127.0.0.1:9/v1",
+              imagegen._base_url())
+        os.environ.pop("AIDOG_IMAGE_URL", None)
+
+        imagegen._settings = lambda: {"media": {
+            "image_base_url": "http://127.0.0.1:9091/v1"}}
+        check("imagegen: settings media.image_base_url fallback",
+              imagegen._base_url() == "http://127.0.0.1:9091/v1",
+              imagegen._base_url())
+        imagegen._settings = lambda: {"mycore": {
+            "base_url": "http://127.0.0.1:3460/v1/"}}
+        check("imagegen: settings mycore.base_url fallback + slash strip",
+              imagegen._base_url() == "http://127.0.0.1:3460/v1",
+              imagegen._base_url())
+
+        # --- four-state configured(): remote w/o key rejects, loopback ok ---
+        os.environ["AIDOG_IMAGE_URL"] = "https://remote.invalid/v1"
+        ok, reason = imagegen.configured()
+        check("imagegen: remote endpoint without key rejected",
+              ok is False and "IMAGE_API_KEY / MODEL_API_KEY" in reason)
+        try:
+            imagegen.generate("a cat")
+            check("imagegen: generate() honors unconfigured -> ImageError", False)
+        except imagegen.ImageError as e:
+            check("imagegen: generate() honors unconfigured -> ImageError",
+                  "not configured" in str(e))
+        os.environ["IMAGE_API_KEY"] = "SENTINEL-image-key-000"
+        ok, reason = imagegen.configured()
+        check("imagegen: key slot unlocks remote endpoint",
+              ok is True and reason == "" and "SENTINEL" not in reason)
+        os.environ.pop("IMAGE_API_KEY", None)
+        os.environ["AIDOG_IMAGE_URL"] = "http://127.0.0.1:9/v1"
+        ok, reason = imagegen.configured()
+        check("imagegen: loopback endpoint needs no key", ok is True,
+              reason)
+        imagegen._settings = saved_settings
+
+        # --- argument validation (cheap, no server needed) ---
+        for bad in (0, 11, True):
+            try:
+                imagegen.generate("x", n=bad)
+                check(f"imagegen: n={bad!r} -> ImageError", False)
+            except imagegen.ImageError:
+                check(f"imagegen: n={bad!r} -> ImageError", True)
+        try:
+            imagegen.generate("   ")
+            check("imagegen: blank prompt -> ImageError", False)
+        except imagegen.ImageError:
+            check("imagegen: blank prompt -> ImageError", True)
+        try:
+            imagegen.generate("x", size="huge")
+            check("imagegen: bad size -> ImageError", False)
+        except imagegen.ImageError:
+            check("imagegen: bad size -> ImageError", True)
+
+        # --- loopback mock: b64 happy path + outbox contract ---
+        state = {"mode": "b64"}
+
+        def respond(method, path, body):
+            if state["mode"] == "404":
+                return 404, "application/json", b'{"error":{"message":"model not found"}}'
+            if state["mode"] == "500big":
+                return 500, "application/json", json.dumps(
+                    {"error": {"message": "E" * 4000}}).encode()
+            if path.endswith("/images/generations"):
+                if state["mode"] == "url":
+                    doc = {"data": [{"url": f"{mock.url}/img.png"}]}
+                else:
+                    doc = {"data": [{"b64_json": base64.b64encode(PNG_1PX).decode()}]}
+                return 200, "application/json", json.dumps(doc).encode()
+            if path.endswith("/img.png"):
+                return 200, "image/png", PNG_1PX
+            return 404, "application/json", b"{}"
+
+        mock = _LoopbackMock(respond)
+        os.environ["AIDOG_IMAGE_URL"] = mock.url + "/v1"
+
+        paths = imagegen.generate("a cat", size="512x512")
+        created.extend(paths)
+        check("imagegen: b64 happy path saves files",
+              len(paths) == 1 and paths[0].is_file()
+              and paths[0].suffix == ".png"
+              and paths[0].parent == REPO / "data" / "images"
+              and paths[0].read_bytes() == PNG_1PX,
+              str(paths))
+        queued = imagegen.drain_outbox()
+        check("imagegen: outbox queued (path, prompt) once",
+              len(queued) == 1 and queued[0][0] == paths[0]
+              and queued[0][1] == "a cat", str(len(queued)))
+        check("imagegen: drain_outbox idempotent (second drain empty)",
+              imagegen.drain_outbox() == [])
+        check("imagegen: drain_outbox leaves no residue",
+              imagegen.drain_outbox() == [])
+
+        check("imagegen: POST hits the generations route",
+              mock.requests and mock.requests[-1][0] == "POST"
+              and mock.requests[-1][1].endswith("/images/generations"),
+              mock.requests[-1][1] if mock.requests else "no request")
+        sent = json.loads(mock.requests[-1][3])
+        check("imagegen: payload shape (prompt/size/n/response_format)",
+              sent.get("prompt") == "a cat" and sent.get("size") == "512x512"
+              and sent.get("n") == 1
+              and sent.get("response_format") == "b64_json", str(sent)[:120])
+        check("imagegen: Authorization header present, key not required on loopback",
+              mock.requests[-1][2].get("Authorization", "").startswith("Bearer "))
+
+        # --- upstream 4xx: honest HTTP line, key never in the message ---
+        os.environ["IMAGE_API_KEY"] = "SENTINEL-image-key-000"
+        state["mode"] = "404"
+        try:
+            imagegen.generate("a cat")
+            check("imagegen: upstream 404 -> ImageError HTTP 404", False)
+        except imagegen.ImageError as e:
+            msg = str(e)
+            check("imagegen: upstream 404 -> ImageError HTTP 404",
+                  "HTTP 404" in msg)
+            check("imagegen: 404 message never carries the key",
+                  "SENTINEL-image-key-000" not in msg
+                  and "SENTINEL" not in msg)
+        state["mode"] = "500big"
+        try:
+            imagegen.generate("a cat")
+            check("imagegen: upstream 500 -> bounded ImageError", False)
+        except imagegen.ImageError as e:
+            check("imagegen: upstream 500 -> bounded ImageError",
+                  "HTTP 500" in str(e) and len(str(e)) <= 220
+                  and "SENTINEL" not in str(e), str(len(str(e))))
+        os.environ.pop("IMAGE_API_KEY", None)
+
+        # --- url reply leg: mock returns a url -> GET -> same bytes ---
+        state["mode"] = "url"
+        try:
+            paths2 = imagegen.generate("a dog")
+            created.extend(paths2)
+            check("imagegen: url reply leg downloads the image",
+                  len(paths2) == 1 and paths2[0].is_file()
+                  and paths2[0].read_bytes() == PNG_1PX, str(paths2))
+            check("imagegen: url leg also queues the outbox",
+                  any(p == paths2[0] for p, _ in imagegen.drain_outbox()))
+        except imagegen.ImageError as e:
+            check("imagegen: url reply leg downloads the image", False, str(e))
+    finally:
+        imagegen._settings = saved_settings
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        imagegen.drain_outbox()          # never leak into later sections
+        for p in created:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+        if mock is not None:
+            mock.close()
+
+
+def test_connectors() -> None:
+    """Car 4c: read-only BYOK connectors — slot presence, protocol headers
+    (Linear raw Authorization / Notion Bearer + Notion-Version), endpoint
+    override seams, validation and bounded upstream errors. Injected
+    transports everywhere; one loopback 500 exercises the HTTP truncation."""
+    from mycore import connectors as cn
+
+    env_keys = ("LINEAR_API_KEY", "NOTION_API_KEY",
+                "AIDOG_LINEAR_URL", "AIDOG_NOTION_URL")
+    saved = {k: os.environ.get(k) for k in env_keys}
+    mock = None
+    try:
+        for k in env_keys:
+            os.environ.pop(k, None)
+
+        # --- status(): slot PRESENCE only (values never surface) ---
+        check("connectors: status no slots -> both False",
+              cn.status() == {"linear": False, "notion": False},
+              str(cn.status()))
+        os.environ["LINEAR_API_KEY"] = "LIN-SENTINEL-000"
+        check("connectors: status sees env slot as presence only",
+              cn.status() == {"linear": True, "notion": False}
+              and "LIN-SENTINEL" not in str(cn.status()))
+        os.environ["NOTION_API_KEY"] = "NOT-SENTINEL-000"
+        check("connectors: status both slots",
+              cn.status() == {"linear": True, "notion": True})
+
+        # --- validation: rejected BEFORE any transport is reached ---
+        def unreachable(url, headers, payload, timeout):
+            raise AssertionError("transport must not be reached")
+
+        for empty in ("", "   "):
+            try:
+                cn.search(empty, transport=unreachable)
+                check("connectors: blank query -> ConnectorError", False)
+            except cn.ConnectorError as e:
+                check("connectors: blank query -> ConnectorError",
+                      "non-empty" in str(e), str(e))
+        for bad_limit in (0, 21, True, "5"):
+            try:
+                cn.search("q", limit=bad_limit, transport=unreachable)
+                check(f"connectors: limit={bad_limit!r} -> ConnectorError", False)
+            except cn.ConnectorError:
+                check(f"connectors: limit={bad_limit!r} -> ConnectorError", True)
+            except Exception as e:  # noqa: BLE001
+                check(f"connectors: limit={bad_limit!r} -> ConnectorError", False,
+                      type(e).__name__)
+        try:
+            cn.search("q", source="jira", transport=unreachable)
+            check("connectors: unknown source -> ConnectorError", False)
+        except cn.ConnectorError as e:
+            check("connectors: unknown source -> ConnectorError",
+                  "auto|linear|notion" in str(e), str(e))
+
+        # --- Linear protocol: RAW Authorization (no Bearer), GraphQL body ---
+        seen: dict = {}
+
+        def lin_ok(url, headers, payload, timeout):
+            seen.update(url=url, headers=dict(headers), payload=payload,
+                        timeout=timeout)
+            return json.dumps({"data": {"issueSearch": {"nodes": [
+                {"identifier": "ENG-1", "title": "Fix the bug",
+                 "url": "https://linear.app/issue/ENG-1"}]}}})
+
+        out = cn.search("bug fix", source="linear", transport=lin_ok)
+        check("connectors: linear Authorization is the RAW key, no Bearer",
+              seen.get("headers", {}).get("Authorization") == "LIN-SENTINEL-000")
+        check("connectors: linear default endpoint",
+              seen.get("url") == "https://api.linear.app/graphql",
+              str(seen.get("url")))
+        body = json.loads(seen.get("payload") or b"{}")
+        check("connectors: linear body carries query + limit",
+              isinstance(body.get("query"), str) and "issueSearch" in body["query"]
+              and body.get("variables") == {"q": "bug fix", "n": 5},
+              str(body)[:120])
+        check("connectors: linear compact result line",
+              out == "ENG-1 · Fix the bug · https://linear.app/issue/ENG-1",
+              out)
+
+        # --- Notion protocol: Bearer + Notion-Version, /v1/search body ---
+        seen2: dict = {}
+
+        def notion_ok(url, headers, payload, timeout):
+            seen2.update(url=url, headers=dict(headers), payload=payload)
+            return json.dumps({"results": [{"object": "page",
+                "url": "https://notion.so/roadmap-abc",
+                "properties": {"Title": {"type": "title", "title": [
+                    {"plain_text": "Roadmap"}]}}}],
+                "has_more": False, "next_cursor": None})
+
+        out = cn.search("roadmap", source="notion", limit=3,
+                        transport=notion_ok)
+        check("connectors: notion Authorization is Bearer",
+              seen2.get("headers", {}).get("Authorization")
+              == "Bearer NOT-SENTINEL-000")
+        check("connectors: notion Notion-Version pinned",
+              seen2.get("headers", {}).get("Notion-Version") == "2025-09-03",
+              str(seen2.get("headers", {}).get("Notion-Version")))
+        body2 = json.loads(seen2.get("payload") or b"{}")
+        check("connectors: notion body carries query + page_size",
+              body2 == {"query": "roadmap", "page_size": 3}, str(body2))
+        check("connectors: notion title + url line",
+              "Roadmap · https://notion.so/roadmap-abc" in out, out)
+
+        # --- auto routing: sections per configured source ---
+        auto_calls: list[str] = []
+
+        def auto(url, headers, payload, timeout):
+            auto_calls.append(url)
+            if "linear.app" in url:
+                return lin_ok(url, headers, payload, timeout)
+            return notion_ok(url, headers, payload, timeout)
+
+        out = cn.search("anything", transport=auto)
+        check("connectors: auto both slots -> two labelled sections",
+              len(auto_calls) == 2 and "[linear]" in out and "[notion]" in out,
+              out[:120])
+        os.environ.pop("NOTION_API_KEY", None)
+        auto_calls.clear()
+        out = cn.search("anything", transport=auto)
+        check("connectors: auto single slot -> only that section",
+              len(auto_calls) == 1 and "[linear]" in out
+              and "[notion]" not in out, out[:80])
+        try:
+            cn.search("anything", source="notion", transport=auto)
+            check("connectors: explicit source without slot -> slot name", False)
+        except cn.ConnectorError as e:
+            check("connectors: explicit source without slot -> slot name",
+                  "NOTION_API_KEY" in str(e), str(e))
+        check("connectors: no transport reached for the missing slot",
+              len(auto_calls) == 1)
+        os.environ.pop("LINEAR_API_KEY", None)
+        try:
+            cn.search("anything", transport=auto)
+            check("connectors: auto without slots -> both slot names", False)
+        except cn.ConnectorError as e:
+            check("connectors: auto without slots -> both slot names",
+                  "LINEAR_API_KEY" in str(e) and "NOTION_API_KEY" in str(e),
+                  str(e))
+
+        # --- empty result set stays honest (no fabrication) ---
+        os.environ["LINEAR_API_KEY"] = "LIN-SENTINEL-000"
+        out = cn.search("nothing", source="linear",
+                        transport=lambda *a: json.dumps(
+                            {"data": {"issueSearch": {"nodes": []}}}))
+        check("connectors: empty result -> honest no-results line",
+              out.startswith("[linear] no results"), out)
+
+        # --- upstream errors: bounded to ERR_SNIPPET, never unbounded ---
+        def lin_err(url, headers, payload, timeout):
+            return json.dumps({"errors": [{"message": "E" * 400}]})
+
+        try:
+            cn.search("q", source="linear", transport=lin_err)
+            check("connectors: linear upstream error truncated", False)
+        except cn.ConnectorError as e:
+            check("connectors: linear upstream error truncated to 160",
+                  len(str(e)) <= len("linear: ") + cn.ERR_SNIPPET
+                  and "E" * 161 not in str(e), str(len(str(e))))
+
+        os.environ["NOTION_API_KEY"] = "NOT-SENTINEL-000"
+
+        def notion_err(url, headers, payload, timeout):
+            return json.dumps({"code": 401, "message": "M" * 400})
+
+        try:
+            cn.search("q", source="notion", transport=notion_err)
+            check("connectors: notion upstream error truncated", False)
+        except cn.ConnectorError as e:
+            check("connectors: notion upstream error truncated to 160",
+                  len(str(e)) <= len("notion: ") + cn.ERR_SNIPPET
+                  and "M" * 161 not in str(e), str(len(str(e))))
+
+        # --- endpoint override seams + real HTTP 500 truncation leg ---
+        def respond(method, path, body):
+            return 500, "application/json", b"Z" * 4000
+
+        mock = _LoopbackMock(respond)
+        os.environ["AIDOG_LINEAR_URL"] = mock.url + "/graphql"
+        os.environ["AIDOG_NOTION_URL"] = mock.url + "/v1/search"
+        try:
+            cn.search("q", source="linear")       # default urllib transport
+            check("connectors: HTTP 500 -> bounded ConnectorError", False)
+        except cn.ConnectorError as e:
+            check("connectors: HTTP 500 body truncated to 160 chars",
+                  "HTTP 500" in str(e)
+                  and len(str(e)) <= len("HTTP 500 Internal Server Error: ")
+                  + cn.ERR_SNIPPET
+                  and "Z" * 161 not in str(e), str(len(str(e))))
+
+        seen3: dict = {}
+
+        def track(url, headers, payload, timeout):
+            seen3["url"] = url
+            return lin_ok(url, headers, payload, timeout)
+
+        cn.search("q", source="linear", transport=track)
+        check("connectors: AIDOG_LINEAR_URL override reaches transport",
+              seen3.get("url") == mock.url + "/graphql", str(seen3.get("url")))
+        seen4: dict = {}
+
+        def track_n(url, headers, payload, timeout):
+            seen4["url"] = url
+            return notion_ok(url, headers, payload, timeout)
+
+        cn.search("q", source="notion", transport=track_n)
+        check("connectors: AIDOG_NOTION_URL override reaches transport",
+              seen4.get("url") == mock.url + "/v1/search", str(seen4.get("url")))
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        if mock is not None:
+            mock.close()
+
+
+def test_media_tools() -> None:
+    """Car 4c: registry wiring — generate_image registers ALWAYS (config at
+    call time), connector_search registers ONLY with a credential slot
+    (registry.connector_note otherwise); dispatch renders saved:/ERROR:."""
+    from mycore import connectors as cn
+    from mycore import imagegen
+
+    env_keys = ("LINEAR_API_KEY", "NOTION_API_KEY")
+    saved_env = {k: os.environ.get(k) for k in env_keys}
+    saved_gen = imagegen.generate
+    saved_search = cn.search
+    try:
+        for k in env_keys:
+            os.environ.pop(k, None)
+        with tempfile.TemporaryDirectory() as td:
+            reg = build_registry(allowed_roots=[td])
+            names = reg.names()
+            check("media tools: generate_image always registered",
+                  "generate_image" in names)
+            check("media tools: connector_search absent without slots",
+                  "connector_search" not in names)
+            note = getattr(reg, "connector_note", None)
+            check("media tools: connector_note honest without slots",
+                  isinstance(note, str) and "not configured" in note
+                  and "LINEAR_API_KEY" in note, str(note))
+            schema_names = [t["function"]["name"] for t in reg.schema()]
+            check("media tools: schema has generate_image, not connector_search",
+                  "generate_image" in schema_names
+                  and "connector_search" not in schema_names)
+            check("media tools: no-slot registry equals expected set",
+                  set(names) == set(expected_tool_names()), str(names))
+
+            # unconfigured -> honest ERROR line (never a missing tool, never a raise)
+            def gen_boom(prompt, **kw):
+                raise imagegen.ImageError(
+                    "image generation not configured: no image endpoint")
+
+            imagegen.generate = gen_boom
+            try:
+                r = reg.dispatch("generate_image", {"prompt": "a cat"})
+            finally:
+                imagegen.generate = saved_gen
+            check("media tools: generate_image unconfigured -> ERROR line",
+                  r.startswith("ERROR: image generation not configured"), r[:90])
+
+            # upstream failure -> ERROR line with the HTTP status, key-free
+            def gen_500(prompt, **kw):
+                raise imagegen.ImageError("image API HTTP 502: upstream sad")
+
+            imagegen.generate = gen_500
+            try:
+                r = reg.dispatch("generate_image", {"prompt": "a cat"})
+            finally:
+                imagegen.generate = saved_gen
+            check("media tools: generate_image upstream failure -> ERROR line",
+                  r == "ERROR: image API HTTP 502: upstream sad", r[:90])
+
+            # happy path -> one 'saved: <path>' line per image
+            img = Path(td) / "gen.png"
+            img.write_bytes(PNG_1PX)
+            imagegen.generate = lambda prompt, **kw: [img, img]
+            try:
+                r = reg.dispatch("generate_image", {"prompt": "a cat",
+                                                     "size": "512x512"})
+            finally:
+                imagegen.generate = saved_gen
+            check("media tools: generate_image renders saved: lines",
+                  r == f"saved: {img}\nsaved: {img}", r[:120])
+
+            # bad arguments stay contained (never a traceback)
+            r = reg.dispatch("generate_image", {})
+            check("media tools: generate_image missing prompt -> ERROR",
+                  r.startswith("ERROR:"), r[:80])
+            # not registered without a slot -> unknown-tool ERROR, honest
+            r = reg.dispatch("connector_search", {"query": "x"})
+            check("media tools: connector_search unregistered -> unknown ERROR",
+                  r.startswith("ERROR: unknown tool 'connector_search'"), r[:80])
+
+            # --- with a slot: registered, note cleared, dispatch paths live ---
+            os.environ["LINEAR_API_KEY"] = "LIN-SENTINEL-000"
+            reg2 = build_registry(allowed_roots=[td])
+            check("media tools: connector_search registered with a slot",
+                  "connector_search" in reg2.names()
+                  and getattr(reg2, "connector_note", "unset") is None)
+            check("media tools: schema carries connector_search with a slot",
+                  "connector_search" in [t["function"]["name"]
+                                         for t in reg2.schema()])
+            check("media tools: with-slot registry equals expected set",
+                  set(reg2.names()) == set(expected_tool_names()))
+
+            cn.search = lambda query, **kw: f"[linear] hit for {query}"
+            try:
+                r = reg2.dispatch("connector_search", {"query": "bug"})
+            finally:
+                cn.search = saved_search
+            check("media tools: connector_search renders upstream text",
+                  r == "[linear] hit for bug", r[:80])
+
+            def conn_boom(query, **kw):
+                raise cn.ConnectorError(
+                    "linear not configured (set LINEAR_API_KEY in secrets.env)")
+
+            cn.search = conn_boom
+            try:
+                r = reg2.dispatch("connector_search", {"query": "bug"})
+            finally:
+                cn.search = saved_search
+            check("media tools: connector_search failure -> ERROR line",
+                  r.startswith("ERROR: linear not configured"), r[:90])
+    finally:
+        imagegen.generate = saved_gen
+        cn.search = saved_search
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def test_tg_media() -> None:
+    """Car 4c: TG media legs — getFile, the bytes download seam and the
+    multipart sendPhoto seam, through injected transports (zero network).
+    Error paths assert the token sentinel never surfaces."""
+    from mycore.tg import TgClient, TgError, MAX_FILE_BYTES
+
+    TOKEN = "777777:TOKEN-SENTINEL-tgmedia-000"
+
+    # --- getFile: file_id rides in the payload, result unwrapped ---
+    calls: list = []
+
+    def tr_get(url, payload, timeout):
+        calls.append((url, payload, timeout))
+        return json.dumps({"ok": True, "result": {
+            "file_id": "FID123", "file_unique_id": "U1",
+            "file_path": "voice/file_1.oga", "file_size": 4096}})
+
+    cli = TgClient(token=TOKEN, transport=tr_get)
+    meta = cli.get_file("FID123")
+    check("tg media: getFile unwraps result",
+          meta.get("file_path") == "voice/file_1.oga"
+          and meta.get("file_size") == 4096, str(meta))
+    check("tg media: getFile payload carries file_id",
+          b"file_id=FID123" in (calls[-1][1] or b""),
+          str(calls[-1][1]))
+    check("tg media: getFile hits the right method",
+          calls[-1][0].endswith("/getFile"))
+    try:
+        cli.get_file("")
+        check("tg media: empty file_id -> TgError", False)
+    except TgError:
+        check("tg media: empty file_id -> TgError", True)
+
+    def tr_noresult(url, payload, timeout):
+        return json.dumps({"ok": True, "result": "not-an-object"})
+
+    try:
+        TgClient(token=TOKEN, transport=tr_noresult).get_file("x")
+        check("tg media: getFile non-object result -> TgError", False)
+    except TgError:
+        check("tg media: getFile non-object result -> TgError", True)
+
+    # --- download_file: bytes seam, bounds, sanitized errors ---
+    bin_calls: list[str] = []
+
+    def bin_ok(url, timeout):
+        bin_calls.append(url)
+        return b"RIFF" + b"\x00" * 32
+
+    cli2 = TgClient(token=TOKEN, bin_transport=bin_ok)
+    blob = cli2.download_file("voice/file_1.oga")
+    check("tg media: download_file returns bytes verbatim",
+          blob == b"RIFF" + b"\x00" * 32 and len(blob) == 36)
+    check("tg media: download url shape /file/bot<token>/<path>",
+          bool(bin_calls)
+          and bin_calls[-1].endswith("/file/bot" + TOKEN + "/voice/file_1.oga"))
+
+    def bin_text(url, timeout):
+        return "not-bytes"
+
+    try:
+        TgClient(token=TOKEN, bin_transport=bin_text).download_file("a/b")
+        check("tg media: non-bytes response -> TgError", False)
+    except TgError as e:
+        check("tg media: non-bytes response -> TgError", "not bytes" in str(e),
+              str(e))
+
+    def bin_big(url, timeout):
+        return b"x" * (MAX_FILE_BYTES + 1)
+
+    try:
+        TgClient(token=TOKEN, bin_transport=bin_big).download_file("a/b")
+        check("tg media: >5MB -> TgError file too large", False)
+    except TgError as e:
+        check("tg media: >5MB -> TgError file too large",
+              str(e) == "file too large", str(e))
+
+    def bin_boom(url, timeout):
+        raise ValueError("boom carrying " + TOKEN)
+
+    try:
+        TgClient(token=TOKEN, bin_transport=bin_boom).download_file("a/b")
+        check("tg media: transport failure sanitized, token free", False)
+    except TgError as e:
+        check("tg media: transport failure sanitized, token free",
+              TOKEN not in str(e)
+              and str(e) == "download_file failed: ValueError", str(e))
+
+    def bin_never(url, timeout):
+        raise AssertionError("transport must not be reached")
+
+    cli_never = TgClient(token=TOKEN, bin_transport=bin_never)
+    for label, bad_path in (("traversal", "../etc/passwd"), ("empty", "")):
+        try:
+            cli_never.download_file(bad_path)
+            refused = False
+        except TgError:
+            refused = True
+        except AssertionError:            # transport WAS reached
+            refused = False
+        check(f"tg media: {label} file_path refused pre-transport", refused)
+
+    # --- send_photo: multipart body shape ---
+    mp_seen: dict = {}
+
+    def mp_ok(url, body, content_type, timeout):
+        mp_seen.update(url=url, body=body, ct=content_type, timeout=timeout)
+        return json.dumps({"ok": True, "result": {"message_id": 5}})
+
+    cli3 = TgClient(token=TOKEN, mp_transport=mp_ok)
+    caption = "\u56fe" * 1200 + " tail"
+    cli3.send_photo(42, PNG_1PX, caption=caption, thread_id=7)
+    ct, body = mp_seen["ct"], mp_seen["body"]
+    boundary = ct.partition("boundary=")[2]
+    check("tg media: sendPhoto multipart content-type + boundary",
+          ct.startswith("multipart/form-data; boundary=") and len(boundary) > 10,
+          ct[:60])
+    check("tg media: body closes with --boundary--",
+          body.endswith(("--" + boundary + "--\r\n").encode()))
+    check("tg media: body carries chat_id",
+          b'name="chat_id"\r\n\r\n42' in body)
+    check("tg media: body carries message_thread_id when given",
+          b'name="message_thread_id"\r\n\r\n7' in body)
+    check("tg media: photo bytes ride in the body", PNG_1PX in body)
+    marker = b'name="caption"\r\n\r\n'
+    i = body.find(marker)
+    cap = ""
+    if i >= 0:
+        j = body.find(b"\r\n--" + boundary.encode(), i)
+        cap = body[i + len(marker):j].decode("utf-8")
+    check("tg media: caption UTF-8 hard-cut at 1000 chars",
+          len(cap) == 1000 and cap == caption[:1000], str(len(cap)))
+    check("tg media: sendPhoto url ends with the method",
+          mp_seen["url"].endswith("/sendPhoto"))
+
+    mp_seen.clear()
+    cli3.send_photo(42, PNG_1PX)
+    check("tg media: no thread_id/caption -> fields absent",
+          b'name="message_thread_id"' not in mp_seen["body"]
+          and b'name="caption"' not in mp_seen["body"])
+
+    # Path leg (what the service actually passes)
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "gen.png"
+        p.write_bytes(PNG_1PX)
+        mp_seen.clear()
+        cli3.send_photo(42, p, caption="from disk")
+        check("tg media: Path photo read from disk into the body",
+              PNG_1PX in mp_seen["body"]
+              and b'name="caption"\r\n\r\nfrom disk' in mp_seen["body"])
+        try:
+            cli3.send_photo(42, Path(td) / "missing.png")
+            check("tg media: missing photo file -> TgError", False)
+        except TgError as e:
+            check("tg media: missing photo file -> TgError",
+                  "photo read failed" in str(e), str(e))
+
+    # --- send_photo error paths ---
+    def mp_err(url, body, content_type, timeout):
+        return json.dumps({"ok": False,
+                           "description": "Bad Request: chat not found"})
+
+    cli4 = TgClient(token=TOKEN, mp_transport=mp_err)
+    try:
+        cli4.send_photo(42, PNG_1PX)
+        check("tg media: ok:false -> TgError", False)
+    except TgError as e:
+        check("tg media: ok:false -> TgError with description",
+              str(e).startswith("sendPhoto: api error")
+              and "chat not found" in str(e), str(e))
+    for label, args in (("empty photo", (42, b"")),
+                        ("oversize photo", (42, b"x" * (MAX_FILE_BYTES + 1))),
+                        ("missing chat_id", ("", PNG_1PX))):
+        try:
+            cli4.send_photo(*args)
+            check(f"tg media: {label} -> TgError", False)
+        except TgError:
+            check(f"tg media: {label} -> TgError", True)
+
+    def mp_boom(url, body, content_type, timeout):
+        raise RuntimeError("leak attempt " + TOKEN)
+
+    try:
+        TgClient(token=TOKEN, mp_transport=mp_boom).send_photo(42, PNG_1PX)
+        check("tg media: sendPhoto transport failure sanitized", False)
+    except TgError as e:
+        check("tg media: sendPhoto transport failure sanitized",
+              TOKEN not in str(e)
+              and str(e) == "sendPhoto failed: RuntimeError", str(e))
+
+
+def test_service_media() -> None:
+    """Car 4c: service media legs — voice note -> getFile -> download -> STT
+    -> the SAME text path, and image drain after the text reply. stt and
+    imagegen are monkeypatched (pipeline under test, not the model); every
+    TG send stays offline through the fake transports."""
+    import contextlib
+    import io
+    from mycore import imagegen
+    from mycore import stt as stt_mod
+    from mycore.service import ChatService
+    from mycore.tg import TgError, POLL_BOT_ENV
+
+    env_saved = {k: os.environ.get(k) for k in (POLL_BOT_ENV,)}
+    os.environ[POLL_BOT_ENV] = "second-bot-TEST-token"
+    saved_transcribe = stt_mod.transcribe
+    saved_drain = imagegen.drain_outbox
+    imagegen.drain_outbox()              # never inherit leftovers
+
+    ok_chat = lambda messages=None, tools=None, **kw: fake_response(text="pong")  # noqa: E731
+    clock = [1000.0]
+    nowf = lambda: clock[0]  # noqa: E731
+    note = {"file_id": "AAA", "file_unique_id": "u",
+            "duration": 1, "file_size": 4096}
+
+    def mk_voice(update_id, uid, chat_id, voice, thread_id=None):
+        msg = {"message_id": 1,
+               "from": {"id": uid, "is_bot": False, "first_name": "x"},
+               "chat": {"id": chat_id, "type": "private"},
+               "date": 0, "voice": voice}
+        if thread_id is not None:
+            msg["message_thread_id"] = thread_id
+        return {"update_id": update_id, "message": msg}
+
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+
+            def svc_for(name, **kw):
+                fake = FakeTgTransport()
+                svc = ChatService(tdp / name, frozenset({111}), transport=fake,
+                                  chat=ok_chat, now=nowf, **kw)
+                return svc, fake
+
+            def patch_get_download(svc, size=4096):
+                """Fake getFile/download: metadata by `size`, audio = RIFF."""
+                svc.tg.get_file = lambda fid: {
+                    "file_id": fid, "file_path": "voice/x.oga",
+                    "file_size": size}
+                svc.tg.download_file = lambda p: b"RIFF-fake-audio"
+
+            # --- over-long note: rejected BEFORE getFile ---
+            s, fake = svc_for("voice_long")
+            reached = []
+
+            def never_get(file_id):
+                reached.append(file_id)
+                raise AssertionError("getFile must not be reached")
+
+            s.tg.get_file = never_get
+            s.handle_update(mk_voice(1, 111, 100, dict(note, duration=120)))
+            check("svc media: >60s note -> tooLong line, no getFile",
+                  reached == [] and bool(fake.sends)
+                  and "too long" in fake.sends[-1][1]
+                  and "120s" in fake.sends[-1][1], str(fake.sends))
+
+            # --- oversize file_size: rejected BEFORE download ---
+            s, fake = svc_for("voice_big")
+            patch_get_download(s, size=6_000_000)
+            pulled = []
+            s.tg.download_file = lambda p: pulled.append(p) or b"RIFF"
+            s.handle_update(mk_voice(2, 111, 101, note))
+            check("svc media: file_size pre-reject skips the download",
+                  pulled == [] and bool(fake.sends)
+                  and "could not be transcribed" in fake.sends[-1][1]
+                  and "file too large" in fake.sends[-1][1], str(fake.sends))
+            check("svc media: pre-reject logged as STT_FAIL",
+                  "STT_FAIL" in s.log.read_text())
+
+            # --- STT failure (engine down / module absent) -> honest line ---
+            def stt_boom(data, **kw):
+                raise stt_mod.SttError("model 'base' unavailable: OSError")
+
+            stt_mod.transcribe = stt_boom
+            s, fake = svc_for("voice_stt_err")
+            patch_get_download(s)
+            s.handle_update(mk_voice(3, 111, 102, note))
+            check("svc media: stt exception -> failed line with reason",
+                  bool(fake.sends)
+                  and "could not be transcribed" in fake.sends[-1][1]
+                  and "model 'base' unavailable" in fake.sends[-1][1],
+                  str(fake.sends))
+
+            def stt_absent(data, **kw):
+                raise ModuleNotFoundError("No module named 'faster_whisper'")
+
+            stt_mod.transcribe = stt_absent
+            s, fake = svc_for("voice_stt_absent")
+            patch_get_download(s)
+            s.handle_update(mk_voice(4, 111, 103, note))
+            check("svc media: stt module absent -> failed line, loop alive",
+                  bool(fake.sends)
+                  and "could not be transcribed" in fake.sends[-1][1]
+                  and "faster_whisper" in fake.sends[-1][1], str(fake.sends))
+
+            # --- empty transcript -> empty line ---
+            stt_mod.transcribe = lambda data, **kw: {
+                "text": "   ", "language": "en", "duration": 0.5}
+            s, fake = svc_for("voice_empty")
+            patch_get_download(s)
+            s.handle_update(mk_voice(5, 111, 104, note))
+            check("svc media: empty transcript -> empty line",
+                  bool(fake.sends)
+                  and "no words came through" in fake.sends[-1][1],
+                  str(fake.sends))
+
+            # --- happy path: topic key, model reply, transcript stays out of logs ---
+            stt_mod.transcribe = lambda data, **kw: {
+                "text": "hello there", "language": "en", "duration": 0.4}
+            s, fake = svc_for("voice_happy")
+            patch_get_download(s)
+            s.handle_update(mk_voice(6, 111, 105, note, thread_id=77))
+            check("svc media: voice happy path -> model reply in thread",
+                  fake.sends == [("105", "pong")]
+                  and fake.send_threads == ["77"], str(fake.sends))
+            sess = tdp / "voice_happy" / "sessions" / "105:77.jsonl"
+            log_text = s.log.read_text()
+            check("svc media: voice uses the topic session key",
+                  sess.is_file() and "hello there" in sess.read_text(),
+                  str(sess))
+            check("svc media: STT_OK logged without transcript content",
+                  "STT_OK" in log_text and "hello there" not in log_text)
+
+            # --- transcribed COMMAND takes the command path ---
+            stt_mod.transcribe = lambda data, **kw: {
+                "text": "/help", "language": "en", "duration": 0.3}
+            s, fake = svc_for("voice_cmd")
+            patch_get_download(s)
+            s.handle_update(mk_voice(7, 111, 106, note))
+            check("svc media: transcribed /help runs the command",
+                  bool(fake.sends) and fake.sends[-1][1].startswith("Commands:"),
+                  str(fake.sends)[:100])
+
+            # --- unauthorized sender: silent, never even getFile ---
+            stt_mod.transcribe = lambda data, **kw: {"text": "hi",
+                                                     "language": "en",
+                                                     "duration": 0.2}
+            s, fake = svc_for("voice_deny")
+            reached = []
+            s.tg.get_file = never_get
+            s.handle_update(mk_voice(8, 999, 107, note))
+            check("svc media: unauthorized voice -> silent, no getFile",
+                  fake.sends == [] and reached == [])
+
+            # --- image drain: text first, photo after, multipart really sent ---
+            png = tdp / "gen.png"
+            png.write_bytes(PNG_1PX)
+            long_prompt = "a cat picture " + "x" * 1100
+            imagegen.drain_outbox = lambda: [(png, long_prompt)]
+            s, fake = svc_for("photo_ok")
+            mp_seen: list = []
+
+            def mp(url, body, content_type, timeout):
+                mp_seen.append((url, body, content_type))
+                return json.dumps({"ok": True, "result": {"message_id": 9}})
+
+            s.tg.mp_transport = mp
+            events: list = []
+            orig_send, orig_photo = s._send, s.tg.send_photo
+
+            def rec_send(chat_id, text, thread_id=None):
+                events.append(("text", text))
+                return orig_send(chat_id, text, thread_id=thread_id)
+
+            def rec_photo(chat_id, photo, caption="", thread_id=None):
+                events.append(("photo", caption))
+                return orig_photo(chat_id, photo, caption=caption,
+                                  thread_id=thread_id)
+
+            s._send, s.tg.send_photo = rec_send, rec_photo
+            s.handle_update(mk_update(9, 111, 108, "hi there"))
+            check("svc media: drain order = text then photo",
+                  events == [("text", "pong"), ("photo", long_prompt[:1000])],
+                  str(events)[:120])
+            check("svc media: photo really went out multipart",
+                  len(mp_seen) == 1 and PNG_1PX in mp_seen[0][1]
+                  and b'name="chat_id"\r\n\r\n108' in mp_seen[0][1]
+                  and mp_seen[0][2].startswith("multipart/form-data; boundary="))
+            check("svc media: SEND_PHOTO_OK logged",
+                  "SEND_PHOTO_OK" in s.log.read_text())
+
+            # --- photo failure never touches the delivered text ---
+            imagegen.drain_outbox = lambda: [(png, "p")]
+            s, fake = svc_for("photo_fail")
+
+            def mp_boom(url, body, content_type, timeout):
+                raise TgError("boom")
+
+            s.tg.mp_transport = mp_boom
+            s.handle_update(mk_update(10, 111, 109, "hi again"))
+            check("svc media: photo failure keeps the text reply",
+                  fake.sends == [("109", "pong")]
+                  and "SEND_PHOTO_FAIL" in s.log.read_text(), str(fake.sends))
+
+            # --- dry-run: zero outbound, action logged ---
+            fake_d = FakeTgTransport()
+            s = ChatService(tdp / "photo_dry", frozenset({111}),
+                            transport=fake_d, chat=ok_chat, dry_run=True,
+                            now=nowf)
+            mp_out: list = []
+            s.tg.mp_transport = lambda *a: mp_out.append(a)
+            imagegen.drain_outbox = lambda: [(png, "p")]
+            with contextlib.redirect_stdout(io.StringIO()):
+                s.handle_update(mk_update(11, 111, 110, "dry hi"))
+            check("svc media: dry-run photo -> zero outbound, DRYRUN logged",
+                  mp_out == [] and fake_d.sends == []
+                  and "DRYRUN_SEND_PHOTO" in s.log.read_text())
+
+            # --- drain itself failing/malformed: never bubbles up ---
+            def drain_boom():
+                raise RuntimeError("drain boom")
+
+            imagegen.drain_outbox = drain_boom
+            s, fake = svc_for("photo_drain_err")
+            s.handle_update(mk_update(12, 111, 111, "still alive"))
+            check("svc media: drain exception -> PHOTO_DRAIN_FAIL, text kept",
+                  fake.sends == [("111", "pong")]
+                  and "PHOTO_DRAIN_FAIL" in s.log.read_text(), str(fake.sends))
+            imagegen.drain_outbox = lambda: [(None,)]
+            s, fake = svc_for("photo_drain_bad")
+            s.handle_update(mk_update(13, 111, 112, "still alive 2"))
+            check("svc media: malformed outbox entry skipped, turn survives",
+                  fake.sends == [("112", "pong")], str(fake.sends))
+    finally:
+        stt_mod.transcribe = saved_transcribe
+        imagegen.drain_outbox = saved_drain
+        imagegen.drain_outbox()
+        for k, v in env_saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
 def main() -> int:
     test_model()
     test_registry_and_tools()
@@ -6297,6 +7380,12 @@ def main() -> int:
     test_browser()
     test_terminal()
     test_localmodels()
+    test_stt()
+    test_imagegen()
+    test_connectors()
+    test_media_tools()
+    test_tg_media()
+    test_service_media()
     print(f"\n{len(PASS)} pass · {len(FAIL)} fail")
     if FAIL:
         print("failed: " + ", ".join(FAIL))

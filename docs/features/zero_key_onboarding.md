@@ -103,5 +103,5 @@ before the manual `base_url` prompt.**
   requiring the server; the live-wire leg lives in the repo-local E2E script
   `tmp/e2e_car4b.py` (tmp harness, outside the gate suites).
 
-Suite totals after car 4b: core **840/840**, smoke **123/123**, wizard
+Suite totals after car 4c: core **959/959**, smoke **142/142**, wizard
 **99/99**.

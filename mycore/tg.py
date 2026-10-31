@@ -5,6 +5,9 @@ Surface (stdlib urllib, injectable transport for offline tests):
     TgClient(...).get_me()              # read-only identity probe
     TgClient(...).send_message(chat, text)
     TgClient(...).send_chat_action(chat)  # typing heartbeat (stateless)
+    TgClient(...).get_file(file_id)      # getFile -> {file_path, file_size, ...}
+    TgClient(...).download_file(path)    # binary file download (bytes seam)
+    TgClient(...).send_photo(chat, ...)  # multipart/form-data photo upload
     TgClient(...).run_poll_loop(handler)  # getUpdates long-poll loop
 
 CONFLICT GUARD (owner system: one bot token = one getUpdates consumer):
@@ -27,11 +30,14 @@ import os
 import time
 import urllib.error
 import urllib.request
+import uuid
+from pathlib import Path
 from typing import Callable
 
 DEFAULT_API = "https://api.telegram.org"
 LIVE_BOT_ENV = "TELEGRAM_BOT_TOKEN"      # transition gateway's own bot (send-only safe)
 POLL_BOT_ENV = "MYCORE_TG_TOKEN"         # dedicated second bot for polling
+MAX_FILE_BYTES = 5_000_000               # TG download/upload cap (car 4c voice)
 
 
 class TgError(RuntimeError):
@@ -57,10 +63,71 @@ def _urllib_transport(url: str, payload: bytes | None, timeout: float) -> str:
         raise TgError(f"transport failure: {type(e).__name__}") from None
 
 
+# BINARY transport: (url, timeout) -> raw bytes. The text seam above decodes
+# utf-8 and therefore cannot carry audio/photo payloads (car 4c).
+BinTransport = Callable[[str, float], bytes]
+
+
+def _urllib_bin_transport(url: str, timeout: float) -> bytes:
+    """Default binary GET. Reads at most MAX_FILE_BYTES + 1 so an oversized
+    response can never balloon memory — download_file turns the +1 into an
+    honest 'file too large' TgError."""
+    req = urllib.request.Request(url, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read(MAX_FILE_BYTES + 1)
+    except urllib.error.HTTPError as e:
+        # Only status/reason: the URL embeds the token — never touch it.
+        raise TgError(f"HTTP {e.code} {e.reason}") from None
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        raise TgError(f"transport failure: {type(e).__name__}") from None
+
+
+# MULTIPART transport: (url, body_bytes, content_type_with_boundary,
+# timeout) -> response text. Needed because _call's transport only speaks
+# application/x-www-form-urlencoded and cannot upload a file (car 4c).
+MPTransport = Callable[[str, bytes, str, float], str]
+
+
+def _urllib_mp_transport(url: str, payload: bytes, content_type: str,
+                         timeout: float) -> str:
+    req = urllib.request.Request(url, data=payload, method="POST")
+    req.add_header("Content-Type", content_type)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        raise TgError(f"HTTP {e.code} {e.reason}") from None
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        raise TgError(f"transport failure: {type(e).__name__}") from None
+
+
+def _multipart_body(boundary: str, fields: list[tuple[str, str]],
+                    file_field: str, filename: str, blob: bytes) -> bytes:
+    """RFC 7578 form body: plain fields first, then the file part. Names are
+    code-controlled literals (never user input), so no quoting is needed."""
+    out = bytearray()
+    for name, value in fields:
+        out += f"--{boundary}\r\n".encode("ascii")
+        out += f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("ascii")
+        out += value.encode("utf-8")
+        out += b"\r\n"
+    out += f"--{boundary}\r\n".encode("ascii")
+    out += (f'Content-Disposition: form-data; name="{file_field}"; '
+            f'filename="{filename}"\r\n').encode("ascii")
+    out += b"Content-Type: application/octet-stream\r\n\r\n"
+    out += blob
+    out += b"\r\n"
+    out += f"--{boundary}--\r\n".encode("ascii")
+    return bytes(out)
+
+
 class TgClient:
     def __init__(self, token: str | None = None, token_env: str = LIVE_BOT_ENV,
                  api_base: str = DEFAULT_API,
-                 transport: Transport | None = None, timeout: float = 60.0) -> None:
+                 transport: Transport | None = None, timeout: float = 60.0,
+                 *, bin_transport: BinTransport | None = None,
+                 mp_transport: MPTransport | None = None) -> None:
         # Transport read timeout must EXCEED the long-poll window (getUpdates
         # caps at 50s; service polls at 30s) — equal values deadlock every poll
         # (server holds, client gives up: observed POLL_ERR TimeoutError storm,
@@ -69,6 +136,8 @@ class TgClient:
         self._token_env = token_env
         self.api_base = api_base.rstrip("/")
         self.transport = transport or _urllib_transport
+        self.bin_transport = bin_transport or _urllib_bin_transport
+        self.mp_transport = mp_transport or _urllib_mp_transport
         self.timeout = timeout
 
     # ------------------------------------------------------------- guards ---
@@ -123,6 +192,13 @@ class TgClient:
             raise                       # already sanitized (no URL inside)
         except Exception as e:          # noqa: BLE001 — sanitize unknowns too
             raise TgError(f"{method} failed: {type(e).__name__}") from None
+        return self._parse(method, text)
+
+    @staticmethod
+    def _parse(method: str, text: str) -> dict:
+        """Response JSON -> result envelope check, shared by urlencoded,
+        multipart and any future seam. Error text carries the METHOD only —
+        a response body could theoretically echo the URL, never trust it."""
         try:
             doc = json.loads(text)
         except ValueError:
@@ -168,6 +244,82 @@ class TgClient:
         return self._call("sendChatAction", {"chat_id": chat_id,
                                               "action": action.strip()})
 
+    # -------------------------------------------------- media (car 4c) ---
+    def get_file(self, file_id: str) -> dict:
+        """getFile -> the `result` dict ({file_id, file_unique_id, file_path,
+        file_size, ...}). file_path is required for download_file()."""
+        if not isinstance(file_id, str) or not file_id:
+            raise TgError("file_id is required")
+        doc = self._call("getFile", {"file_id": file_id})
+        result = doc.get("result")
+        if not isinstance(result, dict):
+            raise TgError("getFile: result is not an object")
+        return result
+
+    def download_file(self, file_path: str) -> bytes:
+        """Binary GET of {api}/file/bot{token}/{file_path} through the bytes
+        seam (the text seam decodes utf-8 and cannot carry audio). Bounded at
+        MAX_FILE_BYTES. Error paths report method + exception type only —
+        the URL embeds the token and must never surface."""
+        self._require()
+        if not isinstance(file_path, str) or not file_path:
+            raise TgError("file_path is required")
+        if ".." in file_path:
+            raise TgError("download_file: bad file_path")
+        try:
+            data = self.bin_transport(
+                f"{self.api_base}/file/bot{self._token}/{file_path}",
+                self.timeout)
+        except TgError:
+            raise                       # already sanitized (no URL inside)
+        except Exception as e:          # noqa: BLE001 — sanitize unknowns too
+            raise TgError(f"download_file failed: {type(e).__name__}") from None
+        if not isinstance(data, (bytes, bytearray)):
+            raise TgError("download_file: response is not bytes")
+        if len(data) > MAX_FILE_BYTES:
+            raise TgError("file too large")
+        return bytes(data)
+
+    def send_photo(self, chat_id: str | int, photo: bytes | Path,
+                   caption: str = "", thread_id: int | None = None) -> dict:
+        """multipart/form-data sendPhoto (a file upload — the urlencoded _call
+        seam cannot carry bytes). caption hard-cut at 1000 chars (Telegram's
+        own cap is 1024; service passes prompt[:1000]). thread_id rides as
+        message_thread_id when given — None omits the field entirely."""
+        self._require()
+        if not chat_id:
+            raise TgError("chat_id is required")
+        if isinstance(photo, (str, Path)):
+            try:
+                photo = Path(photo).read_bytes()
+            except OSError as e:
+                raise TgError(f"photo read failed: {type(e).__name__}") from None
+        if not isinstance(photo, (bytes, bytearray)) or not photo:
+            raise TgError("photo must be non-empty bytes or a Path")
+        photo = bytes(photo)
+        if len(photo) > MAX_FILE_BYTES:
+            raise TgError("file too large")
+        if not isinstance(caption, str):
+            caption = ""
+        caption = caption[:1000]
+        fields: list[tuple[str, str]] = [("chat_id", str(chat_id))]
+        if thread_id is not None:
+            fields.append(("message_thread_id", str(thread_id)))
+        if caption:
+            fields.append(("caption", caption))
+        boundary = "mycore" + uuid.uuid4().hex
+        body = _multipart_body(boundary, fields, "photo", "photo.jpg", photo)
+        content_type = f"multipart/form-data; boundary={boundary}"
+        try:
+            # Method name only in error paths: _url() embeds the token.
+            text = self.mp_transport(self._url("sendPhoto"), body,
+                                     content_type, self.timeout)
+        except TgError:
+            raise                       # already sanitized (no URL inside)
+        except Exception as e:          # noqa: BLE001 — sanitize unknowns too
+            raise TgError(f"sendPhoto failed: {type(e).__name__}") from None
+        return self._parse("sendPhoto", text)
+
     def get_updates(self, offset: int | None = None, timeout: int = 30) -> list[dict]:
         """Long-poll getUpdates. Caller must have obtained the token through
         polling_token() — this method itself uses whatever token this client
@@ -194,7 +346,9 @@ class TgClient:
         """
         client = TgClient(token=self.polling_token(), token_env=POLL_BOT_ENV,
                           api_base=self.api_base, transport=self.transport,
-                          timeout=self.timeout)
+                          timeout=self.timeout,
+                          bin_transport=self.bin_transport,
+                          mp_transport=self.mp_transport)
         offset: int | None = None
         processed = 0
         errors = 0

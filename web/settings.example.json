@@ -23,5 +23,17 @@
     "daily_at": "09:10",
     "weekly_day": "sun",
     "monthly_day": 1
+  },
+  "media": {
+    "image_base_url": "",
+    "image_model": "",
+    "tts_base_url": "",
+    "tts_model": "",
+    "stt_model": "base",
+    "tts_engine": "edge",
+    "wake_phrases": [
+      "hey aidog",
+      "你好艾多"
+    ]
   }
 }

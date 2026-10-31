@@ -150,6 +150,8 @@ DEFAULT_POLL_TIMEOUT = 30              # long-poll seconds (0 in --once mode)
 REFLECT_CHECK_SEC = 60.0               # evolution cron evaluation cadence
 TYPING_INTERVAL_SEC = 4.0               # TG typing heartbeat (5s Telegram TTL)
 CHANNEL_POLL_SEC = 30                   # channel inbound leg cadence (seconds)
+VOICE_MAX_SECONDS = 60                  # TG voice/audio cap before STT (car 4c)
+VOICE_MAX_BYTES = 5_000_000             # download cap before STT (5MB, car 4c)
 
 # Honest one-line replies. The English constants stay importable (tests and
 # tooling compare against them); live replies resolve the SAME keys through
@@ -524,17 +526,26 @@ class ChatService:
             self._warn_denied(cid)
             return                                   # no reply, ever
         text = msg.get("text")
-        if not isinstance(text, str) or not text.strip():
-            return
-        text = text.strip()
         # Forum topic (car 4a-M3): a threaded message keeps ITS OWN pipeline
         # session under "{cid}:{tid}" so two topics never share context;
         # commands (/cron, /checkpoint, /model, ...) stay chat-level by
         # design — their state is chat-wide. The reply threads back via
         # message_thread_id when the update carried one (tg.send_message).
+        # Computed BEFORE the voice branch so voice replies thread identically.
         tid = msg.get("message_thread_id")
         if not isinstance(tid, int) or isinstance(tid, bool):
             tid = None
+        if not isinstance(text, str) or not text.strip():
+            # Car 4c: a voice/audio note (no usable text) -> STT -> the very
+            # same command/pipeline path below. Anything else without text
+            # is still ignored, exactly as before.
+            med = msg.get("voice")
+            if not isinstance(med, dict):
+                med = msg.get("audio")
+            if isinstance(med, dict):
+                self._handle_voice(cid, med, tid)
+            return
+        text = text.strip()
         try:
             if text.startswith("/"):
                 reply = self._command(cid, text)
@@ -547,6 +558,121 @@ class ChatService:
             reply = self._t("err.internal")
         if reply:
             self._send(cid, reply, thread_id=tid)
+        self._drain_photos(cid, tid)      # text first, photos after (car 4c)
+
+    def _handle_voice(self, chat_id: int, med: dict,
+                      tid: int | None) -> None:
+        """Voice/audio note -> getFile -> download -> STT -> the SAME text
+        path as a typed message (car 4c).
+
+        Fail-soft by contract: every failure replies with an honest locale
+        line (voice.stt.*) and NEVER raises into the poll loop. Logs carry
+        chat/ms/lang/chars only — never transcript content, never a URL
+        (download/getFile URLs embed the token; TgError already sanitizes)."""
+        try:
+            dur = med.get("duration")
+            if (isinstance(dur, (int, float)) and not isinstance(dur, bool)
+                    and dur > VOICE_MAX_SECONDS):
+                self._send(chat_id,
+                           self._t("voice.stt.tooLong", n=int(dur)),
+                           thread_id=tid)
+                return
+            file_id = med.get("file_id")
+            if not isinstance(file_id, str) or not file_id:
+                raise TgError("missing file_id")
+            meta = self.tg.get_file(file_id)
+            size = meta.get("file_size") if isinstance(meta, dict) else None
+            if (isinstance(size, int) and not isinstance(size, bool)
+                    and size > VOICE_MAX_BYTES):
+                # Oversize BEFORE downloading: honest failure, no wasted pull.
+                reason = "file too large (5MB limit)"
+                self.log.write("STT_FAIL", f"chat={redact_chat(chat_id)}",
+                               f"err={reason}")
+                self._send(chat_id,
+                           self._t("voice.stt.failed", reason=reason),
+                           thread_id=tid)
+                return
+            file_path = meta.get("file_path") if isinstance(meta, dict) else None
+            if not isinstance(file_path, str) or not file_path:
+                raise TgError("missing file_path")
+            t0 = self._now()
+            data = self.tg.download_file(file_path)
+            from . import stt        # delayed: media module is optional (4c-A)
+            res = stt.transcribe(data)
+        except Exception as e:  # noqa: BLE001 — one bad note must not kill the loop
+            reason = _scrub_paths(str(e)).strip()[:120] or type(e).__name__
+            self.log.write("STT_FAIL", f"chat={redact_chat(chat_id)}",
+                           f"err={type(e).__name__}:{reason[:80]}")
+            self._send(chat_id,
+                       self._t("voice.stt.failed", reason=reason),
+                       thread_id=tid)
+            return
+        out = res.get("text") if isinstance(res, dict) else ""
+        reply = str(out or "").strip()
+        if not reply:
+            self.log.write("STT_FAIL", f"chat={redact_chat(chat_id)}",
+                           "err=empty transcript")
+            self._send(chat_id, self._t("voice.stt.empty"), thread_id=tid)
+            return
+        lang = str((res.get("language") if isinstance(res, dict) else "") or "?")
+        self.log.write("STT_OK", f"chat={redact_chat(chat_id)}",
+                       f"ms={int(max(0.0, self._now() - t0) * 1000)}",
+                       f"lang={lang[:16]}", f"chars={len(reply)}")
+        # From here: the EXACT typed-text path (command, session key rule,
+        # single _send) — voice is only another input method.
+        try:
+            if reply.startswith("/"):
+                out_text = self._command(chat_id, reply)
+            else:
+                skey = f"{chat_id}:{tid}" if tid is not None else chat_id
+                out_text = self._pipeline(chat_id, reply, session_key=skey)
+        except Exception as e:  # noqa: BLE001 — one bad turn must not kill the loop
+            self.log.write("UPDATE_ERR", f"chat={redact_chat(chat_id)}",
+                           f"err={type(e).__name__}")
+            out_text = self._t("err.internal")
+        if out_text:
+            self._send(chat_id, out_text, thread_id=tid)
+        self._drain_photos(chat_id, tid)
+
+    def _drain_photos(self, chat_id: int, tid: int | None) -> None:
+        """Send images generated during this turn (car 4c): text reply
+        FIRST, photos after; a photo failure only logs — it can never touch
+        the delivered text. dry-run previews without transmitting.
+
+        imagegen is optional (car 4c-A): an import failure is a silent no-op,
+        so a partially-landed tree never breaks the loop."""
+        try:
+            from . import imagegen
+        except Exception:  # noqa: BLE001 — media module absent = no-op
+            return
+        try:
+            items = imagegen.drain_outbox()
+        except Exception as e:  # noqa: BLE001 — drain must never bubble up
+            self.log.write("PHOTO_DRAIN_FAIL", f"chat={redact_chat(chat_id)}",
+                           f"err={type(e).__name__}")
+            return
+        if not items:
+            return
+        for item in items:
+            try:
+                path, prompt = item[0], str(item[1])
+                name = Path(path).name
+            except Exception:  # noqa: BLE001 — malformed entry: skip, keep going
+                continue
+            if self.dry_run:
+                self.log.write("DRYRUN_SEND_PHOTO", f"chat={redact_chat(chat_id)}",
+                               f"name={name}")
+                continue
+            try:
+                self.tg.send_photo(chat_id, Path(path), caption=prompt[:1000],
+                                   thread_id=tid)
+                self.log.write("SEND_PHOTO_OK", f"chat={redact_chat(chat_id)}",
+                               f"name={name}")
+            except Exception as e:  # noqa: BLE001 — photo failure never harms text
+                self.log.write("SEND_PHOTO_FAIL", f"chat={redact_chat(chat_id)}",
+                               f"name={name}",
+                               f"err={type(e).__name__}:"
+                               f"{_scrub_paths(str(e))[:80]}")
 
     def _send(self, chat_id: int, text: str,
               thread_id: int | None = None) -> bool:

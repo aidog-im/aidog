@@ -51,6 +51,7 @@ async function loadLang(lang) {
   });
   applyStaticText();
   renderStatus(); renderUsage(); renderVersion(); renderVoice();
+  mediaLangRefresh();          // voice session + image badge texts follow too
   chatBadge(chatBusy);            // badge label follows the active language
   refreshEventTexts();
   setView(currentView, false);    // re-resolve the view title in the new language
@@ -237,6 +238,477 @@ async function armVoice() {
   if (!voiceEngine) await refreshVoiceCap();
   renderVoice();
   speak(t("voice.greet", "Voice channel online."));
+}
+
+/* ---------------------------------------------------- media face (4c) ----
+   Voice session: one independent MediaRecorder segment every 2.5s -> POST
+   /api/stt (local contract, no token) -> wake-phrase match over normalized
+   text -> short command capture -> the existing send chain -> the reply's
+   first 200 chars through the existing /api/say chain (same volume logic).
+   Image trial: POST /api/image with the existing Bearer token -> thumbnails
+   from /api/media/<name>. Every failure shows its real reason — never a
+   silent pretend. All new strings go through t(key, fallback). */
+
+const VS_CYCLE_MS = 2500;       // one self-contained audio segment per tick
+const VS_CMD_MS = 10000;        // command capture window after the wake phrase
+const VS_REPLY_MAX_MS = 120000; // wait for the streamed reply before giving up
+let capsData = null;
+let vsOn = false, vsStream = null, vsRec = null, vsMime = "";
+let vsPhase = "wake", vsCmdText = "", vsPending = false;
+let vsCycleTimer = null, vsCmdTimer = null, vsReplyIv = null;
+let imgBusy = false;
+
+async function refreshCaps() {
+  try { capsData = await fetch("/api/capabilities").then(r => r.json()); }
+  catch (e) { capsData = null; }
+  imgCapHint();
+}
+
+function mediaLangRefresh() {
+  vsUi();
+  if (!vsOn) vsState(t("voice.vs.idle", "mic off — tap MIC to listen"), false);
+  imgCapHint();
+}
+
+function vsState(text, err) {
+  const el = document.getElementById("vsState");
+  if (!el) return;
+  el.textContent = text;
+  el.classList.toggle("err", !!err);
+}
+
+function vsLive(text) {
+  const el = document.getElementById("vsLive");
+  if (!el) return;
+  el.textContent = text || "";
+  el.hidden = !text;
+}
+
+function vsUi() {
+  const btn = document.getElementById("micBtn");
+  if (btn) {
+    btn.setAttribute("aria-pressed", String(vsOn));
+    btn.classList.toggle("primary", vsOn);
+    btn.textContent = vsOn ? t("voice.vs.micStop", "STOP")
+                           : t("voice.vs.micStart", "MIC");
+  }
+  const badge = document.getElementById("vsBadge");
+  if (badge) {
+    badge.textContent = !vsOn ? t("voice.vs.badgeIdle", "idle")
+      : vsPhase === "cmd" ? t("voice.vs.badgeCmd", "command")
+      : t("voice.vs.badgeListen", "listening");
+    badge.classList.toggle("live", vsOn);
+  }
+}
+
+function vsNormalize(s) {          // lower + punctuation/symbols -> spaces
+  return String(s).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ").trim();
+}
+
+// Normalized text + per-char map back to the ORIGINAL string (so the wake
+// matcher can slice the command out of the untouched transcript). Built
+// char-by-char; a non-alnum run collapses to ONE space whose map entry points
+// at the next original alnum char (trailing space = trimmed).
+function vsNormMap(s) {
+  const src = String(s);
+  const chars = [], idx = [];
+  let space = false;
+  for (let i = 0; i < src.length; i++) {
+    if (/[\p{L}\p{N}]/u.test(src[i])) {
+      if (space && chars.length) { chars.push(" "); idx.push(i); }
+      space = false;
+      const lc = src[i].toLowerCase();
+      chars.push(lc.slice(0, 1)); idx.push(i);
+    } else if (chars.length) {
+      space = true;
+    }
+  }
+  return { norm: chars.join(""), map: idx, len: src.length };
+}
+
+function vsCompact(norm) {         // drop spaces; norm-index of every kept char
+  const cp = [], idx = [];
+  for (let i = 0; i < norm.length; i++) {
+    if (norm[i] !== " ") { cp.push(norm[i]); idx.push(i); }
+  }
+  return { cp: cp.join(""), idx };
+}
+
+function vsEditDist(a, b, max) {   // bounded Levenshtein; > max => max + 1
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+function vsPhrasesRaw() {          // settings.media.wake_phrases, honest default
+  const raw = settings.media && Array.isArray(settings.media.wake_phrases)
+    ? settings.media.wake_phrases : [];
+  const list = raw.filter(p => typeof p === "string" && p.trim())
+                  .map(p => p.trim());
+  return list.length ? list : ["hey aidog", "\u4f60\u597d\u827e\u591a"];
+}
+
+function vsPhrases() { return vsPhrasesRaw().map(vsNormalize).filter(Boolean); }
+
+// Wake match over the normalized transcript: exact substring first, then a
+// fuzzy pass on the space-stripped forms — ASR renders "Hey Aidog" as
+// "Hey A-Dog" (and the zh default as a homophone variant), so bounded edit
+// distance keeps the shipped defaults usable; tol = 2 for >= 8 chars else 1. Returns the
+// original-text span AFTER the phrase, or null when the phrase is absent.
+function vsMatchWake(src) {
+  const nm = vsNormMap(src);
+  for (const p of vsPhrases()) {
+    if (!p) continue;
+    const ei = nm.norm.indexOf(p);
+    if (ei >= 0) {
+      const e = ei + p.length;
+      const orig = e < nm.map.length ? nm.map[e]
+        : (nm.map.length ? nm.map[nm.map.length - 1] + 1 : nm.len);
+      return { rest: String(src).slice(orig).trim() };
+    }
+    const cpP = p.replace(/ /g, "");
+    if (!cpP) continue;
+    const cpN = vsCompact(nm.norm);
+    const tol = cpP.length >= 8 ? 2 : 1;
+    let best = null;   // (dist, -w, i): tightest match, then longest window,
+    //                   then earliest position — a short window with dist==tol
+    //                   must not steal the span from a longer tighter one
+    for (let w = Math.max(1, cpP.length - tol);
+         w <= cpP.length + tol; w++) {
+      for (let i = 0; i + w <= cpN.cp.length; i++) {
+        const d = vsEditDist(cpN.cp.substr(i, w), cpP, tol);
+        if (d > tol) continue;
+        if (!best || d < best.d || (d === best.d && w > best.w)) {
+          best = { d, w, i };
+        }
+      }
+    }
+    if (best) {
+      const e = best.i + best.w;
+      const orig = e < cpN.idx.length ? nm.map[cpN.idx[e]] : nm.len;
+      return { rest: String(src).slice(orig).trim() };
+    }
+  }
+  return null;
+}
+
+function vsWakeHit(text) { return vsMatchWake(text) !== null; }
+
+function vsRestAfter(text) {       // words spoken after the wake phrase
+  const m = vsMatchWake(text);
+  return m ? m.rest : "";
+}
+
+async function vsToggle() { if (vsOn) vsStop(); else await vsStart(); }
+
+async function vsStart() {
+  if (vsOn) return;
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia ||
+      typeof MediaRecorder === "undefined") {
+    vsState(t("voice.vs.noSupport",
+              "this browser cannot record audio (no MediaRecorder)"), true);
+    return;
+  }
+  if (capsData && capsData.media && capsData.media.stt &&
+      capsData.media.stt.available === false) {
+    vsState(t("voice.vs.sttDown",
+              "speech-to-text unavailable on the server — voice session not started"),
+            true);
+    return;
+  }
+  let stream = null;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    vsState(t("voice.vs.noMic",
+              "microphone access denied — allow it in the browser and retry"), true);
+    return;
+  }
+  const cands = ["audio/webm;codecs=opus", "audio/webm",
+                 "audio/ogg;codecs=opus", "audio/mp4"];
+  let mime = "";
+  try {
+    mime = cands.find(m => MediaRecorder.isTypeSupported &&
+                           MediaRecorder.isTypeSupported(m)) || "";
+  } catch (e) { mime = ""; }
+  let rec = null;
+  try {
+    rec = mime ? new MediaRecorder(stream, { mimeType: mime })
+               : new MediaRecorder(stream);
+  } catch (e) {
+    stream.getTracks().forEach(tr => { try { tr.stop(); } catch (e2) {} });
+    vsState(t("voice.vs.noSupport",
+              "this browser cannot record audio (no MediaRecorder)"), true);
+    return;
+  }
+  vsStream = stream; vsRec = rec; vsMime = mime;
+  vsOn = true; vsPhase = "wake"; vsCmdText = "";
+  vsUi(); vsLive("");
+  vsState(t("voice.vs.wake", "listening for the wake phrase…"), false);
+  vsCycle();
+}
+
+function vsStop() {
+  vsOn = false;
+  clearTimeout(vsCmdTimer); vsCmdTimer = null;
+  clearTimeout(vsCycleTimer); vsCycleTimer = null;
+  if (vsReplyIv) { clearInterval(vsReplyIv); vsReplyIv = null; }
+  if (vsRec) {
+    vsRec.onstop = null; vsRec.ondataavailable = null;
+    try { if (vsRec.state !== "inactive") vsRec.stop(); } catch (e) {}
+    vsRec = null;
+  }
+  if (vsStream) {
+    vsStream.getTracks().forEach(tr => { try { tr.stop(); } catch (e) {} });
+    vsStream = null;
+  }
+  vsPhase = "wake"; vsCmdText = "";
+  vsUi(); vsLive("");
+  vsState(t("voice.vs.idle", "mic off — tap MIC to listen"), false);
+}
+
+function vsCycle() {
+  if (!vsOn || !vsRec) return;
+  const chunks = [];
+  vsRec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+  vsRec.onstop = async () => {
+    clearTimeout(vsCycleTimer);
+    if (!vsOn) return;
+    const blob = new Blob(chunks, { type: (vsMime || "audio/webm").split(";")[0] });
+    await vsTranscribe(blob);
+    if (vsOn) setTimeout(vsCycle, 80);   // next self-contained segment
+  };
+  try { vsRec.start(); } catch (e) {
+    vsState(t("voice.vs.noSupport",
+              "this browser cannot record audio (no MediaRecorder)"), true);
+    vsStop();
+    return;
+  }
+  vsCycleTimer = setTimeout(() => {
+    try { if (vsRec && vsRec.state !== "inactive") vsRec.stop(); }
+    catch (e) {}
+  }, VS_CYCLE_MS);
+}
+
+async function vsTranscribe(blob) {
+  if (vsPending) return;          // segments stay strictly sequential
+  vsPending = true;
+  vsState(t("voice.vs.hearing", "transcribing…"), false);
+  try {
+    let res = null, body = {};
+    try {
+      res = await fetch("/api/stt", {
+        method: "POST",
+        headers: { "Content-Type": (vsMime || blob.type || "audio/webm").split(";")[0] },
+        body: blob,
+      });
+      body = await res.json().catch(() => ({}));
+    } catch (e) {
+      vsState(t("voice.vs.sttErr", "transcription failed ({reason})")
+                .replace("{reason}", "network"), true);
+      return;
+    }
+    if (!vsOn) return;
+    if (!res.ok) {
+      const reason = String(body.error || res.status).slice(0, 160);
+      vsState(t("voice.vs.sttErr", "transcription failed ({reason})")
+                .replace("{reason}", reason), true);
+      if (res.status === 503 || res.status === 413 ||
+          res.status === 415 || res.status === 403) {
+        vsStop();       // no transcriber / refused payload: stop honestly
+      }
+      return;
+    }
+    vsStep(String(body.text || "").trim());
+  } finally {
+    vsPending = false;
+  }
+}
+
+function vsStep(text) {
+  if (vsPhase === "wake") {
+    if (!text) { vsLive("");
+      vsState(t("voice.vs.wake", "listening for the wake phrase…"), false); return; }
+    vsLive(text);                    // not awake yet: show only what we heard
+    if (!vsWakeHit(text)) {
+      vsState(t("voice.vs.wake", "listening for the wake phrase…"), false);
+      return;
+    }
+    vsPhase = "cmd";
+    vsCmdText = vsRestAfter(text);
+    vsUi();
+    beep(880, 0.05);
+    vsState(t("voice.vs.wakeHit", "wake phrase detected — go ahead"), false);
+    if (vsCmdText) vsLive(vsCmdText);
+    clearTimeout(vsCmdTimer);
+    vsCmdTimer = setTimeout(() => vsFinishCmd(), VS_CMD_MS);   // 10s cap
+    return;
+  }
+  if (!text) { vsFinishCmd(); return; }   // empty segment = end of command
+  vsCmdText += (vsCmdText ? " " : "") + text;
+  vsLive(vsCmdText);
+  vsState(t("voice.vs.cmd", "capturing command…"), false);
+}
+
+function vsFinishCmd() {
+  clearTimeout(vsCmdTimer); vsCmdTimer = null;
+  const cmd = vsCmdText.trim();
+  vsPhase = "wake"; vsCmdText = "";
+  vsUi();
+  if (!cmd) {
+    vsState(t("voice.vs.noCommand",
+              "wake phrase heard, but no command followed — try again"), true);
+    vsLive("");
+    return;
+  }
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    vsLive(cmd);
+    vsState(t("chat.needToken", "access token required (set it in Settings)"), true);
+    return;
+  }
+  const input = document.getElementById("chatInput");
+  if (input) input.value = cmd;
+  vsLive(cmd);
+  vsState(t("voice.vs.sent", "command sent — waiting for the reply"), false);
+  vsAwaitReplyStart();
+  chatSend();
+}
+
+function vsAwaitReplyStart() {
+  if (vsReplyIv) clearInterval(vsReplyIv);
+  const before = document.querySelectorAll("#chatLog .chat-row.assistant").length;
+  let waited = 0;
+  vsReplyIv = setInterval(() => {
+    waited += 500;
+    const settled = !chatBusy && !chatQPending && !chatQueue.length;
+    const grew = document.querySelectorAll("#chatLog .chat-row.assistant").length > before;
+    if (waited >= VS_REPLY_MAX_MS) {
+      clearInterval(vsReplyIv); vsReplyIv = null;
+      vsState(t("voice.vs.replyTimeout", "still working — no voice summary yet"), true);
+      return;
+    }
+    if (!settled || (!grew && waited < 2000)) return;
+    clearInterval(vsReplyIv); vsReplyIv = null;
+    const rows = document.querySelectorAll("#chatLog .chat-row.assistant .chat-bubble");
+    const last = rows.length ? rows[rows.length - 1] : null;
+    const text = (last ? last.textContent : "").trim().slice(0, 200);
+    if (!grew || !text) {
+      vsState(t("voice.vs.noReply", "no reply to speak"), true);
+      return;
+    }
+    vsSpeakReply(text);
+  }, 500);
+}
+
+async function vsSpeakReply(text) {
+  const serverOk = !!(voiceEngine && voiceEngine.available);
+  const spoken = await speak(text);   // existing chain: /api/say -> local fallback
+  if (spoken && serverOk) {
+    vsState(t("voice.vs.spoken", "reply spoken"), false);
+  } else if (spoken) {
+    vsState(t("voice.vs.spokenLocal", "reply spoken by the browser voice"), false);
+  } else {
+    vsState(t("voice.vs.speakDown", "reply ready — voice could not be spoken"), true);
+  }
+}
+
+/* --- image trial panel (car 4c) --- */
+function imgState(text, err) {
+  const el = document.getElementById("imgState");
+  if (!el) return;
+  el.textContent = text;
+  el.classList.toggle("err", !!err);
+}
+
+function imgCapHint() {
+  const badge = document.getElementById("imgBadge");
+  const img = capsData && capsData.media ? capsData.media.image : null;
+  if (badge) {
+    badge.textContent = !img ? "–"
+      : (img.configured ? t("img.badgeReady", "ready")
+                        : t("img.badgeOff", "not configured"));
+    badge.classList.toggle("live", !!(img && img.configured));
+  }
+  if (img && img.configured === false && !imgBusy) {
+    imgState(img.reason || t("img.notConfigured",
+      "image generation not configured — set an endpoint in Settings → Media"), true);
+  }
+}
+
+async function imgGenerate() {
+  const input = document.getElementById("imgPrompt");
+  const prompt = (input ? input.value : "").trim();
+  if (!prompt) {
+    imgState(t("img.needPrompt", "describe what to generate first"), true);
+    return;
+  }
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    imgState(t("chat.needToken", "access token required (set it in Settings)"), true);
+    return;
+  }
+  imgBusy = true;
+  imgState(t("img.working", "generating…"), false);
+  try {
+    const res = await fetch("/api/image", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify({ prompt }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 401) {
+      imgState(t("chat.badToken", "401 · unauthorized"), true);
+      return;
+    }
+    if (!res.ok) {
+      const reason = String(body.error || res.status).slice(0, 160);
+      imgState(t("img.fail", "generation failed ({reason})")
+                 .replace("{reason}", reason), true);
+      if (res.status === 503 && capsData && capsData.media && capsData.media.image) {
+        capsData.media.image.configured = false;   // keep the badge honest
+        imgCapHint();
+      }
+      return;
+    }
+    const imgs = Array.isArray(body.images) ? body.images : [];
+    if (!imgs.length) {
+      imgState(t("img.none", "no image returned"), true);
+      return;
+    }
+    const grid = document.getElementById("imgGrid");
+    if (grid) {
+      imgs.forEach(it => {
+        if (!it || !it.url) return;
+        const a = document.createElement("a");
+        a.href = it.url; a.target = "_blank"; a.rel = "noopener";
+        const im = document.createElement("img");
+        im.src = it.url;
+        im.alt = prompt.slice(0, 120);
+        im.loading = "lazy";
+        a.appendChild(im);
+        grid.prepend(a);
+      });
+      while (grid.children.length > 12) grid.removeChild(grid.lastChild);
+    }
+    imgState(t("img.ok", "generated ✓"), false);
+    beep(880, 0.05);
+  } catch (e) {
+    imgState(t("img.fail", "generation failed ({reason})")
+               .replace("{reason}", String(e).slice(0, 80)), true);
+  } finally {
+    imgBusy = false;
+  }
 }
 
 /* ---------------------------------------------------------------- status -- */
@@ -970,6 +1442,21 @@ async function loadSettings() {
     if (mycModel) mycModel.value = myc.model || "";
     const mycUrl = document.getElementById("mycUrl");
     if (mycUrl) mycUrl.value = myc.base_url || "";
+    const med = settings.media || {};
+    const sttSel = document.getElementById("sttModel");
+    if (sttSel) sttSel.value = med.stt_model || "base";
+    const engSel = document.getElementById("ttsEngine");
+    if (engSel) engSel.value = med.tts_engine || "edge";
+    const setField = (id, val) => {
+      const el = document.getElementById(id);
+      if (el) el.value = val == null ? "" : String(val);
+    };
+    setField("imgBaseUrl", med.image_base_url);
+    setField("imgModelName", med.image_model);
+    setField("ttsBaseUrl", med.tts_base_url);
+    setField("ttsModelName", med.tts_model);
+    setField("wakePhrases", Array.isArray(med.wake_phrases)
+      ? med.wake_phrases.join(", ") : "");
     document.getElementById("alertSelect").value = settings.alert_preview || "off";
     document.getElementById("refreshSelect").value = String(settings.refresh_sec || 10);
     const stored = localStorage.getItem(LANG_KEY);
@@ -1000,6 +1487,16 @@ async function saveSettings() {
     mycore: {
       model: ((document.getElementById("mycModel") || {}).value || "").trim() || "mimo-v2.6-flash",
       base_url: ((document.getElementById("mycUrl") || {}).value || "").trim() || "http://127.0.0.1:3460/v1",
+    },
+    media: {
+      stt_model: (document.getElementById("sttModel") || {}).value || "base",
+      tts_engine: (document.getElementById("ttsEngine") || {}).value || "edge",
+      image_base_url: ((document.getElementById("imgBaseUrl") || {}).value || "").trim(),
+      image_model: ((document.getElementById("imgModelName") || {}).value || "").trim(),
+      tts_base_url: ((document.getElementById("ttsBaseUrl") || {}).value || "").trim(),
+      tts_model: ((document.getElementById("ttsModelName") || {}).value || "").trim(),
+      wake_phrases: ((document.getElementById("wakePhrases") || {}).value || "")
+        .split(",").map(s => s.trim()).filter(s => s.length > 0).slice(0, 3),
     },
     alert_preview: document.getElementById("alertSelect").value,
   };
@@ -1158,6 +1655,14 @@ if (voiceVolEl) voiceVolEl.addEventListener("input", e => {
 const voiceOrbEl = document.getElementById("voiceOrb");
 if (voiceOrbEl) voiceOrbEl.addEventListener("click", () => armVoice());
 document.getElementById("saveBtn").addEventListener("click", saveSettings);
+const micBtnEl = document.getElementById("micBtn");
+if (micBtnEl) micBtnEl.addEventListener("click", () => { vsToggle(); });
+const imgGoEl = document.getElementById("imgGo");
+if (imgGoEl) imgGoEl.addEventListener("click", imgGenerate);
+const imgPromptEl = document.getElementById("imgPrompt");
+if (imgPromptEl) imgPromptEl.addEventListener("keydown", e => {
+  if (e.key === "Enter") { e.preventDefault(); imgGenerate(); }
+});
 document.getElementById("chatSend").addEventListener("click", chatSend);
 document.getElementById("chatClear").addEventListener("click", chatClear);
 document.getElementById("chatInput").addEventListener("keydown", e => {
@@ -1189,6 +1694,7 @@ refreshStatus(); refreshUsage(); refreshEvents(); refreshVersion(); refreshSkill
 refreshEvolution();
 loadChatHistory();   // console session restored at boot (read-only route)
 refreshVoiceCap();   // engine status visible before the first orb tap (#4)
+refreshCaps();       // media face: stt/image presence for the chat cards
 setInterval(tickClock, 1000); tickClock();
 setInterval(refreshUsage, 60000);
 setInterval(refreshEvolution, 60000);

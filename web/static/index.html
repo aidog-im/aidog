@@ -212,6 +212,35 @@
         </div>
         <div class="chat-meta" id="chatMeta"></div>
       </section>
+
+      <!-- media face (car 4c): voice session (wake phrase -> command -> spoken
+           reply) and the image trial panel (prompt -> generated thumbnails) -->
+      <div class="set-grid media-grid">
+        <section class="card">
+          <h2><span data-i18n="sec.voice">VOICE SESSION</span>
+              <span class="chat-badge" id="vsBadge">–</span></h2>
+          <div class="ctl-row">
+            <label data-i18n="ctl.vsMic">Wake & command mic</label>
+            <button class="btn" id="micBtn" type="button" aria-pressed="false"
+                    data-i18n="voice.vs.micStart">MIC</button>
+          </div>
+          <div class="vs-state" id="vsState" data-i18n="voice.vs.idle">mic off — tap MIC to listen</div>
+          <div class="vs-live" id="vsLive" hidden></div>
+        </section>
+
+        <section class="card">
+          <h2><span data-i18n="sec.image">IMAGE TRIAL</span>
+              <span class="chat-badge" id="imgBadge">–</span></h2>
+          <div class="ctl-row">
+            <input type="text" id="imgPrompt" maxlength="2000" autocomplete="off"
+                   data-i18n-ph="img.ph" placeholder="describe the image to generate…">
+            <button class="btn primary" id="imgGo" type="button"
+                    data-i18n="img.generate">GENERATE</button>
+          </div>
+          <div class="vs-state" id="imgState" data-i18n="img.idle">prompt → generate</div>
+          <div class="img-grid" id="imgGrid"></div>
+        </section>
+      </div>
     </section>
 
     <!-- SKILLS: skill armory (real SKILL.md records) -->
@@ -343,6 +372,50 @@
             <label data-i18n="ctl.mycUrl">Kernel endpoint</label>
             <input type="text" id="mycUrl" maxlength="256" placeholder="http://127.0.0.1:3460/v1"
                    data-i18n-ph="ctl.mycUrlPh" autocomplete="off">
+          </div>
+        </div>
+
+        <div class="card">
+          <h2 data-i18n="sec.media">Media</h2>
+          <div class="ctl-row">
+            <label data-i18n="ctl.sttModel">Speech-to-text model</label>
+            <select id="sttModel">
+              <option value="tiny">tiny</option>
+              <option value="base">base</option>
+              <option value="small">small</option>
+            </select>
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="ctl.ttsEngine">Voice engine</label>
+            <select id="ttsEngine">
+              <option value="edge">edge</option>
+              <option value="byok">byok</option>
+            </select>
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="ctl.imgUrl">Image endpoint</label>
+            <input type="text" id="imgBaseUrl" maxlength="256" autocomplete="off"
+                   data-i18n-ph="ctl.offPh" placeholder="empty = kernel endpoint">
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="ctl.imgModel">Image model</label>
+            <input type="text" id="imgModelName" maxlength="64" autocomplete="off"
+                   data-i18n-ph="ctl.ttsModelPh" placeholder="empty = endpoint default">
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="ctl.ttsUrl">Voice endpoint</label>
+            <input type="text" id="ttsBaseUrl" maxlength="256" autocomplete="off"
+                   data-i18n-ph="ctl.offPh" placeholder="empty = kernel endpoint">
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="ctl.ttsModel">Voice model</label>
+            <input type="text" id="ttsModelName" maxlength="64" autocomplete="off"
+                   data-i18n-ph="ctl.ttsModelPh" placeholder="empty = engine default">
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="ctl.wake">Wake phrases (comma separated)</label>
+            <input type="text" id="wakePhrases" maxlength="256" autocomplete="off"
+                   data-i18n-ph="ctl.wakePh" placeholder="hey aidog, ni hao ai duo">
           </div>
         </div>
 

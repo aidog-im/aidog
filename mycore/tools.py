@@ -547,6 +547,30 @@ def _execute_code(steps: list | None, code: str | None, timeout: int,
         raise ToolError(str(e)) from None
 
 
+def _generate_image(prompt: str, size: str = "1024x1024") -> str:
+    """`generate_image` handler (car 4c): configuration resolves at call
+    time — an unconfigured endpoint is an honest ERROR line, never a missing
+    tool. One 'saved: <path>' line per image."""
+    from . import imagegen  # local import: optional dependency path
+    try:
+        paths = imagegen.generate(prompt, size=size)
+    except imagegen.ImageError as e:
+        raise ToolError(str(e)) from None
+    return "\n".join(f"saved: {p}" for p in paths)
+
+
+def _connector_search(query: str, source: str = "auto", limit: int = 5) -> str:
+    """`connector_search` handler (car 4c): read-only connector search;
+    ConnectorError (missing slot, upstream failure) becomes the honest
+    ERROR line. Registration already gated on slot presence — this covers
+    the slot disappearing between build and call."""
+    from . import connectors  # local import: optional dependency path
+    try:
+        return connectors.search(query, source=source, limit=limit)
+    except connectors.ConnectorError as e:
+        raise ToolError(str(e)) from None
+
+
 def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
                    state_dir: str | Path | None = None,
                    mcp_raw: str | None = None) -> ToolRegistry:
@@ -709,6 +733,46 @@ def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
             r.browser_note = "browser binary not found"
     except Exception as e:  # noqa: BLE001 — probe must never break the registry
         r.browser_note = f"browser unavailable: {type(e).__name__}: {e}"
+    # --- car 4c: media face (image generation + connectors, fail-soft) ---
+    # generate_image registers ALWAYS: configuration is resolved at CALL
+    # time, so an unconfigured endpoint surfaces as an honest ERROR line
+    # instead of a missing capability (owner contract: no registration gate).
+    r.register("generate_image",
+               "Generate an image from a text prompt with the configured "
+               "OpenAI-compatible image endpoint and return one 'saved: "
+               "<path>' line per generated image.",
+               {"type": "object", "properties": {
+                   "prompt": _STR,
+                   "size": {"type": "string",
+                            "description": "WxH pixels, default 1024x1024"}},
+                "required": ["prompt"]},
+               lambda prompt, size="1024x1024": _generate_image(prompt, size))
+    # connector_search registers ONLY when at least one credential slot
+    # exists (capability-honest, same pattern as browser_note); with no
+    # slots the registry carries connector_note instead of a dead tool.
+    r.connector_note: str | None = None
+    try:
+        from . import connectors as conn_mod
+        if any(conn_mod.status().values()):
+            r.register("connector_search",
+                       "Read-only search across the configured connector(s) "
+                       "(Linear issues, Notion pages). Returns compact "
+                       "'title · url' lines; source=auto queries every "
+                       "configured connector.",
+                       {"type": "object", "properties": {
+                           "query": _STR,
+                           "source": {"type": "string",
+                                      "enum": ["auto", "linear", "notion"]},
+                           "limit": {"type": "integer", "minimum": 1,
+                                     "maximum": 20}},
+                        "required": ["query"]},
+                       lambda query, source="auto", limit=5:
+                           _connector_search(query, source, limit))
+        else:
+            r.connector_note = ("connectors not configured "
+                                "(LINEAR_API_KEY / NOTION_API_KEY)")
+    except Exception as e:  # noqa: BLE001 — probe must never break the registry
+        r.connector_note = f"connectors unavailable: {type(e).__name__}: {e}"
     # --- car 2-D5: MCP servers (fail-soft: notes, never a startup crash) ---
     r.mcp_notes: list[str] = []
     r.mcp_sessions: list = []
