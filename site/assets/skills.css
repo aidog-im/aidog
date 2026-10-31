@@ -75,12 +75,25 @@
   overflow-wrap: anywhere; }
 .sk-tags { display: flex; flex-wrap: wrap; gap: 7px; margin-top: auto; }
 .sk-tags .chip { max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
-.sk-req { display: inline-flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
-.sk-req code {
-  font-family: var(--mono); font-size: 10.5px; color: var(--navy);
-  background: rgba(40, 146, 255, .10); padding: 1px 6px; border-radius: 3px;
-  overflow-wrap: anywhere;
+/* requires: one label chip + one small chip per requirement (tool/slot name,
+   shown verbatim — a technical checklist to compare against the console) */
+.sk-req-lab {
+  font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--muted); padding: 4px 9px;
 }
+.sk-req {
+  font-size: 10.5px; padding: 4px 9px; color: var(--navy);
+  border-color: rgba(40, 146, 255, .4); background: rgba(40, 146, 255, .10);
+}
+.sk-req code {
+  font-family: var(--mono); font-size: inherit; letter-spacing: .02em;
+  background: none; padding: 0; color: inherit; overflow-wrap: anywhere;
+}
+.sk-req-empty {
+  font-size: 10.5px; color: var(--muted); border-style: dashed;
+}
+/* catalogue-page honesty note: the static page cannot read local config */
+.sk-local { margin-top: 22px; }
 .sk-bad-bundled { color: var(--blue-deep); border-color: rgba(40, 146, 255, .5); }
 .sk-bad-catalog { color: var(--muted); }
 

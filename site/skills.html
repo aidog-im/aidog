@@ -10,7 +10,7 @@
 <meta name="theme-color" content="#2892ff">
 <meta name="robots" content="index,follow">
 <link rel="stylesheet" href="assets/style.css?v=20261026">
-<link rel="stylesheet" href="assets/skills.css?v=20261026">
+<link rel="stylesheet" href="assets/skills.css?v=20261027">
 </head>
 <body>
 
@@ -67,6 +67,11 @@
     <span class="section-index">CATALOG</span>
     <h2 data-i18n="skills.catalogTitle">Six categories</h2>
     <p class="section-sub" data-i18n="skills.catalogSub">Grouped the way the repository groups them: automation and operations, research, development, content, read-only trading, and reporting. Versions come straight from the catalog entry.</p>
+  </div>
+
+  <div class="sk-note sk-local reveal in">
+    <b data-i18n="skills.localNoteT">Availability on your machine</b>
+    <p data-i18n="skills.localNoteB">This page cannot read your machine's configuration. The requires list on each card names the tools and slots a skill needs — verbatim; whether they are in place on your machine, check the availability count and missing items in your console's ORCHESTRATION card.</p>
   </div>
 
   <div class="sk-groups" id="skGroups">
@@ -258,13 +263,20 @@
     tags.appendChild(badge);
 
     if (entry.requires && entry.requires.length) {
-      var req = el("span", "chip sk-req");
-      var lab = el("span", null);
+      var lab = el("span", "chip sk-req-lab");
       lab.setAttribute("data-i18n", "skills.requires");
       lab.textContent = "requires";
-      req.appendChild(lab);
-      entry.requires.forEach(function (tool) { req.appendChild(el("code", null, tool)); });
-      tags.appendChild(req);
+      tags.appendChild(lab);
+      entry.requires.forEach(function (tool) {
+        var c = el("span", "chip sk-req");
+        c.appendChild(el("code", null, tool));
+        tags.appendChild(c);
+      });
+    } else {
+      var none = el("span", "chip sk-req-empty");
+      none.setAttribute("data-i18n", "skills.requiresNone");
+      none.textContent = "no prerequisites";
+      tags.appendChild(none);
     }
     art.appendChild(tags);
     return art;

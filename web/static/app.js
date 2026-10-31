@@ -2255,7 +2255,7 @@ const CRED_HINTS = {
   unavailable: ["cred.unavailable",
     "credential slots unavailable — this build has no GET /api/secrets"],
   readOnly: ["cred.readOnly",
-    "read-only: no WEB_TOKEN slot on this machine — rotate it by hand"],
+    "read-only: no access token on this machine — set WEB_TOKEN in secrets.env"],
   needToken: ["cred.needToken",
     "access token required — set it in Access"],
 };
@@ -2327,9 +2327,15 @@ function credRow(slot, writable, labelKey) {
     label.dataset.i18n = labelKey;
     label.textContent = t(labelKey, name);
   } else {
-    label.textContent = name;
-    label.style.fontFamily = "var(--mono)";
+    // car 5 (0.5.48): the Credentials card shows a PLAIN-LANGUAGE label; the
+    // internal slot name moves to the hover title (and stays verbatim in the
+    // server's 400 details, which are troubleshooting material). A slot the
+    // packs do not know yet falls back to its name — honest, never invented.
+    const slotKey = "cred.slot." + name;
+    label.dataset.i18n = slotKey;
+    label.textContent = dict[slotKey] !== undefined ? dict[slotKey] : name;
   }
+  if (name) label.title = name;    // hover: the exact secrets.env slot name
   row.appendChild(label);
   const st = document.createElement("div");
   st.className = "cred-status stat-note";
@@ -3406,6 +3412,18 @@ const ACT_FIX = {
   service: { restart: true },
 };
 
+/* Internal identifier behind each checklist row — HOVER TITLE ONLY since
+   car 5 (0.5.48): the visible label is plain language (packs act.item.*),
+   the exact name rides `title` so a hover (or a server 400 detail) still
+   shows what to look for in secrets.env / settings. */
+const ACT_INTERNAL = {
+  web_token: "WEB_TOKEN",
+  model_key: "MODEL_API_KEY",
+  tg_token: "MYCORE_TG_TOKEN",
+  tg_allowlist: "AIDOG_TG_ALLOWED_USERS",
+  model_endpoint: "mycore.base_url",
+};
+
 function actChip(text, tone) {
   const col = tone === "ok" ? "var(--ok)"
     : tone === "bad" ? "var(--red)"
@@ -3494,7 +3512,8 @@ function renderSetup() {
         : "";
       return `<div data-act-item="${escapeHtml(id)}">` +
         `<div class="ctl-row">` +
-        `<label style="flex:1;min-width:0;overflow-wrap:anywhere;">` +
+        `<label style="flex:1;min-width:0;overflow-wrap:anywhere;"` +
+        `${ACT_INTERNAL[id] ? ` title="${escapeHtml(ACT_INTERNAL[id])}"` : ""}>` +
         `${escapeHtml(label)}</label>${opt}` +
         actChip(actChipText(o.state), actTone(o.state)) + fix +
         `</div>${hint}</div>`;
@@ -4518,12 +4537,76 @@ function renderOrch() {
     rows.push(orchLink("slots", t("orch.slots", "credential slots set"),
       `${setN}/${writable.length}`));
   }
-  // skills: the capabilities field decides — absent field = row hidden
-  if (Array.isArray(c.skills)) {
+  // skills (car 5, 0.5.48): the remote catalog's per-skill availability —
+  // available X / Y plus an expandable one-line-per-skill breakdown. The
+  // payload comes from GET /api/skills/remote and is shape-checked; a
+  // server without the computed fields (or a failed fetch) hides this block
+  // and the honest capabilities count below keeps the row.
+  const remote = remoteSkillRows();
+  if (remote) {
+    const total = remote.length;
+    const avail = remote.filter(s => s.available).length;
+    rows.push(orchLink("skills", t("orch.skills", "skills installed"),
+      t("orch.skillsAvail", "available {a} / {n}")
+        .replace("{a}", String(avail)).replace("{n}", String(total))));
+    rows.push(orchSkillsDetail(remote));
+  } else if (Array.isArray(c.skills)) {
     rows.push(orchLink("skills", t("orch.skills", "skills installed"),
       String(c.skills.length)));
   }
   list.innerHTML = rows.join("");
+}
+
+/* car 5 (0.5.48): GET /api/skills/remote — the availability projection.
+   Shape discipline (actChip posture): every row must carry the seven catalog
+   fields plus a boolean `available` and a string `missing[]`; anything else
+   means the payload predates this car and the availability block simply does
+   not render — never an invented number. */
+let skillsRemoteData = null;
+
+function remoteSkillRows() {
+  const d = skillsRemoteData;
+  if (!d || typeof d !== "object" || !Array.isArray(d.skills)) return null;
+  const bad = d.skills.some(s => !s || typeof s !== "object"
+    || typeof s.available !== "boolean" || !Array.isArray(s.missing)
+    || s.missing.some(m => typeof m !== "string"));
+  return bad ? null : d.skills;
+}
+
+async function loadSkillsRemote() {
+  try {
+    const res = await fetch("/api/skills/remote");
+    if (!res.ok) throw new Error("http " + res.status);
+    const d = await res.json();
+    skillsRemoteData = (d && typeof d === "object" && Array.isArray(d.skills))
+      ? d : null;
+  } catch (e) {
+    skillsRemoteData = null;        // fail-soft: the row falls back, honestly
+  }
+  renderOrch();
+}
+
+/* the expandable breakdown under the skills row: one line per catalog skill
+   ("name — available ✓" / "missing ✗"), with the missing requirement names
+   on a small grey secondary line — troubleshooting material, never a label. */
+function orchSkillsDetail(rows) {
+  const lines = rows.map(s => {
+    const name = String(s.name || s.slug || "");
+    const state = s.available
+      ? t("orch.skOk", "available ✓")
+      : t("orch.skNo", "missing ✗");
+    const miss = (s.available || !s.missing.length) ? "" :
+      `<div class="stat-note orch-skill-miss">` +
+      `${escapeHtml(t("orch.skMissing", "missing: {m}")
+        .replace("{m}", s.missing.join(", ")))}</div>`;
+    return `<div class="orch-skill" data-skill="${escapeHtml(String(s.slug || ""))}">` +
+      `<div class="ctl-row"><label>${escapeHtml(name)}</label>` +
+      `<span class="stat-note orch-skill-state">${escapeHtml(state)}</span></div>${miss}</div>`;
+  }).join("");
+  return `<details class="orch-skills" id="orchSkills">` +
+    `<summary>${escapeHtml(
+      t("orch.skillsDetail", "Skill availability (remote catalog)"))}</summary>` +
+    lines + `</details>`;
 }
 
 /* deep link: existing navigation only (setView + actFocusEl, the actFix
@@ -4876,6 +4959,7 @@ setView(currentView, false);      // deep link applied before the first paint
 loadLang(startLang);
 loadSettings().then(() => { scheduleRefresh(); renderVoice(); initSettingsPanels(); });
 refreshStatus(); refreshUsage(); refreshEvents(); refreshVersion(); refreshSkills();
+loadSkillsRemote();  // car 5: per-skill availability for the ORCHESTRATION row
 refreshEvolution();
 refreshCron();           // cron list for the Overview card (+ delete row)
 refreshMission();        // mission board: honest idle until the first probe

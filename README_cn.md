@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/aidog-im/aidog/releases"><img src="https://img.shields.io/badge/release-0.5.47-blue?style=flat-square" alt="release 0.5.47"></a>
+  <a href="https://github.com/aidog-im/aidog/releases"><img src="https://img.shields.io/badge/release-0.5.48-blue?style=flat-square" alt="release 0.5.48"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
   <img src="https://img.shields.io/badge/core_tests-1477%2F1477-brightgreen?style=flat-square" alt="核心测试 1477/1477">
   <img src="https://img.shields.io/badge/console_smoke-234%2F234-brightgreen?style=flat-square" alt="控制台冒烟 234/234">
@@ -183,13 +183,13 @@ python3 deploy/aidog_update.py check # 版本通道：up to date
 | 桌面壳（`node --test`） | **15/15** |
 | `aidog doctor` | **0 FAIL · 0 WARN**（出站全断时如实报环境 WARN） |
 | 发布闸（deny-by-default 清单） | **READY** |
-| 真机 E2E | profiles **18/18** · channels **8/8** · 国内渠道 **44/44** · 管线 **35/35** · web3 只读 **33/33** · web3 审批 **61/61** · 前端覆盖 **62/62** · 前端 UI **33/33** · 激活 **81/81** · 激活 UI **50/50** · 设置矩阵 **63/63** + UI **20/20** · 守夜任务 **54/54** · 编排看板 **63/63** · 审批挂起 **73/73** · 技能目录 **167/167** · 远端目录 **37/37** |
+| 真机 E2E | profiles **18/18** · channels **8/8** · 国内渠道 **44/44** · 管线 **35/35** · web3 只读 **33/33** · web3 审批 **61/61** · 前端覆盖 **62/62** · 前端 UI **33/33** · 激活 **81/81** · 激活 UI **50/50** · 设置矩阵 **63/63** + UI **20/20** · 守夜任务 **54/54** · 编排看板 **63/63** · 审批挂起 **73/73** · 技能目录 **176/176** · 远端目录 **58/58** |
 
 目录规模：**25 个注册工具** · **9 家交易所场所** · **17 腿真机
 E2E**——全部全绿。
 
-语言包：`en`（默认）+ `zh` 各 **614 键**，parity lint 把关；官网另有
-**254 键**双语站包。
+语言包：`en`（默认）+ `zh` 各 **658 键**，parity lint 把关；官网另有
+**257 键**双语站包。
 
 ## 文档
 

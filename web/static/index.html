@@ -727,6 +727,20 @@
           <h2 data-i18n="act.bot">BOT & SERVICE</h2>
           <div class="stat-note" id="tgBotState" hidden></div>
           <div id="tgCredList" hidden></div>
+          <!-- onboarding (0.5.48 car 5): "how do I switch bots" folded the
+               same way the mission card folds its constraints — closed by
+               default, pack copy (onb.*), the allowlist step included -->
+          <details class="mission-cs" id="tgSwapSteps">
+            <summary data-i18n="onb.tgSwap">Switching to a different bot (3 steps)</summary>
+            <div class="onb-steps">
+              <ol>
+                <li data-i18n="onb.tgStep1">In Telegram, open @BotFather and send /newbot (or /token for an existing bot) to get the new bot's token.</li>
+                <li data-i18n="onb.tgStep2">Paste that token into "Telegram bot token" above and press SET.</li>
+                <li data-i18n="onb.tgStep3">Press "RESTART CHAT SERVICE" below so the service picks the new token up.</li>
+              </ol>
+              <div class="stat-note" data-i18n="onb.tgAllow">If you switched bots, also update "Users allowed to talk to the bot" with your own numeric Telegram user ID: send any message to @userinfobot or @getmyid_bot (either one works) and it replies with your ID.</div>
+            </div>
+          </details>
           <div class="ctl-actions" style="margin-top:12px;">
             <button class="btn primary" id="tgRestartBtn" type="button"
                     data-i18n="act.restartBtn">RESTART CHAT SERVICE</button>
@@ -904,12 +918,19 @@
           </div>
         </div>
 
-        <div class="card">
+        <!-- Access card: first-run onboarding (0.5.48 car 5) — what the
+             token IS (secrets.env's WEB_TOKEN, named on purpose so the owner
+             can match it against the file) and why the page never rewrites
+             it. Copy lives in the packs (onb.*); the label stays plain
+             language and carries the internal name as a hover title only. -->
+        <div class="card" id="accessCard">
           <h2 data-i18n="set.group.access">Access</h2>
+          <div class="stat-note" data-i18n="onb.accessHint">The access token is WEB_TOKEN — the unlock password for this console, written into secrets.env when you installed. Paste it once below and this browser remembers it; after that saving settings, approvals and service restarts all work. It cannot be changed from this page: to rotate it, edit WEB_TOKEN in secrets.env, then paste the new value here.</div>
           <div class="ctl-row token-row">
-            <label data-i18n="ctl.token">Access token</label>
+            <label data-i18n="ctl.token" title="WEB_TOKEN">Access token</label>
             <input type="password" id="tokenInput" autocomplete="off"
-                   data-i18n-ph="ctl.tokenPh" placeholder="WEB_TOKEN to unlock writes">
+                   data-i18n-ph="ctl.tokenPh"
+                   placeholder="paste the access token to unlock saving">
           </div>
           <div class="ctl-actions">
             <button class="btn primary" id="saveBtn" data-i18n="ctl.save">SAVE</button>

@@ -19,8 +19,8 @@ I'm AiDog is a single companion you run yourself — not a platform, not an assi
 - Skills ecosystem: an official skills directory at https://aidog.im/skills.html backed by a private,
   lint-and-review gated skills repository; `GET /api/skills/remote` serves the same catalog fail-soft
   (remote -> bundled copy -> honest `unavailable`, never a 5xx).
-- Evidence (the same numbers shown in the site's fact strip): core tests 1477/1477 · console smoke 234/234 · skill router 30/30 · memory 58/58 · setup wizard 99/99 · profile isolation 63/63 · desktop shell 15/15 · doctor 0 FAIL · 0 WARN · 17 real-machine E2E suites · 614 locale keys per pack · 25 registered tools · 33 capability documents · 29 self-developed modules ≈ 15.3k LOC.
-- Current release: 0.5.46.
+- Evidence (the same numbers shown in the site's fact strip): core tests 1477/1477 · console smoke 234/234 · skill router 30/30 · memory 58/58 · setup wizard 99/99 · profile isolation 63/63 · desktop shell 15/15 · doctor 0 FAIL · 0 WARN · 17 real-machine E2E suites · 658 locale keys per pack · 25 registered tools · 33 capability documents · 29 self-developed modules ≈ 15.3k LOC.
+- Current release: 0.5.48.
 
 ## Interfaces
 
@@ -38,7 +38,7 @@ I'm AiDog is a single companion you run yourself — not a platform, not an assi
 - [Home](https://aidog.im/#home): positioning and facts.
 - [Start](https://aidog.im/#start): install and first-run commands.
 - [Skills](https://aidog.im/#skills): what the skill system does.
-- [Skills directory](https://aidog.im/skills.html): the official, review-gated skill catalog (six categories, bilingual).
+- [Skills directory](https://aidog.im/skills): the official, review-gated skill catalog (six categories, bilingual).
 - [Capabilities](https://aidog.im/#capabilities): the card-by-card feature inventory, including the Web3 approval gate.
 - [Console](https://aidog.im/#console): the local-first web console.
 - [Models](https://aidog.im/#models): model configuration.

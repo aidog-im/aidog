@@ -1786,6 +1786,71 @@ def _skill_rows(doc) -> list[dict]:
     return rows
 
 
+def _availability_sources() -> tuple[set[str], set[str], set[str]]:
+    """Car 5 (0.5.48): the three capability sources a `requires` entry is
+    checked against, all name-only:
+      1) tools  — the LIVE registry (tools_off applied), the same source
+                  GET /api/capabilities reports in `tools`;
+      2) slots  — credential-slot PRESENCE from secrets.env (the value is
+                  read for presence and dropped; nothing serializes);
+      3) routes — channel routes that report `configured`.
+    A registry failure yields an empty tool set: nothing can then be
+    confirmed, so tool requirements honestly land in `missing`."""
+    try:
+        reg = build_registry(disabled=resolve_disabled_tools())
+        tools = {str(f.get("function", {}).get("name", ""))
+                 for f in reg.schema() if isinstance(f, dict)}
+        tools.discard("")
+    except Exception as e:  # noqa: BLE001 — degrade to "unconfirmed"
+        sys.stderr.write(f"skills availability tools failed err={type(e).__name__}\n")
+        tools = set()
+    slots = set(SECRET_SLOTS) | set(SECRET_PRESENCE_ONLY)
+    present = {name for name in slots if read_env_slot(name)}
+    routes = set(channel_routes())
+    rows = collect_channels().get("channels")
+    rows = rows if isinstance(rows, list) else []
+    configured = {str(r.get("name")) for r in rows
+                  if isinstance(r, dict) and r.get("configured")
+                  and r.get("name")}
+    return tools, present, configured & routes
+
+
+def _with_availability(rows: list[dict]) -> list[dict]:
+    """Project every catalog row with `available: bool` + `missing: [..]`.
+
+    Classification of one `requires` entry (three classes, in order):
+      * a KNOWN CREDENTIAL SLOT -> ok iff that slot is set (presence only);
+      * a KNOWN CHANNEL ROUTE   -> ok iff that route reports `configured`;
+      * a LIVE TOOL NAME        -> ok (the registry already answers);
+      * anything else           -> `missing` (honest: never guessed).
+    `available` is simply `not missing`; the seven catalog fields stay
+    untouched, so the static site copy (seven fields) and this projection
+    remain self-consistent: projection = static + these two computed fields.
+    The input rows are never mutated (the fail-soft cache owns them)."""
+    tools, present, routes = _availability_sources()
+    known_slots = set(SECRET_SLOTS) | set(SECRET_PRESENCE_ONLY)
+    known_routes = set(channel_routes())
+    out: list[dict] = []
+    for row in rows:
+        missing: list[str] = []
+        for req in row.get("requires") or []:
+            if req in known_slots:
+                if req not in present:
+                    missing.append(req)
+            elif req in known_routes:
+                if req not in routes:
+                    missing.append(req)
+            elif req in tools:
+                continue
+            else:
+                missing.append(req)   # unknown requirement: unavailable
+        new = dict(row)
+        new["available"] = not missing
+        new["missing"] = missing
+        out.append(new)
+    return out
+
+
 def collect_skills_remote() -> dict:
     """GET /api/skills/remote — the official skills catalog (car 4, 0.5.47).
 
@@ -1795,7 +1860,24 @@ def collect_skills_remote() -> dict:
     empty `source: "unavailable"` payload. Never 5xx, never a hang: one
     in-process lock plus a 60s cache keyed by (url, copy path) allows at most
     one outbound fetch per minute per config, and concurrent callers wait out
-    that single fetch instead of stacking their own."""
+    that single fetch instead of stacking their own.
+
+    Car 5 (0.5.48): the two computed fields `available` / `missing` are
+    projected OUTSIDE the cache on every request, so a slot that was just set
+    (or cleared) reflects immediately while the fetch ladder keeps its 60s
+    window. An `unavailable` payload carries an empty list — there is simply
+    nothing to compute, and no availability claim is made."""
+    data = _skills_remote_ladder()
+    if not data.get("skills"):
+        return data                       # fail-soft rung: no claim at all
+    doc = dict(data)
+    doc["skills"] = _with_availability(data["skills"])
+    return doc
+
+
+def _skills_remote_ladder() -> dict:
+    """The fail-soft fetch ladder itself (cached payload, NO availability
+    fields — see collect_skills_remote)."""
     url = (os.environ.get("AIDOG_SKILLS_CATALOG_URL") or "").strip() \
         or SKILLS_REMOTE_URL
     copy_file = Path((os.environ.get("AIDOG_SKILLS_CATALOG_FILE") or "").strip()
