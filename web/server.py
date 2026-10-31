@@ -327,7 +327,7 @@ if str(REPO) in sys.path:
 sys.path.insert(0, str(REPO))
 from lib import i18n  # noqa: E402
 from lib import profile_paths  # noqa: E402  (car F §13.1: per-profile path seams)
-from mycore import bridge, checkpoint, cli, decision, evolution, hooks, leash, mission, mcp, modeltier, sniff, terminal  # noqa: E402  (X10 snapshots + config + MCP/ hooks/ terminal/ mission grammar/ sniff grammar/ decision client/ bridge grammar/ car-7 leash grammar)
+from mycore import bridge, checkpoint, cli, decision, evolution, hooks, leash, ledger, mission, mcp, modeltier, sniff, terminal  # noqa: E402  (X10 snapshots + config + MCP/ hooks/ terminal/ mission grammar/ sniff grammar/ decision client/ bridge grammar/ car-7 leash grammar/ D2 ledger grammar)
 from mycore import meter as model_meter  # noqa: E402  (v0.5.55 self-metering)
 from mycore.assembly import (build_system_stack,  # noqa: E402
                               resolve_context_dirs, resolve_user_rules,
@@ -521,6 +521,12 @@ DEFAULT_SETTINGS: dict = {
     # truth (copied, never invented) and this partition is always present in
     # GET /api/settings so the console never has to treat absence as default.
     "evolution": dict(evolution.DEFAULT_SETTINGS),
+    # Anonymous usage ledger (D2 car): a copy of mycore.ledger.DEFAULT_
+    # SETTINGS — the constant stays the source of truth; the block is always
+    # present so the console card renders without an absence check. Module
+    # default is OFF with an empty endpoint (fail-closed); the product seed
+    # (web/settings.example.json) is what makes fresh installs report.
+    "ledger": dict(ledger.DEFAULT_SETTINGS),
     # Mission reporting tier (0.5.44): a copy of mycore.mission.DEFAULT_
     # SETTINGS — the constant stays the source of truth; the partition is
     # always present so the console renders the tier without an absence check.
@@ -547,7 +553,7 @@ DEFAULT_SETTINGS: dict = {
 ALLOWED_TOP = ("language", "refresh_sec", "sound", "voice_volume",
                "alert_preview", "currency", "fx_rate", "mycore", "usage",
                "evolution", "channels", "hooks", "media", "web3", "mission",
-               "bridge", "guardrails", "obedience")
+               "bridge", "guardrails", "obedience", "ledger")
 USAGE_KEYS = ("metrics_url", "pricing_config", "log_dir", "model_pricing")
 MYCORE_KEYS = ("base_url", "model", "context_dirs", "upstreams", "mcp", "shell",
                "tools_off", "models", "budget", "session_prune_days",
@@ -1795,6 +1801,39 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                 clean_w3[key] = float(val)
             if len(clean_w3) == len(WEB3_KEYS) and len(errors) == before_w3:
                 clean["web3"] = clean_w3
+    if "ledger" in patch:
+        # D2 anonymous usage reporting: {enabled: bool, endpoint: string}.
+        # Endpoint is empty (= never sends) or an http(s) URL, capped; the
+        # enabled flag must be a real bool so "1"/"yes" can never smuggle
+        # the switch on.
+        led = patch["ledger"]
+        if not isinstance(led, dict):
+            errors.append("ledger must be an object")
+        else:
+            before_led = len(errors)
+            clean_led: dict = {}
+            for key in led:
+                if key not in ("enabled", "endpoint"):
+                    errors.append(f"unknown ledger key: {key}")
+                    continue
+                val = led[key]
+                if key == "enabled":
+                    if not isinstance(val, bool):
+                        errors.append("ledger.enabled must be a boolean")
+                        continue
+                    clean_led["enabled"] = val
+                else:
+                    if not isinstance(val, str) or len(val) > ledger.ENDPOINT_MAX:
+                        errors.append("ledger.endpoint must be a string of at most "
+                                      f"{ledger.ENDPOINT_MAX} chars")
+                        continue
+                    val = val.strip()
+                    if val and not val.startswith(("https://", "http://")):
+                        errors.append("ledger.endpoint must be empty or an http(s) URL")
+                        continue
+                    clean_led["endpoint"] = val
+            if len(clean_led) == len(led) and len(errors) == before_led:
+                clean["ledger"] = clean_led
     if "evolution" in patch:
         clean_evo, evo_errors = evolution.validate_evolution_settings(
             patch["evolution"])
@@ -2805,7 +2844,7 @@ def _skills_remote_ladder() -> dict:
 # upstream reads. Until the repo flips public GitHub answers 404/410 and the
 # endpoint honestly reports `available:false` with a category-word `reason` —
 # a designed state the UI renders as an honest card.
-DISCUSSIONS_URL = "https://api.github.com/repos/aidog-im/aidog/discussions?per_page=20"
+DISCUSSIONS_URL = "https://api.github.com/repos/AiDog-im/AiDog/discussions?per_page=20"
 DISCUSSIONS_TTL = 600.0         # in-process reuse window (seconds)
 DISCUSSIONS_TIMEOUT = 8.0       # one outbound attempt, hard ceiling
 _discussions_lock = threading.Lock()
@@ -5794,6 +5833,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(collect_events())
         if path == "/api/evolution":
             return self._json(evolution.status_summary())
+        if path == "/api/ledger":
+            # D2 card status: settings + the local state dir, no secrets and
+            # no full install id (prefix only — a local cross-check handle).
+            cfg = ledger.effective_settings(load_settings())
+            return self._json({
+                "enabled": cfg["enabled"],
+                "has_endpoint": bool(cfg["endpoint"]),
+                "last_report": ledger.last_report_day(MYCORE_STATE_DIR / "ledger"),
+                "install_id_prefix": ledger.install_id_prefix_at(
+                    MYCORE_STATE_DIR / "ledger"),
+            })
         if path == "/api/chat/history":
             return self._json(chat_history())
         if path == "/api/version":

@@ -1887,6 +1887,14 @@ a.btn.ext-link { display: inline-flex; align-items: center; text-decoration: non
 .model-chip-x { border: 0; background: none; padding: 0 2px; cursor: pointer;
   font-size: 14px; line-height: 1; color: var(--muted); }
 .model-chip-x:hover { color: var(--navy); }
+/* chips terminal state: the ctl-row right side stacks the (hidden) source
+   field's chips over one add box + button; the input keeps the standard
+   .ctl-row input[type=text] look via the descendant selector. */
+.model-col { flex: 1; min-width: 0; display: flex; flex-direction: column;
+  gap: 6px; }
+.model-add { display: flex; gap: 6px; align-items: center; }
+.model-add input { flex: 1; min-width: 0; }
+.model-add .btn { flex: none; }
 .disc-panel { margin-top: 12px; padding-top: 12px;
   border-top: 1px dashed var(--line); }
 .disc-all { display: inline-flex; align-items: center; gap: 8px;

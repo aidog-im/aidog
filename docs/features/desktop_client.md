@@ -103,7 +103,7 @@ verified-at-implementation (tray menu + HUD window).
 The HUD is served same-origin by the console and reads
 `/static/i18n/{lang}.json` (localStorage `aidog_lang`, `en` fallback,
 `data-i18n` pattern like `app.js`). Car E added **8 `hud.*` keys** in both
-`en` and `zh` — packs are now **1213/1213** (footer i18n + car 8 CKX-P2 + the round B badge key `bk.ckx` + the round C file-face keys `bk.choose`/`bk.noFile` + the round C console-half keys `ov.state.*`/`ov.tech*`/`set.tier*`/`save.dirty` + the round D D1 discovery keys `myc.discover*`/`myc.chipDel`; 1156 at 0.5.56 restyle stage 2); 795 at the 0.5.53 i18n completion. Without the bridge
+`en` and `zh` — packs are now **1224/1224** (footer i18n + car 8 CKX-P2 + the round B badge key `bk.ckx` + the round C file-face keys `bk.choose`/`bk.noFile` + the round C console-half keys `ov.state.*`/`ov.tech*`/`set.tier*`/`save.dirty` + the round D D1 discovery keys `myc.discover*`/`myc.chipDel` + the round D car 2 chips keys `ctl.mycModelAdd`/`ctl.mycModelAddPh` + the round D D2 ledger keys `sec.ledger`/`led.*`; 1156 at 0.5.56 restyle stage 2); 795 at the 0.5.53 i18n completion. Without the bridge
 (`!window.aidogShell`) the HUD shows an "unsupported" hint and hides its
 controls, so opening `hud.html` in a plain browser does not break.
 

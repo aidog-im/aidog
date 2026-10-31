@@ -287,13 +287,13 @@ the restart handler logs a tmux session name and a return code only.
   chips → the sticky bar naming the Model card, select-all, a result checkbox
   never raising the bar, chip removal through the same input event, the 32
   ceiling spoken, zh/en repaint of status + ADD + hint + label, reload
-  restoring value/panel/dirty flags, served packs 1213/1213 with an English
+  restoring value/panel/dirty flags, served packs 1224/1224 with an English
   pack free of Chinese, zero `pageerror`, production health. Run:
   `PW_PATH=<playwright node path> node tmp/d1_ui_probe.js`.
-- Standing gates (after the CKX-P2 agent-backup car): `mycore/tests/run.py` **2045** ·
+- Standing gates (after the CKX-P2 agent-backup car): `mycore/tests/run.py` **2080** ·
   `tests/web_console_p3.py` **432** · `tests/ckx_roundtrip.mjs` **28** ·
   `tests/source_lang_check.py` **0/78**
-  (locale packs **1213/1213**). The 0.5.39 baseline of this page was
+  (locale packs **1224/1224**). The 0.5.39 baseline of this page was
   1168 · 197 · 480/480.
 
 ## 6. Round B re-verification (UX round 2, 2026-10-30)
@@ -341,13 +341,13 @@ round owns it.
 | skills_ecosystem | env `AIDOG_SKILL_DIRS` · skill packs in the repo | **read-only** — Skills armory (`GET /api/skills`) + availability projection (`GET /api/skills/remote`) rendered in the Orchestration card | `tmp/e2e_skills_catalog.py` · `tmp/e2e_skills_remote.py` | installing a skill is a repo/pack action by design; the console shows what is mounted and what is missing |
 | community_posting (0.5.54) | `AIDOG_COMMUNITY_PAT` slot · `mycore.community` settings | **configurable** — Discussions view: `#commNew` → `POST /api/discussions/create`, `#commPost` → `POST /api/discussions/comment`, category list from `GET /api/discussions/categories` | smoke `0.5.54 in-app community car: routes, gates and slot verification` | a missing/unverified token disables posting honestly instead of failing silently |
 | extensions (car 2, line 2 IA) | keyless quote sources · `#extIntent` → `POST /api/extensions/intent` · SNIFF links | **read-mostly** — Extensions tabs (Finance / Home / Vehicle): keyless quote probe + intent router; Home and Vehicle are links into the SNIFF board by ruling | smoke `Extensions car (Phase B): GET /api/quotes` + the `POST /api/extensions/intent` legs | no key is required for quotes; the two nav tabs are the thin path to SNIFF |
-| model_discovery (D1, round D) | `POST /api/models/discover` behind `WEB_TOKEN` · `mycore.base_url` (which endpoint to read + when the saved key applies) · `mycore.models` (the whitelist it fills) · optional inline `api_key` (probe only, never stored) | **configurable** — Settings Model card `#discPanel`: `#discKey` + `#discBtn` → `#discOut` checkboxes + select-all → `#discAddBtn` appends into the `#mycModels` field, whose chips (`#mycModelChips`) mirror it both ways | `tmp/e2e_d1_discover.py` **37/37** · `tmp/d1_ui_probe.js` **28/28** | reads `GET {base}/models` only — zero tokens, never a completion; key never echoed/logged/reflected; ≤10s · ≤1MB · ≤200 models; the 32-entry whitelist ceiling is spoken, and the write still rides `#saveBtn` |
+| model_discovery (D1, round D) | `POST /api/models/discover` behind `WEB_TOKEN` · `mycore.base_url` (which endpoint to read + when the saved key applies) · `mycore.models` (the whitelist it fills) · optional inline `api_key` (probe only, never stored) | **configurable** — Settings Model card `#discPanel`: `#discKey` + `#discBtn` → `#discOut` checkboxes + select-all → `#discAddBtn` appends into the hidden `#mycModels` source field; the chips (`#mycModelChips`) render it and the manual add box (`#mycModelAdd`) writes through the same input event | `tmp/e2e_d1_discover.py` **37/37** · `tmp/d1_ui_probe.js` **28/28** | reads `GET {base}/models` only — zero tokens, never a completion; key never echoed/logged/reflected; ≤10s · ≤1MB · ≤200 models; the 32-entry whitelist ceiling is spoken, and the write still rides `#saveBtn` |
 
 ### 6.2 Gaps found — none is a missing editor
 
 | Gap | State today | Routed to |
 |---|---|---|
-| **No one-click model discovery** — `#mycModels` was a manual comma-separated list; `GET {base}/v1/models` was never used | **resolved by D1** — the DISCOVER panel sits under the whitelist (round D car 1); the text field itself stays on purpose so activation `U6` keeps working, and ADD rides the existing save | shipped (`tmp/e2e_d1_discover.py` 37/37 · `tmp/d1_ui_probe.js` 28/28) |
+| **No one-click model discovery** — `#mycModels` was a manual comma-separated list; `GET {base}/v1/models` was never used | **resolved by D1 + the chips terminal state (round D car 2)** — the DISCOVER panel sits under the whitelist editor; the visible field became chips + a manual add box (`#mycModelAdd`) with `#mycModels` kept as the hidden source of truth, so activation `U6` now adds through the box and every write still rides the existing save | shipped (`tmp/e2e_d1_discover.py` 37/37 · `tmp/d1_ui_probe.js` 28/28 · `tmp/e2e_activation_ui.js` U6 52) |
 | **No usage-ledger toggle in the console**, and the site still promises "only if you opt in" | the collection pipeline itself does not exist yet | **D2** — ruling 1: the same car ships the toggle *and* rewrites `security.s4B` / `models.p1B`, or the site would publish a lie |
 | **No `USER_curated` "what it knows about you" panel** | the file exists and the model edits it; no user-facing read surface | **D4** |
 | **Tail / mood is a text chip** (`#tailState`), no state visual | text only | **D3** |

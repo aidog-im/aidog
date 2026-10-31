@@ -5,9 +5,12 @@
 #   bash deploy/deploy_site.sh          # deploy + ensure domains/DNS + verify
 #   bash deploy/deploy_site.sh --check  # verify only (no deploy, no writes)
 #
-# Also idempotently keeps the visit counter alive (docs/features/site_visibility.md):
-# ensures KV namespace "aidog-site-visits" + VISITS binding on the Pages project
-# before uploading, so site/functions/api/visits.js can increment on /api/visits.
+# Also idempotently keeps the visit counter alive (docs/features/site_visibility.md)
+# and provisions the D2 usage ledger: ensures KV namespace "aidog-site-visits"
+# + VISITS binding (legacy, kept for rollback) AND the D1 database
+# "aidog-site-ledger" + LEDGER binding + schema migration + one-time visits
+# seed from KV, so site/functions/api/{ledger,stats,visits}.js can serve the
+# public charts and counters. See docs/design/usage_ledger_design.md.
 #
 # Credential slots (secrets.env, values never echoed):
 #   AIDOG_CF_API_TOKEN   Pages edit + zone read (wrangler + Pages domains API)
@@ -90,6 +93,81 @@ print(json.dumps({"deployment_configs": dc}))' "$kvid")
       [ "$ok" = "True" ] || echo "DEPLOY_SITE: WARN binding patch result=$ok — /api/visits may stay pending" >&2
     else
       echo "DEPLOY_SITE: KV binding VISITS already -> $kvid"
+    fi
+  fi
+
+  # ---- 0b) ensure D1 ledger database + Pages binding (idempotent) -------
+  # D2 car: ONE D1 database backs /api/ledger (reports), /api/stats (public
+  # aggregates) and the migrated /api/visits counter. Missing permission =>
+  # WARN + continue: the endpoints then honestly answer 503 and verify
+  # reports them as pending, never as a fabricated zero.
+  D1_NAME=aidog-site-ledger
+  dbid=$(cfjson GET "$API/accounts/$AIDOG_CF_ACCOUNT_ID/d1/database" \
+    | python3 -c 'import json,sys
+for db in (json.load(sys.stdin).get("result") or []):
+    if db.get("name")=="aidog-site-ledger": print(db["id"]); break' 2>/dev/null || true)
+  if [ -z "$dbid" ]; then
+    resp=$(cfjson POST "$API/accounts/$AIDOG_CF_ACCOUNT_ID/d1/database" \
+      "$AIDOG_CF_API_TOKEN" "{\"name\":\"$D1_NAME\"}")
+    dbid=$(printf '%s' "$resp" | python3 -c 'import json,sys
+d=json.load(sys.stdin); print(d["result"]["id"] if d.get("success") else "")' 2>/dev/null || true)
+    [ -n "$dbid" ] && echo "DEPLOY_SITE: D1 database created ($D1_NAME)"
+  else
+    echo "DEPLOY_SITE: D1 database reused ($D1_NAME)"
+  fi
+  if [ -z "$dbid" ]; then
+    echo "DEPLOY_SITE: WARN D1 ensure failed — token likely lacks D1 Edit; /api/ledger /api/stats /api/visits will stay pending" >&2
+  else
+    proj=$(cfjson GET "$API/accounts/$AIDOG_CF_ACCOUNT_ID/pages/projects/$PROJECT")
+    need=$(printf '%s' "$proj" | python3 -c 'import json,sys
+d=json.load(sys.stdin); dbid=sys.argv[1]
+dc=(d.get("result") or {}).get("deployment_configs") or {}
+ok=all((((dc.get(e) or {}).get("d1_databases") or {}).get("LEDGER") or {}).get("database_id")==dbid for e in ("production","preview"))
+print("no" if ok else "yes")' "$dbid" 2>/dev/null || echo unknown)
+    if [ "$need" = "yes" ]; then
+      body=$(printf '%s' "$proj" | python3 -c 'import json,sys
+d=json.load(sys.stdin); dbid=sys.argv[1]
+dc=(d.get("result") or {}).get("deployment_configs") or {}
+for e in ("production","preview"):
+    cfg=dc.setdefault(e, {})
+    cfg["d1_databases"]={**(cfg.get("d1_databases") or {}), "LEDGER": {"database_id": dbid, "database_name": "aidog-site-ledger"}}
+print(json.dumps({"deployment_configs": dc}))' "$dbid")
+      out=$(cfjson PATCH "$API/accounts/$AIDOG_CF_ACCOUNT_ID/pages/projects/$PROJECT" \
+        "$AIDOG_CF_API_TOKEN" "$body")
+      ok=$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("success"))' 2>/dev/null || echo parse_error)
+      echo "DEPLOY_SITE: D1 binding LEDGER -> $dbid ensure ($ok)"
+      [ "$ok" = "True" ] || echo "DEPLOY_SITE: WARN d1 binding patch result=$ok — endpoints may stay pending" >&2
+    else
+      echo "DEPLOY_SITE: D1 binding LEDGER already -> $dbid"
+    fi
+    # schema migration (idempotent: CREATE IF NOT EXISTS). The known wrangler
+    # flake is `fetch failed` — one silent retry, then an honest WARN.
+    d1_migrate() {
+      ( cd site && wrangler d1 execute "$D1_NAME" --remote \
+          --file ../deploy/d1_migrations/0001_init.sql >/dev/null 2>&1 )
+    }
+    if d1_migrate || d1_migrate; then
+      echo "DEPLOY_SITE: D1 migration applied ($D1_NAME)"
+    else
+      echo "DEPLOY_SITE: WARN D1 migration failed — endpoints will 503 until it lands" >&2
+    fi
+    # one-time visits migration: max-seed site_visits with the historical KV
+    # count so the public number continues instead of restarting at zero.
+    if [ -n "${kvid:-}" ]; then
+      kvcount=$(curl -s --noproxy '*' --max-time 20 \
+        -H "Authorization: Bearer $AIDOG_CF_API_TOKEN" \
+        "$API/accounts/$AIDOG_CF_ACCOUNT_ID/storage/kv/namespaces/$kvid/values/count" 2>/dev/null || true)
+      if printf '%s' "$kvcount" | grep -Eq '^[0-9]+$'; then
+        if ( cd site && wrangler d1 execute "$D1_NAME" --remote --command \
+            "INSERT INTO site_visits(name,count) VALUES('count',$kvcount) ON CONFLICT(name) DO UPDATE SET count=MAX(count,$kvcount)" \
+            >/dev/null 2>&1 ); then
+          echo "DEPLOY_SITE: visits counter seeded from KV (count >= $kvcount)"
+        else
+          echo "DEPLOY_SITE: WARN visits seed from KV failed — counter continues from live writes" >&2
+        fi
+      else
+        echo "DEPLOY_SITE: visits seed skipped (KV count absent/zero)"
+      fi
     fi
   fi
 
@@ -195,7 +273,7 @@ if grep -q "## Product" /tmp/deploy_site_llms.txt \
    && grep -q "nine venues" /tmp/deploy_site_llms.txt \
    && grep -q "prepare → human console approval → execute" /tmp/deploy_site_llms.txt \
    && grep -q "ACTIVATION card" /tmp/deploy_site_llms.txt \
-   && grep -q "2045/2045" /tmp/deploy_site_llms.txt \
+   && grep -q "2080/2080" /tmp/deploy_site_llms.txt \
    && grep -q "aidog.im/#capabilities" /tmp/deploy_site_llms.txt; then
   echo "DEPLOY_SITE: VERIFY OK /llms.txt facts (capabilities, web3 gate, activation, gates)"
 else
@@ -216,6 +294,31 @@ code=$(pget https://aidog.im/manifest.webmanifest /tmp/deploy_site_manifest.json
 if [ "$code" = "200" ]; then
   python3 -c 'import json,sys; d=json.load(open("/tmp/deploy_site_manifest.json")); assert d["name"] and d["icons"]' \
     || { echo "DEPLOY_SITE: VERIFY FAIL /manifest.webmanifest (invalid JSON)" >&2; fail=1; }
+fi
+
+# --- usage ledger (D2): public aggregates must answer, never fabricate --
+st_code=$(pget "https://aidog.im/api/stats" /tmp/deploy_site_stats.json)
+if [ "$st_code" = "200" ] && python3 - /tmp/deploy_site_stats.json <<'PYV'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert isinstance(d.get("totals"), dict) and isinstance(d["totals"].get("requests"), int), d
+assert isinstance(d.get("installs"), int) and isinstance(d.get("reports"), int), d
+assert isinstance(d.get("daily"), list) and len(d["daily"]) <= 7, d
+assert isinstance(d.get("by_model"), list), d
+assert isinstance(d.get("by_scenario"), dict), d
+assert isinstance(d.get("probe_reports"), int), d
+PYV
+then
+  echo "DEPLOY_SITE: VERIFY OK /api/stats (200, aggregate shape)"
+elif [ "$st_code" = "503" ] && python3 - /tmp/deploy_site_stats.json <<'PYV' 2>/dev/null
+import json, sys
+assert json.load(open(sys.argv[1])).get("error"), "503 without error field"
+PYV
+then
+  echo "DEPLOY_SITE: PENDING /api/stats (503 ledger not configured — D1 binding not active; not a failure)"
+else
+  echo "DEPLOY_SITE: VERIFY FAIL /api/stats (http $st_code)" >&2
+  fail=1
 fi
 
 # --- visit counter: 200 + increment, or honest 503 (pending, not a failure) -

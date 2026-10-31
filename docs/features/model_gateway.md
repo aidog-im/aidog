@@ -124,15 +124,15 @@ untouched — two sources, each honest about its own availability.
 * **Overview** gains a `SELF-METERED (7 DAYS)` block: requests / ok / fail /
   in / out / cost chips + honest notes (unpriced models, no-usage count,
   truncation). Inactive meter = the whole block hidden, never fake zeros.
-* **DISCOVER MODELS (D1)** sits under the whitelist field: an optional key
+* **DISCOVER MODELS (D1)** sits under the whitelist editor: an optional key
   (probe-only, never stored) + `DISCOVER` → checkboxes + select-all → `ADD`,
-  which appends into the existing `#mycModels` field and rides the normal
-  dirty → `#saveBtn` save (no write route of its own). The field's chips
-  mirror it both ways.
+  which appends into the hidden `#mycModels` source field and rides the normal
+  dirty → `#saveBtn` save (no write route of its own). The chips render the
+  field and the manual add box writes through the same input event.
 
 ## 5. Gates (0.5.55)
 
-`python3 -m mycore.tests.run` **2045/2045** (the `gw:` lane: grammar,
+`python3 -m mycore.tests.run` **2080/2080** (the `gw:` lane: grammar,
 rotation, rate windows, meter rows/aggregation/cost, config precedence,
 ChatClient gating) · `tests/web_console_p3.py` **432/432** (validation
 matrix, mutex, secrets group, both new routes) · `tmp/e2e_gateway_ui.js`
@@ -161,8 +161,10 @@ model directory — it never spends a token and never reaches a completion**
   `count`/`total`/`truncated` make both the 200 cap and any filtered id
   visible instead of silent. A bare host falls back to `{base}/v1/models`.
 * **Client**: `#discPanel` (key + DISCOVER + results + ADD) under the
-  whitelist field. `#mycModels` stays the text field activation `U6` fills;
-  ADD edits it and dispatches one `input` event, so the dirty flag, the
+  whitelist editor. Since the chips terminal state (round D car 2),
+  `#mycModels` is the hidden source of truth under the chips + add box and
+  `U6` adds through `#mycModelAdd`; every path — manual add, chip x, typed
+  edit, discovery ADD — dispatches one `input` event, so the dirty flag, the
   sticky save bar and `saveSettings()` remain the single writer. The 32-entry
   ceiling is spoken (`only {n} added …`), never silent.
 

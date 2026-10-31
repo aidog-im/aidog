@@ -8946,8 +8946,8 @@ def test_community() -> None:
                     and "createDiscussion" in str(p.get("query", "")):
                 return 200, json.dumps({"data": {"createDiscussion":
                     {"discussion": {"number": 42,
-                                    "url": "https://github.com/aidog-im/aidog/discussions/42"}}}})
-            if "/repos/" in u and u.endswith("/aidog"):
+                                    "url": "https://github.com/AiDog-im/AiDog/discussions/42"}}}})
+            if "/repos/" in u and u.endswith("/AiDog"):
                 return 200, json.dumps({"node_id": "R_deadbeef"})
             if u.endswith("/graphql"):     # category lookup first
                 return 200, json.dumps({"data": {"repository":
@@ -8958,7 +8958,7 @@ def test_community() -> None:
         res = co.create("Ship it", "body text", "ideas")
         check("community: create -> number + url",
               res == {"number": 42,
-                      "url": "https://github.com/aidog-im/aidog/discussions/42"},
+                      "url": "https://github.com/AiDog-im/AiDog/discussions/42"},
               str(res))
         mutation = [c for c in calls if isinstance(c[2], dict)
                     and "createDiscussion" in str(c[2].get("query", ""))]
@@ -9162,7 +9162,7 @@ def test_community_tool() -> None:
             if isinstance(payload, dict) and "createDiscussion" in str(payload.get("query", "")):
                 return 200, json.dumps({"data": {"createDiscussion":
                     {"discussion": {"number": 5,
-                                    "url": "https://github.com/aidog-im/aidog/discussions/5"}}}})
+                                    "url": "https://github.com/AiDog-im/AiDog/discussions/5"}}}})
             if isinstance(payload, dict) and "discussionCategories" in str(payload.get("query", "")):
                 return 200, json.dumps({"data": {"repository":
                     {"discussionCategories": {"nodes": [
@@ -15649,6 +15649,160 @@ def execute_code_read_gate(td: str, path: str) -> str:
                                  (td,), None)
 
 
+def test_ledger() -> None:
+    """D2 ledger car (mycore.ledger): inertness, resettable identity,
+    deterministic scenario rules, the whitelist-exact payload, the
+    attempt-once-a-day leg, fail-closed settings and silent send failures."""
+    from mycore import ledger as lg
+    from mycore import meter as mtr
+    import time
+    td = Path(tempfile.mkdtemp(prefix="ledger_"))
+
+    # ---- inert default (nothing exists before activate) ----
+    lg.deactivate()
+    mtr.deactivate()
+    check("ledger: inactive install_id is empty", lg.install_id() == "")
+    check("ledger: inactive build_report is None", lg.build_report() is None)
+    check("ledger: inactive maybe_report is False",
+          lg.maybe_report({"ledger": {"enabled": True,
+                                      "endpoint": "https://x"}}) is False)
+    try:
+        lg.note_turn([{"name": "run_bash", "ok": True}])
+        lg.note_event("voice")
+        ok = True
+    except Exception:  # noqa: BLE001 — the calls themselves must never raise
+        ok = False
+    check("ledger: inactive note calls are no-ops", ok)
+
+    # ---- activation + identity ----
+    lg.activate(td)
+    check("ledger: activate returns the dir", lg.active_dir() == td)
+    iid = lg.install_id()
+    check("ledger: install id is a stable uuid4",
+          len(iid) == 36 and lg.install_id() == iid)
+    check("ledger: install id prefix is 8 chars",
+          lg.install_id_prefix() == iid[:8])
+    mode = (td / lg.ID_FILE).stat().st_mode & 0o777
+    check("ledger: install id file is 0600", mode == 0o600, oct(mode))
+    check("ledger: console prefix reader is read-only",
+          lg.install_id_prefix_at(td) == iid[:8]
+          and lg.install_id_prefix_at(td / "missing") == "")
+
+    # ---- deterministic scenario mapping (owner-ruled) ----
+    check("ledger: chat scenario", lg.scenario_of([]) == "chat")
+    check("ledger: coding scenario",
+          lg.scenario_of([{"name": "run_bash"}]) == "coding")
+    check("ledger: research scenario (http_fetch)",
+          lg.scenario_of([{"name": "http_fetch"}]) == "research")
+    check("ledger: research scenario (browser)",
+          lg.scenario_of([{"name": "browser_click"}]) == "research")
+    check("ledger: any research tool marks the turn research",
+          lg.scenario_of([{"name": "read_file"},
+                          {"name": "http_fetch"}]) == "research")
+    check("ledger: junk tool log collapses to chat",
+          lg.scenario_of([None, 3, {"no_name": 1}]) == "chat")
+    lg.note_turn([{"name": "run_bash", "ok": True}])
+    lg.note_turn([])
+    lg.note_turn([{"name": "http_fetch", "ok": True}])
+    lg.note_event("voice")
+    lg.note_event("publishing")
+    lg.note_event("bogus")            # ignored by construction
+
+    # ---- whitelist-exact payload ----
+    md = td / "meter"
+    mtr.activate(md)
+    day = lg._day_of(time.time())
+    with open(md / f"{day}.jsonl", "a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"ts": 1, "day": day,
+                             "ep": "https://secret.example/v1/chat/completions",
+                             "model": "m1", "ok": True, "in": 10,
+                             "out": 20}) + "\n")
+        fh.write(json.dumps({"ts": 1, "day": day,
+                             "ep": "https://secret.example/v1/chat/completions",
+                             "model": "m1", "ok": False,
+                             "err": "HTTP 500"}) + "\n")
+        fh.write(json.dumps({"ts": 1, "day": day, "ep": "e", "model": "m2",
+                             "ok": True}) + "\n")   # honest no-usage row
+    p = lg.build_report(day=day)
+    check("ledger: payload key set is frozen",
+          p is not None and set(p) == {"v", "install_id", "day", "requests",
+                                       "tokens", "models", "scenarios"},
+          str(sorted(p)) if isinstance(p, dict) else "None")
+    check("ledger: requests count ok rows only",
+          p is not None and p["requests"] == 2)
+    check("ledger: tokens sum only reported counts",
+          p is not None and p["tokens"] == {"in": 10, "out": 20})
+    rows = {m["model"]: m for m in (p or {}).get("models", [])}
+    check("ledger: model rows aggregate exactly",
+          rows.get("m1") == {"model": "m1", "requests": 1, "in": 10,
+                             "out": 20}
+          and rows.get("m2") == {"model": "m2", "requests": 1, "in": 0,
+                                 "out": 0}, str(rows))
+    body = json.dumps(p) if p is not None else ""
+    check("ledger: endpoint url never enters the payload",
+          "secret.example" not in body)
+    check("ledger: scenarios counted from turn rows",
+          p is not None and p["scenarios"] == {"chat": 1, "coding": 1,
+                                               "research": 1, "voice": 1,
+                                               "publishing": 1},
+          str((p or {}).get("scenarios")))
+    check("ledger: an empty day reports nothing",
+          lg.build_report(day="2000-01-01") is None)
+
+    # ---- settings are fail-closed by construction ----
+    check("ledger: module default is off with an empty endpoint",
+          lg.DEFAULT_SETTINGS == {"enabled": False, "endpoint": ""})
+    check("ledger: non-bool enabled collapses to off",
+          lg.effective_settings({"ledger": {"enabled": 1,
+                                            "endpoint": "https://x"}})["enabled"] is False)
+    check("ledger: a missing block is off",
+          lg.effective_settings({})["enabled"] is False)
+    check("ledger: endpoint is capped",
+          len(lg.effective_settings({"ledger": {"enabled": True,
+                                                "endpoint": "h" * 500}})["endpoint"])
+          == lg.ENDPOINT_MAX)
+
+    # ---- the daily leg: attempt-once, honest failures, no retry storm ----
+    sent: list[dict] = []
+
+    def ok_post(url, method, headers, data, timeout):
+        sent.append(json.loads(data))
+        return (200, "")
+
+    cfg = {"ledger": {"enabled": True,
+                      "endpoint": "https://aidog.im/api/ledger"}}
+    lg.set_send(ok_post)
+    check("ledger: first daily leg delivers", lg.maybe_report(cfg) is True)
+    check("ledger: the sent report carries this install id",
+          len(sent) == 1 and sent[0].get("install_id") == iid)
+    check("ledger: same-day second leg does not fire",
+          lg.maybe_report(cfg) is False and len(sent) == 1)
+    check("ledger: last_report_day reads the state dir",
+          lg.last_report_day(state_dir=td) == day)
+    lg.set_send(lambda *a: (0, ""))
+    check("ledger: a dead endpoint is a silent False",
+          lg.send(p or {}, "https://x") is False)
+    lg.set_send(None)
+    check("ledger: empty endpoint never sends",
+          lg.maybe_report({"ledger": {"enabled": True, "endpoint": ""}}) is False)
+    check("ledger: no ledger block never sends",
+          lg.maybe_report({}) is False)
+
+    # ---- oversized bodies never leave the machine ----
+    lg.set_send(lambda *a: (200, ""))
+    check("ledger: oversize body refused before send",
+          lg.send({"pad": "y" * lg.PAYLOAD_MAX_BYTES}, "https://x") is False)
+    lg.set_send(None)
+
+    # ---- resettable identity ----
+    (td / lg.ID_FILE).unlink()
+    check("ledger: deleting the id file resets identity",
+          lg.install_id() != iid)
+
+    lg.deactivate()
+    mtr.deactivate()
+
+
 def main() -> int:
     test_model()
     test_registry_and_tools()
@@ -15719,6 +15873,7 @@ def main() -> int:
     test_mission()
     test_wave3()
     test_delta2()
+    test_ledger()
     print(f"\n{len(PASS)} pass · {len(FAIL)} fail")
     if FAIL:
         print("failed: " + ", ".join(FAIL))

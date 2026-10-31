@@ -14,9 +14,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/aidog-im/aidog/releases"><img src="https://img.shields.io/badge/release-0.5.53-blue?style=flat-square" alt="release 0.5.53"></a>
+  <a href="https://github.com/AiDog-im/AiDog/releases"><img src="https://img.shields.io/badge/release-0.5.53-blue?style=flat-square" alt="release 0.5.53"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
-  <img src="https://img.shields.io/badge/core_tests-2045%2F2045-brightgreen?style=flat-square" alt="core tests 2045/2045">
+  <img src="https://img.shields.io/badge/core_tests-2080%2F2080-brightgreen?style=flat-square" alt="core tests 2080/2080">
   <img src="https://img.shields.io/badge/console_smoke-432%2F432-brightgreen?style=flat-square" alt="console smoke 432/432">
   <img src="https://img.shields.io/badge/permanently-free-ff6f00?style=flat-square" alt="permanently free">
 </p>
@@ -56,7 +56,7 @@ machine. It is built around three ideas that most assistants skip:
   No vector store you cannot read or audit.
 - **A self-developed core.** The runtime kernel (`mycore`) is written from
   scratch in this repository — an honest function-calling loop with explicit
-  stop reasons, **36 modules ≈ 21.6k LOC, 2,045 tests**, and zero upstream
+  stop reasons, **37 modules ≈ 22.0k LOC, 2,080 tests**, and zero upstream
   dependencies after the core swap. Swap the kernel, never swap "me".
 
 It talks to you over **Telegram**, a **loopback web console**, a
@@ -82,7 +82,7 @@ model key (or use the zero-key trial path) and the whole product activates.
 
 |  | Capability | What it provides |
 |---|---|---|
-| 🧬 | **Self-developed core** | `mycore`: FC loop with honest stop reasons, fail-closed service, watchdog, doctor health gate — 36 modules, 2,045 tests, zero upstream |
+| 🧬 | **Self-developed core** | `mycore`: FC loop with honest stop reasons, fail-closed service, watchdog, doctor health gate — 37 modules, 2,080 tests, zero upstream |
 | 🎭 | **Constitution persona** | `SOUL.md` first in the system stack; red lines and tone enforced every reply, not sampled from a persona prompt |
 | 🧠 | **Curated memory** | Bounded Markdown budgets + archive tiers + digital-memory protocol; `memory` suite 58/58 |
 | 🧩 | **Skills + deterministic router** | `SKILL.md` frontmatter (industry-standard fields), route pre-filter picks TOP3 *before* any body loads — 30/30 |
@@ -137,7 +137,7 @@ Three-layer separation is the whole point: **swap the core, never swap
 > remotes — see [`docs/installation.md`](docs/installation.md).
 
 ```bash
-git clone https://github.com/aidog-im/aidog.git aidog && cd aidog  # public repository
+git clone https://github.com/AiDog-im/AiDog.git aidog && cd aidog  # public repository
 bash deploy/install.sh        # one command: provision + boot + verify
 aidog setup                   # guided wizard: fills the slots it lists
 ```
@@ -191,7 +191,7 @@ Every release is cut only after these run green on a clean tree:
 
 | Suite | Result |
 |---|---|
-| `mycore` core suite | **2045/2045** |
+| `mycore` core suite | **2080/2080** |
 | Console smoke (live HTTP) | **432/432** |
 | Skill router | **30/30** |
 | Memory persistence | **58/58** |
@@ -205,7 +205,7 @@ Every release is cut only after these run green on a clean tree:
 Catalog scope: **27 registered tools** · **9 exchange venues** · **21
 real-machine E2E legs** — all green.
 
-Locale packs: `en` (default) + `zh`, **1213 keys** each, parity lint in CI;
+Locale packs: `en` (default) + `zh`, **1215 keys** each, parity lint in CI;
 the marketing site ships its own **302-key** bilingual pack.
 
 ## Documentation

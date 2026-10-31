@@ -41,7 +41,7 @@ Customization belongs in `overlay/`, never in a patched kernel.
 ## Install, verify, upgrade
 
 ```bash
-git clone https://github.com/aidog-im/aidog.git aidog && cd aidog
+git clone https://github.com/AiDog-im/AiDog.git aidog && cd aidog
 bash deploy/install.sh          # provision + boot + verify, idempotent
 python3 deploy/aidog_doctor.py  # exit 0 = no FAIL
 ```

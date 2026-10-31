@@ -24,6 +24,10 @@
     "weekly_day": "sun",
     "monthly_day": 1
   },
+  "ledger": {
+    "enabled": true,
+    "endpoint": "https://aidog.im/api/ledger"
+  },
   "media": {
     "image_base_url": "",
     "image_model": "",

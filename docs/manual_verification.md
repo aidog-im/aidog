@@ -28,7 +28,7 @@ top**: install path, console walk-through, chat, Telegram, upgrade.
 Prerequisites: Linux with `python3` ≥ 3.10, `tmux`, `git`; free port 8790.
 
 ```bash
-git clone https://github.com/aidog-im/aidog.git aidog && cd aidog
+git clone https://github.com/AiDog-im/AiDog.git aidog && cd aidog
 bash deploy/install.sh
 ```
 

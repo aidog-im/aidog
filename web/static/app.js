@@ -1618,12 +1618,13 @@ async function upstreamTest() {
        a settings field (SAVE_BAR_SKIP), so it can never promise a save;
      - only the SERVER's reason word is rendered (an HTTP status or an
        exception class), never a URL, a body line or a key;
-     - ADD only edits the existing #mycModels field and dispatches one
-       `input` event: the dirty flag, the sticky bar and the existing
-       saveSettings() stay the single writer — discovery adds NO write route.
-   The chips under the field mirror it both ways: they render from its value
-   and write back through the same input event, so the text field keeps being
-   the source of truth the activation car's U6 leg fills. */
+     - ADD only edits the #mycModels field (hidden since the chips
+       terminal state) and dispatches one `input` event: the dirty flag,
+       the sticky bar and the existing saveSettings() stay the single
+       writer — discovery and the manual add box add NO write route.
+   The chips render from the field's value and write back through the same
+   input event, so typed edits, chip x, discovery ADD and the add box all
+   meet in one place; activation U6 now adds through the box. */
 const DISCOVER_MAX = 32;              // mycore.models grammar: at most 32 ids
 let discState = { models: [], total: 0, ready: false };
 let discMsgState = null;              // {kind, a, b, reason, raw} — relang repaint
@@ -1774,6 +1775,30 @@ function discAdd() {
     el.value = have.concat(add).join(", ");
     el.dispatchEvent(new Event("input", { bubbles: true }));
   }
+  if (fresh.length > add.length) discMsg({ kind: "full", a: add.length });
+}
+
+/* Manual add box (chips terminal state, round D car 2): same rules as
+   discAdd — commas are accepted (a paste of the old format), duplicates
+   drop silently, the 32-entry ceiling talks through the discovery status
+   line instead of failing silently, and the box clears on submit either
+   way. One write into #mycModels + one input event, like every other path. */
+function modelAdd() {
+  const box = document.getElementById("mycModelAdd");
+  const el = document.getElementById("mycModels");
+  if (!box || !el) return;
+  const picked = String(box.value || "").split(",")
+    .map(s => s.trim()).filter(Boolean);
+  if (!picked.length) return;
+  const have = modelIdList();
+  const fresh = picked.filter(m => have.indexOf(m) < 0);
+  const free = Math.max(0, DISCOVER_MAX - have.length);
+  const add = fresh.slice(0, free);
+  if (add.length) {
+    el.value = have.concat(add).join(", ");
+    el.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  box.value = "";
   if (fresh.length > add.length) discMsg({ kind: "full", a: add.length });
 }
 
@@ -3346,14 +3371,22 @@ async function saveSettings() {
       .split("\n").map(s => s.trim()).filter(s => s.length > 0);
     payload.obedience = { rules: lines("obRules"), forbidden: lines("obForbidden") };
   }
+  // D2 ledger: partial block on purpose — {enabled} only, the endpoint
+  // (advanced, operator-edited in the file) survives the deep merge.
+  if (ledDirty) {
+    const ledTog = document.getElementById("ledToggle");
+    payload.ledger = { enabled: !!(ledTog && ledTog.checked) };
+  }
   const hookPatch = hooksPayload();
   if (hookPatch) payload.hooks = hookPatch;
   const hookMsg = document.getElementById("hookMsg");
   const chanMsg = document.getElementById("chanMsg");
   const bridgeMsg = document.getElementById("bridgeMsg");
+  const ledMsgClear = document.getElementById("ledMsg");
   if (hookMsg) { hookMsg.className = "save-state"; hookMsg.textContent = ""; }
   if (chanMsg) { chanMsg.className = "save-state"; chanMsg.textContent = ""; }
   if (bridgeMsg) { bridgeMsg.className = "save-state"; bridgeMsg.textContent = ""; }
+  if (ledMsgClear) { ledMsgClear.className = "save-state"; ledMsgClear.textContent = ""; }
   if (!token) {
     state.className = "save-state err";
     state.textContent = t("save.needToken", "token required");
@@ -3398,9 +3431,17 @@ async function saveSettings() {
       const obErrs = details.filter(d => String(d).includes("obedience"));
       const grMsg = document.getElementById("grMsg");
       const obMsg = document.getElementById("obMsg");
+      const ledMsg = document.getElementById("ledMsg");
       if (grMsg && grErrs.length) {
         grMsg.className = "save-state err";
         grMsg.textContent = grErrs.join("; ");
+      }
+      if (ledMsg) {
+        const ledErrs = details.filter(d => String(d).includes("ledger"));
+        if (ledErrs.length) {
+          ledMsg.className = "save-state err";
+          ledMsg.textContent = ledErrs.join("; ");
+        }
       }
       if (obMsg && obErrs.length) {
         obMsg.className = "save-state err";
@@ -3430,6 +3471,8 @@ async function saveSettings() {
     mycRestartDirty = false;
     bridgeDirty = false;
     guardDirty = false; obedDirty = false;
+    ledDirty = false;
+    if (payload.ledger) loadLedgerStatus();
     // v0.5.55: the endpoint manager re-reads the server-normalized chain
     // (source/rows/presence may all have changed) and drops its edit flag.
     epDirty = false;
@@ -3512,6 +3555,8 @@ let chanWebhookMeta = null;   // X8: top-level .webhook {url, secret_configured}
 let chanDirty = false, usageDirty = false, mycDirty = false, toolsDirty = false;
 // car 7 (D11): only the blocks the operator edited join the save payload.
 let guardDirty = false, obedDirty = false;
+// D2 ledger car: the opt-out switch follows the same dirty-block contract.
+let ledDirty = false, _ledgerWired = false;
 // activation car: only the keys the chat service reads AT START raise this
 // flag (tools_off / mcp / shell / context_dirs) — a models/budget edit must
 // never nag for a restart it does not need.
@@ -4841,6 +4886,43 @@ function wireGuardObed() {
   });
 }
 
+/* D2 ledger car: the opt-out switch marks dirty like every other settings
+   block; the status face reads GET /api/ledger (last report day + install-id
+   prefix) and is fail-soft — a network error keeps the last good paint. */
+function wireLedger() {
+  if (_ledgerWired) return;
+  _ledgerWired = true;
+  const el = document.getElementById("ledToggle");
+  if (el) el.addEventListener("change", () => { ledDirty = true; });
+}
+
+let ledgerStatusData = null;
+
+async function loadLedgerStatus() {
+  try {
+    ledgerStatusData = await fetch("/api/ledger").then(r => r.json());
+  } catch (e) { /* keep last paint */ }
+  paintLedgerStatus();
+}
+
+function paintLedgerStatus() {
+  const doc = ledgerStatusData;
+  if (!doc || typeof doc !== "object") return;
+  const last = document.getElementById("ledLastStat");
+  if (last) last.textContent = doc.last_report || t("led.never", "never");
+  const idEl = document.getElementById("ledIdStat");
+  if (idEl) {
+    idEl.textContent = doc.install_id_prefix
+      ? doc.install_id_prefix + "…" : t("led.noId", "not generated yet");
+  }
+  const status = document.getElementById("ledStatus");
+  if (status) {
+    status.textContent = doc.enabled
+      ? t("led.on", "reporting ON — one anonymous report per day")
+      : t("led.off", "reporting OFF — nothing leaves this machine");
+  }
+}
+
 /* car 7 (D11): the leash read face — tail state + budget status. Refreshed
    on the SAME cadence as the status panel plus right after every control
    action/save, so the Overview row and the Guardrails card never show a
@@ -4996,6 +5078,14 @@ function initSettingsPanels() {
     ? settings.obedience : {};
   setField("obRules", Array.isArray(obed.rules) ? obed.rules.join("\n") : "");
   setField("obForbidden", Array.isArray(obed.forbidden) ? obed.forbidden.join("\n") : "");
+  // D2 ledger: the opt-out switch + live status face (fail-soft).
+  const led = (settings.ledger && typeof settings.ledger === "object")
+    ? settings.ledger : {};
+  const ledTogPrefill = document.getElementById("ledToggle");
+  if (ledTogPrefill) ledTogPrefill.checked = led.enabled === true;
+  ledDirty = false;
+  wireLedger();
+  loadLedgerStatus();
   // Car 4 (D6): decision endpoint row (raw stored strings; empty = default)
   const dec = (myc.decision && typeof myc.decision === "object")
     ? myc.decision : {};
@@ -5037,7 +5127,7 @@ function initSettingsPanels() {
    SAVE runs the very same saveSettings(). */
 const SAVE_BAR_SKIP = "#credList, #tokenInput, #profCreate, #chanTestText, "
   + "#chanTestTarget, #chanTestRoute, #backupCard, #bridgeCard, "
-  + "#connectionsCard, #missionCard, #orchCard, #discPanel";
+  + "#connectionsCard, #missionCard, #orchCard, #discPanel, #mycModelAdd";
 let saveBarCardEl = null;
 
 function saveBarPaint(text, kind) {
@@ -5171,6 +5261,7 @@ function settingsRelang() {
   renderAgentBackup();         // car 8: agent-backup rows follow the pack too
   renderFileFace();            // round C: file face text follows the pack
   renderModelChips();          // D1: chip remove labels follow the pack
+  paintLedgerStatus();        // D2: ledger card dynamic rows follow the pack too
   discPaintMsg();              // D1: discovery status line repaints
   discPaintAdd();              // D1: ADD label repaints with the selection
 }
@@ -8715,6 +8806,15 @@ const discAddBtnEl = document.getElementById("discAddBtn");
 if (discAddBtnEl) discAddBtnEl.addEventListener("click", discAdd);
 const mycModelsEl = document.getElementById("mycModels");
 if (mycModelsEl) mycModelsEl.addEventListener("input", renderModelChips);
+/* chips terminal state (round D car 2): the manual add box. It sits in
+   SAVE_BAR_SKIP — typing there changes no setting; only modelAdd()'s write
+   into the hidden #mycModels field raises dirty, exactly like a typed edit. */
+const mycModelAddBtnEl = document.getElementById("mycModelAddBtn");
+if (mycModelAddBtnEl) mycModelAddBtnEl.addEventListener("click", modelAdd);
+const mycModelAddEl = document.getElementById("mycModelAdd");
+if (mycModelAddEl) mycModelAddEl.addEventListener("keydown", e => {
+  if (e.key === "Enter") { e.preventDefault(); modelAdd(); }
+});
 const cronCreateEl = document.getElementById("cronCreateBtn");
 if (cronCreateEl) cronCreateEl.addEventListener("click", cronCreate);
 ["cronName", "cronSpec", "cronPrompt"].forEach(id => {

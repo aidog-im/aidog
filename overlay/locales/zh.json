@@ -620,7 +620,7 @@
   "cron.namePh": "名称（列表标签，不带斜杠）",
   "cron.promptPh": "任务触发时发送的消息",
   "cron.createBtn": "创建",
-  "ctl.mycModels": "模型白名单（逗号分隔）",
+  "ctl.mycModels": "模型白名单",
   "ctl.mycBudget": "压缩预算（字符数）",
   "ctl.mycPrune": "会话自动清理（天数，0 = 关闭）",
   "ctl.mycPruneT": "删除超过 N 天的控制台/TG 会话文件（0 = 关闭）。当前控制台会话永不清理。",
@@ -632,6 +632,8 @@
   "ctl.effortMedium": "中",
   "ctl.effortHigh": "高",
   "ctl.mycModelsPh": "按任务的模型白名单，例如 model-a, model-b",
+  "ctl.mycModelAddPh": "输入模型 id，回车添加",
+  "ctl.mycModelAdd": "添加",
   "ctl.mycBudgetPh": "24000 = 默认",
   "ctl.restartSvcHint": "重启聊天服务后生效 —— 按钮在总览页",
   "cred.restartHint": "重启聊天服务后生效",
@@ -1211,5 +1213,14 @@
   "set.tierGuided": "引导",
   "set.tierAdvanced": "高级",
   "set.tierHint": "引导只显示大多数人会动的六张卡；高级打开全部卡片——任何东西都不会被移除，Access 与备份在两层里都可见。",
-  "save.dirty": "有未保存的更改"
+  "save.dirty": "有未保存的更改",
+  "sec.ledger": "用量上报",
+  "led.hint": "每天一条匿名上报：模型名、请求数与 token 总量。永不上报提示词、文件、路径或凭据。关闭 = 没有任何东西离开这台机器。",
+  "led.toggle": "发送每日匿名上报",
+  "led.lastReport": "上次上报（UTC）",
+  "led.installId": "安装 ID",
+  "led.never": "从未",
+  "led.noId": "尚未生成",
+  "led.on": "上报开启——每天一条匿名上报",
+  "led.off": "上报关闭——没有任何东西离开这台机器"
 }

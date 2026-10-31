@@ -43,9 +43,14 @@ regenerate any time by re-running the same script; sizes are asserted by
 
 ### Architecture
 
-- **Storage**: Workers KV namespace `aidog-site-visits` (free tier — enough
-  quota for a personal site; no paid plan anywhere in this product).
-  Created/looked up idempotently by title in `deploy/deploy_site.sh`.
+- **Storage**: Cloudflare **D1** database `aidog-site-ledger` (free tier:
+  100k rows written/day vs KV's 1,000 — the binding constraint that forced
+  the D2 migration; see `docs/design/usage_ledger_design.md`). The counter
+  lives in table `site_visits`; its historical KV count was seeded once
+  (max-seed, idempotent, re-run by `deploy/deploy_site.sh`) so the public
+  number continues instead of restarting at zero. The legacy KV namespace
+  `aidog-site-visits` and its `VISITS` binding stay provisioned this car —
+  zero cost, instant rollback to the previous `visits.js`.
 - **Endpoint**: `site/functions/api/visits.js`, a Pages Function (bundled into
   the Pages project; no extra Worker, no separate hostname).
   - `GET /api/visits` → `200`
@@ -53,16 +58,15 @@ regenerate any time by re-running the same script; sizes are asserted by
   - `GET /api/visits?format=text` → `200` `text/plain` body `visits: <int>`
     (the AI/CLI-friendly form).
   - `Cache-Control: no-store` on every response.
-  - **Failure semantics (red line)**: KV binding missing or a KV call throws →
+  - **Failure semantics (red line)**: D1 binding missing or a D1 call throws →
     `503 {"error":"counter not configured"}`. The function never returns a
     fabricated number; the frontend never renders a fabricated number.
-- **Binding**: KV is attached to the Pages project's `deployment_configs`
-  (both `production` and `preview`) as binding name `VISITS`, via
-  `PATCH /accounts/{id}/pages/projects/aidog-site` with
-  `{"deployment_configs":{...,"kv_namespaces":{"VISITS":{"namespace_id":...}}}}`.
-  The ensure step in `deploy/deploy_site.sh` merges into the *existing*
-  deployment config (GET → merge → PATCH), so re-runs are idempotent and can
-  never drop other bindings/vars.
+- **Binding**: the D1 database is attached to the Pages project's
+  `deployment_configs` (both `production` and `preview`) as binding name
+  `LEDGER`, via the same GET → merge → PATCH pattern as the KV binding, so
+  re-runs are idempotent and can never drop other bindings/vars. The schema
+  (`deploy/d1_migrations/0001_init.sql`, `CREATE ... IF NOT EXISTS`) is
+  applied idempotently by the deploy script via `wrangler d1 execute --remote`.
 - **Wrangler quirk (measured)**: `wrangler pages deploy` resolves the Pages
   Functions directory as `<process cwd>/functions`, *not* `<output>/functions`.
   The deploy step therefore runs from `site/`, where `functions/api/visits.js`
@@ -85,14 +89,14 @@ GETs (that is how increment is asserted).
 - `site/assets/main.js`: one `fetch("/api/visits", {cache:"no-store"})` on
   load; on any failure (network error, non-2xx, non-numeric count) the whole
   block stays `hidden`. Success reveals it with the integer.
-- Locale packs (`site/i18n/en.json`, `zh.json`, 302 keys each, same-name
+- Locale packs (`site/i18n/en.json`, `zh.json`, 307 keys each, same-name
   parity): `footer.views` = `"Page views:"` / `"页面浏览："`.
 
 ### Degradation ladder (what happens when a permission is missing)
 
-1. KV `Storage:Edit` on the API token → namespace + binding ensured → live
-   200 counter (current state; token verified to hold both KV and Pages edit).
-2. Namespace/binding ensure fails → deploy still succeeds; `/api/visits`
+1. D1 `D1 Edit` on the API token → database + binding + schema ensured → live
+   200 counter (current state).
+2. Binding/schema ensure fails → deploy still succeeds; `/api/visits`
    answers `503` honestly, `deploy_site.sh --check` prints `PENDING` (not a
    failure), footer block hidden, report carries the missing permission.
 3. Worker custom-domain fallback and "hide the block" are the last resorts;
@@ -104,6 +108,7 @@ GETs (that is how increment is asserted).
   `/llms.txt` 200 + first line `# I'm AiDog`, `/robots.txt`, `/sitemap.xml`,
   `/manifest.webmanifest` 200 + valid JSON with `name`/`icons`,
   `/assets/icons/icon-512.png`, `/assets/icons/apple-touch-icon.png`,
+  `/api/stats` 200 with the aggregate shape (or `PENDING` on an honest 503),
   `/api/visits` 200 with two-GET increment + `?format=text` (or `PENDING`
   with an `error` body when the binding is absent). All curl calls use
   `--noproxy '*'`.
@@ -114,3 +119,13 @@ GETs (that is how increment is asserted).
   one legitimate 404 is filtered out of the js-clean console check (with a
   comment in the script); the real counter is asserted against the public
   domain by the deploy check instead.
+
+## 5. Usage ledger + public charts (D2 car, 2026-10-31)
+
+The same D1 database backs the anonymous usage ledger: installs report once
+per UTC day (`mycore/ledger.py`, owner collect-by-default),
+`POST /api/ledger` upserts the whitelist-exact payload, `GET /api/stats`
+serves the public aggregates and the models-section chart renders them
+(`site/assets/main.js`, honest placeholder until the endpoint answers).
+Full design — schema, privacy whitelist, scenario rules, quota account,
+rollback: `docs/design/usage_ledger_design.md`.

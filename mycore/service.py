@@ -121,6 +121,7 @@ from . import decision
 from . import envslots
 from . import evolution
 from . import hooks as hooks_mod
+from . import ledger as ledger_mod
 from . import leash
 from . import mission as mission_mod
 from . import scheduler
@@ -402,6 +403,7 @@ class ChatService:
         self._mission_check = 0.0       # last mission tick evaluation (clock)
         self._chan_check = 0.0          # last channel inbound poll (clock)
         self._sniff_check = 0.0         # last SENSE sweep/delivery evaluation
+        self._ledger_check = 0.0        # last daily usage-report evaluation (D2)
         self._hold_state: dict[str, str] = {}   # car 7: gate log dedupe (leg -> code)
         self.log = ServiceLog(self.state / LOG_NAME, now=now)
         self.lang = self._load_lang()
@@ -518,6 +520,7 @@ class ChatService:
                 self._maybe_fire_cron()        # scheduler leg (no-op with no due jobs)
                 self._maybe_tick_missions()    # mission leg (0.5.44; no-op without an active mission)
                 self._maybe_sniff()            # SENSE leg (SNIFF car; no-op when off/paused)
+                self._maybe_ledger()           # D2 ledger leg (no-op when off/already sent)
                 self._maybe_poll_channels()    # channel leg (throttled, fail-soft)
                 if once and not updates:
                     break                          # nothing pending: exit 0
@@ -1043,6 +1046,27 @@ class ChatService:
                                f"file={res.path.name}", "trigger=cron")
         except Exception as e:  # noqa: BLE001 — a reflect failure never kills the loop
             self.log.write("REFLECT_ERR", f"err={type(e).__name__}")
+
+    def _maybe_ledger(self) -> None:
+        """D2 ledger leg: one anonymous usage report per UTC day (owner
+        collect-by-default ruling, docs/design/usage_ledger_design.md).
+        Throttled to ledger.CHECK_SEC, holds with the car-7 pause switch
+        (an automatic non-essential leg), and every failure is one log line —
+        a reporting problem must never kill the loop or the turn."""
+        nowt = self._now()
+        if nowt - self._ledger_check < ledger_mod.CHECK_SEC:
+            return
+        self._ledger_check = nowt
+        ok, code, ctx = self._gate(turns=False)
+        self._leash_hold("ledger", "" if ok else code, ctx)
+        if not ok:
+            return
+        try:
+            if ledger_mod.maybe_report(self._settings_doc(), self.state,
+                                       now=nowt):
+                self.log.write("LEDGER", "sent=1")
+        except Exception as e:  # noqa: BLE001 — a report failure never kills the loop
+            self.log.write("LEDGER_ERR", f"err={type(e).__name__}")
 
     def _cron_command(self, chat_id: int | str, arg: str) -> str:
         """`/cron` (list) · `/cron add [kind] <spec> :: <text>` · `/cron del <id>`.
@@ -1909,6 +1933,12 @@ class ChatService:
         self.log.write("TURN_END", f"chat={redact_chat(chat_id)}",
                        f"stop={res.stop}", f"iters={res.iterations}",
                        f"tools={res.tool_calls}")
+        # D2: one tiny scenario row for the daily ledger report — never
+        # raises, never inspects content, only counts dispatches.
+        try:
+            ledger_mod.note_turn(res.tool_log)
+        except Exception:  # noqa: BLE001 — reporting never breaks a turn
+            pass
         if res.stop == "final":
             return res.text.strip() or self._t("err.no_output")
         if res.stop == "max_iters":
@@ -1956,6 +1986,10 @@ def main(argv: list[str] | None = None) -> int:
     # meter activates, so both processes append into one daily-file set.
     from . import meter as meter_mod
     meter_mod.activate()
+    # D2: the anonymous daily usage ledger (inert until activated; the
+    # settings gate inside makes a no-block settings document send nothing).
+    from . import ledger as ledger_mod
+    ledger_mod.activate(state)
 
     # Gate 2: single instance (one getUpdates consumer per token).
     pidfile = state / PIDFILE_NAME

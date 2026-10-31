@@ -7,6 +7,7 @@ I'm AiDog is a single companion you run yourself — not a platform, not an assi
 ## Product
 
 - Permanently free: no pricing, no paid features, no usage metering.
+- Anonymous usage reporting: on by default, one report per day per install (model name, request counts and token totals — never prompts, files, paths or credentials), switchable off in Settings; the Models section chart renders the public aggregates.
 - Local-first console: web UI on your own machine for chat, memory, skills, cron and channel configuration.
 - Constitution and curated memory: behavioural rules and long-term memory are versioned assets you control — bounded Markdown budgets, archive tiers, a user-profile layer, no vector store you cannot read.
 - Skills and automations: SKILL.md packs screened by a deterministic pre-router (route suite 30/30), natural-language cron that stays fail-closed until enabled, and a self-evolution loop (`/learn`, `/reflect`) with lint-gated writes.
@@ -19,8 +20,8 @@ I'm AiDog is a single companion you run yourself — not a platform, not an assi
 - Skills ecosystem: an official skills directory at https://aidog.im/skills.html backed by a public,
   lint-and-review gated skills repository; `GET /api/skills/remote` serves the same catalog fail-soft
   (remote -> bundled copy -> honest `unavailable`, never a 5xx).
-- Evidence (the same numbers shown in the site's fact strip): core tests 2045/2045 · console smoke 432/432 · skill router 30/30 · memory 58/58 · setup wizard 99/99 · profile isolation 63/63 · desktop shell 15/15 · doctor 0 FAIL · 0 WARN · 21 real-machine E2E suites · 1213 locale keys per pack · 27 registered tools · 36 capability documents · 36 self-developed modules ≈ 21.6k LOC.
-- Current release: 0.5.59.
+- Evidence (the same numbers shown in the site's fact strip): core tests 2080/2080 · console smoke 432/432 · skill router 30/30 · memory 58/58 · setup wizard 99/99 · profile isolation 63/63 · desktop shell 15/15 · doctor 0 FAIL · 0 WARN · 22 real-machine E2E suites · 1224 locale keys per pack · 27 registered tools · 36 capability documents · 37 self-developed modules ≈ 22.0k LOC.
+- Current release: 0.5.60.
 
 ## Interfaces
 
@@ -31,6 +32,7 @@ I'm AiDog is a single companion you run yourself — not a platform, not an assi
 
 ## Live stats
 
+- [Usage stats](https://aidog.im/api/stats): public aggregates over the anonymous daily usage ledger — installs, requests, token totals, the last seven UTC days and per-model / per-scenario breakdowns. Each install reports once per UTC day; reports carry model names and counts only — never prompts, files, paths or credentials — and verification canary rows (ids starting with `_`) are stored but never aggregated. If the ledger is not configured the endpoint answers `503` with an error object instead of a fabricated zero.
 - [Visits](https://aidog.im/api/visits): JSON counter returning `{"count": <integer>, "unit": "page views", "note": "approximate, includes crawlers and refreshes"}`. One increment per page load; approximate by design. Append `?format=text` for `text/plain` output (`visits: <integer>`). If the counter is not configured the endpoint answers `503` with an error object instead of a fabricated number.
 
 ## Links
@@ -45,5 +47,5 @@ I'm AiDog is a single companion you run yourself — not a platform, not an assi
 - [Models](https://aidog.im/#models): model configuration.
 - [Security](https://aidog.im/#security): credential discipline and approval gates.
 - [Architecture](https://aidog.im/#architecture): kernel / body / business layer separation.
-- [GitHub](https://github.com/aidog-im/aidog): source repository.
+- [GitHub](https://github.com/AiDog-im/AiDog): source repository.
 - [robots.txt](https://aidog.im/robots.txt) · [Sitemap](https://aidog.im/sitemap.xml) · [manifest](https://aidog.im/manifest.webmanifest)

@@ -132,6 +132,14 @@ def transcribe(data: bytes, *, model: str = "base",
     duration = getattr(info, "duration", None)
     if not isinstance(duration, (int, float)) or duration <= 0:
         duration = len(audio) / SAMPLE_RATE
+    # D2 ledger: one voice event for the daily anonymous scenario counts.
+    # Lazy import + silent no-op — an inert or missing ledger never touches
+    # transcription (and this call happens before the result is returned).
+    try:
+        from . import ledger as _ledger
+        _ledger.note_event("voice")
+    except Exception:  # noqa: BLE001 — reporting never breaks a call
+        pass
     return {"text": text,
             "language": str(getattr(info, "language", "") or ""),
             "duration": round(float(duration), 3)}

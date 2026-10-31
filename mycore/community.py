@@ -20,7 +20,7 @@ Owner decisions encoded here (2026-10-27):
 
 Endpoint seams for tests: ``AIDOG_GH_API_URL`` (default https://api.github.com,
 GraphQL served at ``<base>/graphql``) and ``AIDOG_COMMUNITY_REPO``
-(default ``aidog-im/aidog``). Transport is a module-level callable so the
+(default ``AiDog-im/AiDog``). Transport is a module-level callable so the
 core suite runs with zero network.
 
 English source per repo i18n policy.
@@ -42,7 +42,7 @@ REPO = Path(__file__).resolve().parent.parent
 
 SLOT = "AIDOG_COMMUNITY_PAT"
 DEFAULT_API = "https://api.github.com"
-DEFAULT_REPO = "aidog-im/aidog"
+DEFAULT_REPO = "AiDog-im/AiDog"
 
 TITLE_MAX = 120
 BODY_MAX = 2000
@@ -385,6 +385,17 @@ def _gql(token: str, query: str, variables: dict) -> dict:
 
 # --------------------------------------------------------------- writes ------
 
+def _note_publishing() -> None:
+    """D2 ledger: one `publishing` scenario event per successful write.
+    Lazy import + silent no-op — an inert or missing ledger never touches
+    the community path."""
+    try:
+        from . import ledger as _ledger
+        _ledger.note_event("publishing")
+    except Exception:  # noqa: BLE001 — reporting never breaks a write
+        pass
+
+
 def create(title, body, category) -> dict:
     """Create one discussion -> {number, url}. Direct post (owner decision),
     bounded by the shared write interval and the length caps above."""
@@ -405,6 +416,7 @@ def create(title, body, category) -> dict:
          "body": clean_body})
     try:
         disc = data["createDiscussion"]["discussion"]
+        _note_publishing()
         return {"number": int(disc["number"]),
                 "url": str(disc.get("url") or "")}
     except (KeyError, TypeError, ValueError):
@@ -445,6 +457,7 @@ def comment(number, body) -> dict:
         cid = data["addDiscussionComment"]["comment"]["id"]
     except (KeyError, TypeError):
         raise CommunityError("upstream_error", "missing comment id") from None
+    _note_publishing()
     return {"number": n, "comment_id": str(cid)}
 
 

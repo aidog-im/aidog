@@ -620,7 +620,7 @@
   "cron.namePh": "name (list label, no slash)",
   "cron.promptPh": "message sent when the job fires",
   "cron.createBtn": "CREATE",
-  "ctl.mycModels": "Model whitelist (comma separated)",
+  "ctl.mycModels": "Model whitelist",
   "ctl.mycBudget": "Compaction budget (chars)",
   "ctl.mycPrune": "Session auto-prune (days, 0 = off)",
   "ctl.mycPruneT": "Delete console/TG session files older than N days (0 = off). The live console session is never pruned.",
@@ -632,6 +632,8 @@
   "ctl.effortMedium": "medium",
   "ctl.effortHigh": "high",
   "ctl.mycModelsPh": "per-task model whitelist, e.g. model-a, model-b",
+  "ctl.mycModelAddPh": "add a model id — Enter adds it",
+  "ctl.mycModelAdd": "ADD",
   "ctl.mycBudgetPh": "24000 = default",
   "ctl.restartSvcHint": "restart the chat service to apply — button in Overview",
   "cred.restartHint": "restart the chat service to apply",
@@ -1211,5 +1213,14 @@
   "set.tierGuided": "GUIDED",
   "set.tierAdvanced": "ADVANCED",
   "set.tierHint": "Guided shows the six cards most people touch; Advanced opens every card — nothing is ever removed, and Access and Backup stay visible in both.",
-  "save.dirty": "unsaved changes"
+  "save.dirty": "unsaved changes",
+  "sec.ledger": "Usage reporting",
+  "led.hint": "one anonymous report per day: model names, request counts and token totals. Never prompts, files, paths or credentials. Off = nothing leaves this machine.",
+  "led.toggle": "send the daily anonymous report",
+  "led.lastReport": "Last report (UTC)",
+  "led.installId": "Install id",
+  "led.never": "never",
+  "led.noId": "not generated yet",
+  "led.on": "reporting ON — one anonymous report per day",
+  "led.off": "reporting OFF — nothing leaves this machine"
 }

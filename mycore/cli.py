@@ -120,6 +120,10 @@ def main(argv: list[str] | None = None) -> int:
     # never-activated meter would silently drop these rows).
     from . import meter as _meter
     _meter.activate()
+    # D2: the daily usage ledger activates too (one-shot runs contribute
+    # their meter rows to the day's anonymous report).
+    from . import ledger as _ledger
+    _ledger.activate()
 
     # ---- message stack: persisted history + body layer + extra system + user ----
     sess: Session | None = None

@@ -839,7 +839,7 @@
           <button class="btn primary" id="commNew" type="button"
                   data-i18n="comm.new">NEW DISCUSSION</button>
           <a class="btn" id="commOpen"
-             href="https://github.com/aidog-im/aidog/discussions/new"
+             href="https://github.com/AiDog-im/AiDog/discussions/new"
              target="_blank" rel="noopener" data-i18n="comm.open">OPEN ON GITHUB</a>
         </div>
       </div>
@@ -1313,19 +1313,35 @@
             <input type="text" id="mycUrl" maxlength="256" placeholder="http://127.0.0.1:3460/v1"
                    data-i18n-ph="ctl.mycUrlPh" autocomplete="off">
           </div>
+          <!-- chips terminal state (round D car 2, owner-approved): the
+               whitelist editor is the chip list + manual add box. #mycModels
+               stays in the DOM as the HIDDEN source of truth, so every write
+               (add box, chip x, discovery ADD, server read-back) still goes
+               through ONE input event and dirty tracking / the sticky bar /
+               saveSettings() remain the single writer; activation U6 now
+               adds through the box instead of filling the field. -->
           <div class="ctl-row">
-            <label data-i18n="ctl.mycModels">Model whitelist (comma separated)</label>
-            <input type="text" id="mycModels" maxlength="2048" autocomplete="off"
-                   spellcheck="false" data-i18n-ph="ctl.mycModelsPh"
-                   placeholder="per-task model whitelist, e.g. model-a, model-b">
+            <label data-i18n="ctl.mycModels">Model whitelist</label>
+            <div class="model-col">
+              <input type="hidden" id="mycModels" maxlength="2048"
+                     autocomplete="off" spellcheck="false">
+              <div id="mycModelChips" class="model-chips" hidden></div>
+              <div class="model-add">
+                <input type="text" id="mycModelAdd" maxlength="1024"
+                       autocomplete="off" spellcheck="false"
+                       data-i18n-ph="ctl.mycModelAddPh"
+                       placeholder="add a model id — Enter adds it">
+                <button type="button" class="btn" id="mycModelAddBtn"
+                        data-i18n="ctl.mycModelAdd">ADD</button>
+              </div>
+            </div>
           </div>
-          <!-- D1 (round D car 1): one-click model discovery. The text field
-               above STAYS the source of truth (activation U6 fills it), the
-               chips only mirror it, and ADD writes back into it — so the
-               normal dirty -> SAVE path remains the one writer. #discPanel is
-               in SAVE_BAR_SKIP: its key field and result checkboxes are not
-               settings fields and must never promise a save they cannot do. -->
-          <div id="mycModelChips" class="model-chips" hidden></div>
+          <!-- D1 (round D car 1): one-click model discovery. The hidden
+               #mycModels field above is still the source of truth and ADD
+               writes back into it — so the normal dirty -> SAVE path remains
+               the one writer. #discPanel is in SAVE_BAR_SKIP: its key field
+               and result checkboxes are not settings fields and must never
+               promise a save they cannot do. -->
           <div id="discPanel" class="disc-panel">
             <div class="ctl-row">
               <label data-i18n="myc.discoverKey">API key (optional — used for this probe only, never stored)</label>
@@ -1852,6 +1868,25 @@
           <div class="stat-note" data-i18n="gr.note">USD spend = metered tokens x price table, converted at the console FX rate; an unresolvable rate shows UNKNOWN and never blocks (the token cap still applies).</div>
           <div class="ctl-actions">
             <span class="save-state" id="grMsg" role="status"></span>
+          </div>
+        </div>
+
+        <!-- D2 ledger car: anonymous usage reporting — the product seed
+             ships it ON (owner collect-by-default, 2026-10-31); this switch
+             is the opt-out. Status reads GET /api/ledger, never guessed. -->
+        <div class="card" data-setgroup="general" id="ledgerCard">
+          <h2 data-i18n="sec.ledger">Usage reporting</h2>
+          <div class="stat-note" data-i18n="led.hint">one anonymous report per day: model names, request counts and token totals. Never prompts, files, paths or credentials. Off = nothing leaves this machine.</div>
+          <div class="ctl-row">
+            <label class="bk-box"><input type="checkbox" id="ledToggle"><span data-i18n="led.toggle">send the daily anonymous report</span></label>
+          </div>
+          <div class="stat-grid">
+            <div><div class="k" data-i18n="led.lastReport">Last report (UTC)</div><div class="v" id="ledLastStat">–</div></div>
+            <div><div class="k" data-i18n="led.installId">Install id</div><div class="v" id="ledIdStat">–</div></div>
+          </div>
+          <div class="stat-note" id="ledStatus" role="status">–</div>
+          <div class="ctl-actions">
+            <span class="save-state" id="ledMsg" role="status"></span>
           </div>
         </div>
 

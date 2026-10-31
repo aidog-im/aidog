@@ -87,7 +87,7 @@
     document.documentElement.lang = (l === "zh") ? "zh-Hans" : "en";
     var label = document.getElementById("langLabel");
     if (label) label.textContent = (l === "en") ? "ZH" : "EN";  // pack value overwrites via data-i18n
-    loadDict(l).then(function (d) { applyDict(d); renderShelf(); });
+    loadDict(l).then(function (d) { applyDict(d); renderShelf(); paintStats(); });
   }
 
   var langBtn = document.getElementById("langBtn");
@@ -559,4 +559,112 @@
 
   var yr = document.getElementById("year");
   if (yr) yr.textContent = String(new Date().getFullYear());
+
+  /* ------------------------------------------ usage ledger chart (D2) --- */
+  /* The models section reads GET /api/stats once per page load (same
+     non-loopback rule as the visits counter). Live = the "not live" banner
+     hides, the seven bars take their per-day request heights and the
+     message states the fact set; zero data is an honest "waiting for the
+     first report", not a fake bar. Failure or a local static preview keeps
+     the untouched placeholder — this page never fabricates a number.
+     paintStats() re-runs on a language switch so the live sentence follows
+     the pack instead of snapping back to the offline copy. */
+  var liveStats = null;
+
+  function tt(key, fallback) {
+    var d = dicts[lang];
+    return (d && typeof d[key] === "string") ? d[key] : fallback;
+  }
+
+  function fmtNum(n) {
+    if (n >= 1000000) return (n / 1000000).toFixed(1).replace(/\.0$/, "") + "M";
+    if (n >= 1000) return (n / 1000).toFixed(1).replace(/\.0$/, "") + "K";
+    return String(n);
+  }
+
+  function fmtLine(tpl, vals) {
+    var s = tpl;
+    Object.keys(vals).forEach(function (k) {
+      s = s.replace("{" + k + "}", vals[k]);
+    });
+    return s;
+  }
+
+  function paintStats() {
+    var d = liveStats;
+    if (!d) return;
+    var banner = document.getElementById("modelsBanner");
+    if (banner) banner.hidden = true;
+    var frame = document.querySelector("#models .chart-frame");
+    if (!frame) return;
+    var bars = frame.querySelectorAll(".chart-bars i");
+    var maxReq = 1;
+    d.daily.forEach(function (row) {
+      maxReq = Math.max(maxReq, row.requests || 0);
+    });
+    for (var i = 0; i < bars.length; i++) {
+      var row = d.daily[i] || null;
+      var h = row ? Math.max(3, Math.round(((row.requests || 0) / maxReq) * 100)) : 0;
+      bars[i].style.height = h + "%";
+      bars[i].title = row ? (row.day + ": " + row.requests + " requests") : "";
+    }
+    var hasData = d.totals.requests > 0 ||
+      Object.keys(d.by_scenario).some(function (k) { return d.by_scenario[k] > 0; });
+    var msg = frame.querySelector(".chart-message span:last-child");
+    if (msg) {
+      msg.textContent = hasData
+        ? fmtLine(tt("models.chartLive",
+            "Updated {ts} UTC · {installs} installs · {requests} requests · {tokens} tokens"), {
+            ts: String(d.updated || "–").slice(0, 16).replace("T", " "),
+            installs: fmtNum(d.installs),
+            requests: fmtNum(d.totals.requests),
+            tokens: fmtNum(d.totals.tokens["in"] + d.totals.tokens.out)
+          })
+        : tt("models.chartEmpty", "Pipeline live — waiting for the first install to report.");
+    }
+    var wrap = document.getElementById("modelsBreakdown");
+    if (!wrap) return;
+    if (!hasData) { wrap.hidden = true; return; }
+    var mBox = document.getElementById("modelsByModel");
+    if (mBox && d.by_model.length) {
+      mBox.innerHTML = "";
+      d.by_model.slice(0, 6).forEach(function (m) {
+        var line = document.createElement("div");
+        line.textContent = m.model + " — " + Math.round(m.share * 100) + "% · " +
+          fmtNum(m.requests) + " req";
+        mBox.appendChild(line);
+      });
+    }
+    var sBox = document.getElementById("modelsByScenario");
+    if (sBox) {
+      sBox.innerHTML = "";
+      var any = false;
+      ["chat", "coding", "research", "voice", "publishing"].forEach(function (k) {
+        var n = d.by_scenario[k] || 0;
+        if (!n) return;
+        any = true;
+        var line = document.createElement("div");
+        line.textContent = k + " — " + fmtNum(n);
+        sBox.appendChild(line);
+      });
+      if (!any) {
+        var none = document.createElement("div");
+        none.textContent = "–";
+        sBox.appendChild(none);
+      }
+    }
+    wrap.hidden = false;
+  }
+
+  if (!loopbackHost()) {
+    fetch("/api/stats", { cache: "no-store" })
+      .then(function (r) { if (!r.ok) throw new Error("http " + r.status); return r.json(); })
+      .then(function (d) {
+        if (!d || typeof d.totals !== "object" || !Array.isArray(d.daily) ||
+            typeof d.by_scenario !== "object") throw new Error("bad shape");
+        liveStats = d;
+        paintStats();
+      })
+      .catch(function () { /* keep the honest placeholder */ });
+  }
 })();

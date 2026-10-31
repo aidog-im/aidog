@@ -765,6 +765,13 @@ h1, h2, h3, h4, .serif {
 .chart-icon { font-size: 34px; color: var(--coral-ink);
   animation: spin 10s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+/* D2 ledger: the by-model / by-scenario breakdown lines (rendered from
+   /api/stats next to the live chart; hidden until the endpoint answers). */
+.chart-breakdown { margin-top: 10px; display: grid; gap: 6px;
+  font-family: var(--mono); font-size: 12px; color: var(--blue-deep);
+  letter-spacing: .04em; text-align: left; }
+.chart-breakdown div { border-bottom: 1px dashed var(--line);
+  padding-bottom: 5px; word-break: break-all; }
 .pipeline { display: grid; grid-template-columns: 1fr auto 1fr auto 1fr; gap: 12px;
   align-items: stretch; margin-top: 24px; }
 .pnode { border: 1px solid var(--line); background: var(--panel);

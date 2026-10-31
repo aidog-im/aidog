@@ -87,5 +87,5 @@ Rules (no silent fallback, ever):
 - Whitelist carrier + console editor (0.5.40): `tmp/e2e_activation.py` `L2`
   (accept/reject matrix + the raw-file consumer `subagent._allowed_models`
   reading the same document) and `tmp/e2e_activation_ui.js` `U6`
-  (`#mycModels` save → server read-back) — see
+  (`#mycModelAdd` chips add → server read-back) — see
   [frontend_coverage.md](frontend_coverage.md) §4.

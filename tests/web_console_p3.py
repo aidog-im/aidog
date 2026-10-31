@@ -3160,7 +3160,7 @@ def main() -> int:
         if url.endswith("/graphql") and "createDiscussion" in q:
             return 200, json.dumps({"data": {"createDiscussion":
                 {"discussion": {"number": 9,
-                                "url": "https://github.com/aidog-im/aidog/discussions/9"}}}})
+                                "url": "https://github.com/AiDog-im/AiDog/discussions/9"}}}})
         if url.endswith("/graphql") and "addDiscussionComment" in q:
             return 200, json.dumps({"data": {"addDiscussionComment":
                 {"comment": {"id": "DC_p3"}}}})
@@ -3176,7 +3176,7 @@ def main() -> int:
             return 200, json.dumps([
                 {"id": 11, "user": {"login": "alice"}, "body": "first reply",
                  "created_at": "2026-10-27T10:00:00Z",
-                 "html_url": "https://github.com/aidog-im/aidog/discussions/7#discussioncomment-11"},
+                 "html_url": "https://github.com/AiDog-im/AiDog/discussions/7#discussioncomment-11"},
                 {"id": 12, "user": {"login": "bob"}, "body": "second",
                  "created_at": "2026-10-27T11:00:00Z",
                  "html_url": "http://evil.example/x"}])
