@@ -905,11 +905,15 @@ function renderUsage() {
 /* ---------------------------------------------------------------- events -- */
 function evKey(e) { return `${e.t}|${e.src}|${e.text}`; }
 
+/* Unknown event codes fall back to the server's own text (raw log line):
+   t(key, null) returns the key itself, which would print "event.<code>" in the
+   stream instead of the real message. */
 function eventText(e) {
-  if (e.code && t("event." + e.code, null)) {
-    return t("event." + e.code)
+  const key = e.code ? "event." + e.code : "";
+  if (key && dict[key] !== undefined) {
+    return t(key)
       .replace(/\{src\}/g, t("panel." + e.src, e.src))
-      .replace("{v}", (statusData && statusData.version) || "");
+      .replace("{v}", (statusData && statusData.version) || "…");
   }
   return e.text;
 }
@@ -1546,6 +1550,9 @@ async function refreshStatus() {
     statusData = await fetch("/api/status").then(r => r.json());
     renderStatus();
     document.getElementById("ts").textContent = statusData.time_utc || "";
+    // stream lines rendered before status arrived still carry placeholders
+    // (e.g. the boot event's {v}) — repaint them now that version is known
+    refreshEventTexts();
   } catch (e) { document.getElementById("ts").textContent = "status error"; }
 }
 

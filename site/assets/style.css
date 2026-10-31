@@ -562,7 +562,7 @@ h1, h2, h3, h4, .serif {
 .m-dot { display: block; width: 8px; height: 8px; margin-bottom: 7px;
   background: var(--blue); border-radius: 0 50% 50% 50%;
   transform: rotate(45deg); }
-.m-name { display: block; font-family: var(--mono); font-size: 9.5px;
+.m-name { display: block; font-family: var(--mono); font-size: 10px;
   letter-spacing: .1em; color: var(--muted); text-transform: uppercase;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .m-state { display: block; font-family: var(--mono); font-size: 12px;
