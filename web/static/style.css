@@ -602,7 +602,7 @@ footer { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wr
  *  Silicon-life layer — car C (2026-10-24, owner-approved).       *
  *  Same kit as the site's batch-B layer: fine 44px circuit grid,  *
  *  HUD corner brackets, cyan glow hover, tick rails — plus the    *
- *  boot scan sweep and a mascot halo. Skin only: no id, URL, API, *
+ *  boot scan sweep and a header-mark halo. Skin only: no id, URL, API, *
  *  or layout contract changes; every rule here is additive.       *
  * =============================================================== */
 
@@ -695,11 +695,7 @@ body {
   100% { transform: translateY(calc(100vh + 10px)); opacity: 0; }
 }
 
-/* mascot in the boot beat + cyan breathing halo behind the header mark */
-.boot-mascot {
-  display: block; width: 104px; height: 104px; margin: 0 auto 16px;
-  filter: drop-shadow(0 0 16px rgba(112, 228, 253, .5));
-}
+/* cyan breathing halo behind the header mark */
 .brand-logo { animation: cs-halo 4.6s ease-in-out infinite; }
 @keyframes cs-halo {
   0%, 100% { box-shadow: 0 4px 12px rgba(0, 22, 51, .14),

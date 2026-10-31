@@ -714,7 +714,7 @@ body {
   100% { transform: translateY(calc(100vh + 10px)); opacity: 0; }
 }
 
-/* mascot halo — soft cyan breathing glow behind the orb */
+/* orb halo — soft cyan breathing glow behind the logo ring */
 .hero-orb::after {
   content: ""; position: absolute; inset: -30px; border-radius: 50%;
   background: radial-gradient(circle, rgba(112, 228, 253, .40),
