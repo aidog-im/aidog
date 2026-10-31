@@ -104,3 +104,10 @@ no URL, no key (zero-credential promise, see [capabilities.md](capabilities.md))
 - The advisory/orb chain (rate window, cache, autoplay unlock) is covered by
   [voice_announcements.md](voice_announcements.md) §6 and is unchanged by
   this car.
+- **Console coverage (frontend car, 0.5.39)**: `TTS_API_KEY` joins the
+  `media` group of the Settings credential editor, so BYOK presence
+  (`media.tts.byok`) is now visible as a slot row next to the engine/
+  endpoint/model fields. Evidence: `tmp/e2e_frontend_coverage.py` `L1`
+  (slot catalog + roundtrip + zero-echo sweep) and
+  `tmp/e2e_frontend_ui.js` `U2` (editor + DOM value scan) — see
+  [frontend_coverage.md](frontend_coverage.md).

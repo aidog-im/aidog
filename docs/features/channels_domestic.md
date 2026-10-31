@@ -145,3 +145,11 @@ External connectivity against the real DingTalk/Feishu/WeChat services is
 - `tests/web_console_p3.py` — **87/87** (Phase C's 77 + 10: endpoint gates,
   new-partition validation, round-trip).
 - E2E: `tmp/e2e_channels_dom.py` (44 checks, byte-for-byte restore).
+- **Console coverage (frontend car, 0.5.39)**: the domestic routes join the
+  Settings `#chanList` form and the `#chanTest*` send test; their
+  `CHANNEL_DINGTALK_*` / `CHANNEL_FEISHU_*` / `CHANNEL_WECHAT_*` slots are
+  editable in the credential editor (name + presence/length only).
+  Evidence: `tmp/e2e_frontend_coverage.py` `L1` (slot group listing +
+  roundtrip), `L3`/`L4` (row state + honest 409 reasons),
+  `tmp/e2e_frontend_ui.js` `U1`/`U2` — see
+  [frontend_coverage.md](frontend_coverage.md).

@@ -103,7 +103,7 @@ verified-at-implementation (tray menu + HUD window).
 The HUD is served same-origin by the console and reads
 `/static/i18n/{lang}.json` (localStorage `aidog_lang`, `en` fallback,
 `data-i18n` pattern like `app.js`). Car E added **8 `hud.*` keys** in both
-`en` and `zh` — packs are now **375/375**. Without the bridge
+`en` and `zh` — packs are now **480/480**. Without the bridge
 (`!window.aidogShell`) the HUD shows an "unsupported" hint and hides its
 controls, so opening `hud.html` in a plain browser does not break.
 

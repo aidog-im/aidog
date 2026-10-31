@@ -107,3 +107,11 @@ honest, non-secret stderr note per name —
 - `POST mycore tools_off duplicate entry -> 400`
 
 Shipped in v0.5.32.
+
+**Console coverage (frontend car, 0.5.39)** — the switch now has a face:
+Settings renders `#toolsOffList`, a checkbox grid built from
+`capabilities.mycore.known_tools` (checked = off), and `MYCORE_TOOLS_OFF`
+still wins over it when exported (the catalog then also reports the name in
+`env_overrides`). Evidence: `tmp/e2e_frontend_coverage.py` `L3` (write →
+`capabilities.tools` shrinks) and `tmp/e2e_frontend_ui.js` `U1` (save round
+trip) — see [frontend_coverage.md](frontend_coverage.md).

@@ -118,5 +118,11 @@ reason>` — the server never re-implements the grammar.
 - Real wire (a real Docker ubuntu run, ssh argv shape + real refused
   connection, validator leg) lives in the repo-local E2E script
   `tmp/e2e_car4b.py` (tmp harness, outside the gate suites).
+- **Console coverage (frontend car, 0.5.39)**: Settings field `#mycShell`
+  (grammar validated on write; the raw spec still never enters
+  `capabilities.terminal`). Evidence: `tmp/e2e_frontend_coverage.py` `L3`
+  (write → `capabilities.terminal.backend` flips) and
+  `tmp/e2e_frontend_ui.js` `U1` (field → Bearer read-back) — see
+  [frontend_coverage.md](frontend_coverage.md).
 
 Suite totals after car G (v0.5.32): core **1020/1020**, smoke **154/154**.

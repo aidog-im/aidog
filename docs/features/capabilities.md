@@ -168,13 +168,21 @@ capability here can leak a credential). See [exchanges.md](exchanges.md)
 
 ## Console display status
 
-**Wave 1 = API only.** The catalog ships as an endpoint + this document; no
-console DOM was touched in this car (the console app shell was owned by a
-parallel workstream in the same wave, and the `getElementById` contract audit
-cost more than a decorative read-only panel was worth). Planned display: a
-read-only "Capabilities" line/panel fed from `/api/capabilities` (model,
-tool count, skill count, enabled channels, cron jobs) — deferred to the
-follow-up that owns `web/static/app.js`.
+**Rendered since the frontend coverage car (0.5.39).** The catalog is still
+an unauthenticated loopback endpoint first — the console simply stopped
+throwing most of it away: the Overview view now renders an `#capGrid`
+key/value table (tools + `exchange_*` names, skills, enabled/configured
+channels, configured hook events, cron job count, browser availability,
+terminal backend, detected local models, MCP server names, exchange venue
+count, the two web3 caps and the env-override names) plus a `#cronList`
+backed by the new `GET /api/cron`. The Settings view consumes the two
+catalog additions directly: `mycore.known_tools` feeds the `#toolsOffList`
+checkbox grid and `env_overrides` feeds `#envOverrideChip` (the honest
+"this env var beats your console value" note). Every row is names and
+counts only — the same zero-credential promise the endpoint already had.
+Evidence: `tmp/e2e_frontend_coverage.py` legs `L1`/`L3`/`L5` and
+`tmp/e2e_frontend_ui.js` leg `U5`; the index for this coverage is
+[frontend_coverage.md](frontend_coverage.md).
 
 ## Testing evidence
 
@@ -198,3 +206,8 @@ never echoed), and
 the zero-credential assertion (response
 text contains no slot value and no secret-like keys) — applied to the
 serialized `media` block on its own as well: no URL, no slot value.
+- **Console coverage car (0.5.39)**: `env_overrides` (names only — a sweep
+  asserts the exported value never serializes) and `mycore.known_tools`
+  (25 names) added to this payload; `GET /api/cron` added alongside it.
+  Evidence: `tmp/e2e_frontend_coverage.py` (`L1` `L3` `L5`) and
+  `tmp/e2e_frontend_ui.js` (`U5`) — see [frontend_coverage.md](frontend_coverage.md).

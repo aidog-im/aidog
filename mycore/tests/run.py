@@ -7847,6 +7847,60 @@ def test_context_refs() -> None:
               _expand_context_refs(plain, ctx) == plain)
 
 
+def test_envslots() -> None:
+    """mycore.envslots (frontend coverage 1.6): the MYCORE_WD_CHAT reader
+    resolves env -> secrets.env slot -> honest empty string, against a TEMP
+    secrets file (never the real one). Env always wins; an empty env falls
+    back to the slot; nothing here logs a value."""
+    import tempfile
+    from mycore import envslots
+
+    tmp = Path(tempfile.mkdtemp(prefix="envslots_"))
+    slot_file = tmp / "secrets.env"
+    saved = os.environ.get(envslots.WD_CHAT_SLOT)
+    try:
+        slot_file.write_text("WEB_TOKEN=\nMYCORE_WD_CHAT=424242\nOTHER=keep\n",
+                             encoding="utf-8")
+        os.chmod(slot_file, 0o600)
+        os.environ.pop(envslots.WD_CHAT_SLOT, None)
+        check("envslots: unset env -> secrets.env slot",
+              envslots.wd_chat_target(slot_file) == "424242",
+              f"got {envslots.wd_chat_target(slot_file)!r}")
+        os.environ[envslots.WD_CHAT_SLOT] = "777"
+        check("envslots: env always wins over the slot",
+              envslots.wd_chat_target(slot_file) == "777",
+              f"got {envslots.wd_chat_target(slot_file)!r}")
+        os.environ[envslots.WD_CHAT_SLOT] = "  "
+        check("envslots: whitespace-only env counts as empty -> slot",
+              envslots.wd_chat_target(slot_file) == "424242",
+              f"got {envslots.wd_chat_target(slot_file)!r}")
+        os.environ[envslots.WD_CHAT_SLOT] = "not-an-int"
+        check("envslots: garbage env still wins (caller validates, no fallback)",
+              envslots.wd_chat_target(slot_file) == "not-an-int",
+              f"got {envslots.wd_chat_target(slot_file)!r}")
+        os.environ.pop(envslots.WD_CHAT_SLOT, None)
+        slot_file.write_text("WEB_TOKEN=\nOTHER=keep\n", encoding="utf-8")
+        check("envslots: slot absent -> honest empty string",
+              envslots.wd_chat_target(slot_file) == "",
+              f"got {envslots.wd_chat_target(slot_file)!r}")
+        check("envslots: missing file -> honest empty string (fail-closed)",
+              envslots.wd_chat_target(tmp / "absent.env") == "",
+              f"got {envslots.wd_chat_target(tmp / 'absent.env')!r}")
+        check("envslots: slot_value reads one own-line slot only",
+              envslots.slot_value("OTHER", slot_file) == "keep"
+              and envslots.slot_value("MYCORE_WD_CHAT", slot_file) == "",
+              f"got {envslots.slot_value('OTHER', slot_file)!r}")
+        check("envslots: empty-value line reads as absent",
+              envslots.slot_value("WEB_TOKEN", slot_file) == "",
+              f"got {envslots.slot_value('WEB_TOKEN', slot_file)!r}")
+    finally:
+        if saved is None:
+            os.environ.pop(envslots.WD_CHAT_SLOT, None)
+        else:
+            os.environ[envslots.WD_CHAT_SLOT] = saved
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def test_tools_toggle() -> None:
     """tools_off: settings disables a tool, env overrides settings, empty
     config = full-registry parity, unknown env name = ignored (never fatal)."""
@@ -8862,6 +8916,7 @@ def main() -> int:
     test_model()
     test_registry_and_tools()
     test_tools_toggle()
+    test_envslots()
     test_loop()
     test_compact()
     test_session()

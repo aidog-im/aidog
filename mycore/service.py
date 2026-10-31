@@ -64,7 +64,7 @@ allowlist gate — unauthenticated /commands are ignored like any message):
                      and its result is delivered)
             /cron del <id>  remove a job
             Delivery on fire: the origin chat that created the job, else
-            env MYCORE_WD_CHAT, else log-only (never an error — the fire
+            env/slot MYCORE_WD_CHAT, else log-only (never an error — the fire
             still runs and is recorded as CRON_FIRE in service.log).
 
 Modes:
@@ -114,6 +114,7 @@ from pathlib import Path
 from . import channels as channels_mod
 from . import checkpoint
 from . import cli
+from . import envslots
 from . import evolution
 from . import hooks as hooks_mod
 from . import scheduler
@@ -164,8 +165,10 @@ MODEL_ERR_LINE = i18n.get(i18n.DEFAULT_LANG, "err.model",
                           "(model error — the turn stopped; see service logs)")
 
 # Cron delivery target: env MYCORE_WD_CHAT (int chat id; the same slot the
-# watchdog alerts use — operator-provisioned). Empty/garbage -> the fire
-# still runs and is logged, only the send is skipped (honest log-only).
+# watchdog alerts use — operator-provisioned; frontend coverage 1.6: the
+# process env wins, an empty env falls back to the secrets.env slot of the
+# same name via mycore.envslots). Empty/garbage -> the fire still runs and is
+# logged, only the send is skipped (honest log-only).
 WD_CHAT_ENV = "MYCORE_WD_CHAT"
 WD_CHAT_RE = re.compile(r"^-?[0-9]+$")
 INTERNAL_ERR_LINE = i18n.get(i18n.DEFAULT_LANG, "err.internal",
@@ -1120,9 +1123,11 @@ class ChatService:
                        size=entry.get("size", 0))
 
     def _wd_chat_target(self) -> int | None:
-        """Fallback delivery chat: env MYCORE_WD_CHAT when it is a plain
-        integer; unset/garbage -> None (log-only, by design)."""
-        raw = os.environ.get(WD_CHAT_ENV, "").strip()
+        """Fallback delivery chat: env MYCORE_WD_CHAT when set, else the
+        secrets.env slot of the same name (mycore.envslots — env always wins);
+        a plain integer is accepted, unset/garbage -> None (log-only, by
+        design). The value itself is never logged or echoed."""
+        raw = envslots.wd_chat_target()
         return int(raw) if WD_CHAT_RE.fullmatch(raw) else None
 
     def _cron_deliver(self, job: dict, text: str) -> str:

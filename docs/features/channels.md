@@ -159,6 +159,14 @@ G car (v0.5.32) added `test_channels_wa_signal` — current run.py total
   §9 whatsapp/signal validation legs).
 - E2E script: `tmp/e2e_channels.py` (8 checks, restores settings/secrets
   byte-for-byte; tmp/ is gitignored).
+- **Console coverage (frontend car, 0.5.39)**: Settings now carries the
+  9-route form `#chanList` (toggle + fields per route) and the send test
+  `#chanTest*`; the credential editor exposes every `CHANNEL_*` slot as
+  name + presence/length. Evidence: `tmp/e2e_frontend_coverage.py` `L3`
+  (row flips `enabled`/`configured`, unconfigured note names the slot) +
+  `L4` (409 disabled / 409 unconfigured), `tmp/e2e_frontend_ui.js` `U1`
+  (form → Bearer read-back) + `U6` (zh labels) — see
+  [frontend_coverage.md](frontend_coverage.md).
 
 ## 8. Telegram forum-topic isolation (car 4a-M3)
 

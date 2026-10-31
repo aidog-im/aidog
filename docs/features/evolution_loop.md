@@ -91,7 +91,11 @@ allow-list as every settings key; the example file ships the block with
 The chat-service poll loop evaluates `is_due()` once a minute
 (`REFLECT_CHECK_SEC`) and calls the same `reflect()` the triggers use.
 Invalid/absent config = **disabled** (fail-closed). Enabling the partition in
-the console settings page is the switch.
+the console settings page is the switch — and since the frontend coverage
+car (0.5.39) the EVOLUTION view actually carries that switch: `#evoEnabled`,
+`#evoDailyAt`, `#evoWeeklyDay`, `#evoMonthlyDay` + `#evoSaveBtn`, prefilled
+from `GET /api/settings` and cross-checked against the ACTIVE schedule
+(`#evoCrossNote` says "form and active schedule differ" instead of guessing).
 
 ## 4. Learned memory slot
 
@@ -105,6 +109,11 @@ never a "missing slot" notice; curated slots keep their notice behavior).
   learn/reflect/log/state/is_due/validation/status/lint_tree) + service
   command coverage.
 - `python3 tests/web_console_p3.py` → evolution endpoint auth/validation.
+- **Console coverage (frontend car, 0.5.39)**: schedule editor round trip.
+  Evidence: `tmp/e2e_frontend_coverage.py` `L3` (write → `/api/evolution`
+  reflects `enabled`/`daily_at`/`weekly_day`/`monthly_day`) and
+  `tmp/e2e_frontend_ui.js` `U3` (save → status line re-rendered + Bearer
+  read-back) — see [frontend_coverage.md](frontend_coverage.md).
 - `python3 tests/source_lang_check.py` → locale packs parity for all new keys.
 - `python3 deploy/check_publish.py` → evolution artifacts are tracked under
   `overlay/**` (allow-classified) and pass the leak scan because the lint

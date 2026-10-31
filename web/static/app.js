@@ -52,6 +52,7 @@ async function loadLang(lang) {
   applyStaticText();
   renderStatus(); renderUsage(); renderVersion(); renderVoice();
   mediaLangRefresh();          // voice session + image badge texts follow too
+  settingsRelang();            // rows built by JS keep their pack strings too
   renderExchange();            // venue rows / probe labels follow the language too
   chatBadge(chatBusy);            // badge label follows the active language
   refreshEventTexts();
@@ -254,6 +255,7 @@ const VS_CYCLE_MS = 2500;       // one self-contained audio segment per tick
 const VS_CMD_MS = 10000;        // command capture window after the wake phrase
 const VS_REPLY_MAX_MS = 120000; // wait for the streamed reply before giving up
 let capsData = null;
+let capsSeen = false;        // B2: false until the FIRST catalog fetch settles
 let vsOn = false, vsStream = null, vsRec = null, vsMime = "";
 let vsPhase = "wake", vsCmdText = "", vsPending = false;
 let vsCycleTimer = null, vsCmdTimer = null, vsReplyIv = null;
@@ -262,8 +264,12 @@ let imgBusy = false;
 async function refreshCaps() {
   try { capsData = await fetch("/api/capabilities").then(r => r.json()); }
   catch (e) { capsData = null; }
+  capsSeen = true;
   imgCapHint();
   renderExchange();            // exchange block rides the same capability fetch
+  renderToolsOff();            // B1: tools_off grid + env-override note ride along
+  renderEnvOverride();
+  renderCapGrid();             // B2: Overview system card rides along too
 }
 
 function mediaLangRefresh() {
@@ -1502,6 +1508,7 @@ function renderEvolution() {
       escapeHtml(evoData.due_now.join(", ")));
   }
   document.getElementById("evoStatus").innerHTML = line;
+  evoCrossCheck();             // B2: settings form vs this active schedule
   const tail = (evoData.log_tail || []).slice(-5).reverse();
   document.getElementById("evoLog").innerHTML = tail.length
     ? tail.map(e => `<li><span class="evo-ts">${escapeHtml(String(e.ts).slice(0, 16).replace("T", " "))}</span>` +
@@ -1977,6 +1984,26 @@ async function saveSettings() {
     },
     alert_preview: document.getElementById("alertSelect").value,
   };
+  // --- car B1: blocks the operator actually edited join the payload here.
+  //     Nothing is ever added for a clean block, so the legacy 16-key
+  //     payload above keeps its exact behavior. Credential values never
+  //     enter this document. ---
+  if (usageDirty) {
+    payload.usage = {
+      metrics_url: ((document.getElementById("usageMetricsUrl") || {}).value || "").trim(),
+      pricing_config: ((document.getElementById("usagePricingCfg") || {}).value || "").trim(),
+      log_dir: ((document.getElementById("usageLogDir") || {}).value || "").trim(),
+    };
+  }
+  const mycExtra = mycoreExtraPayload();
+  if (mycExtra) Object.assign(payload.mycore, mycExtra);
+  if (chanDirty) payload.channels = channelsPayload();
+  const hookPatch = hooksPayload();
+  if (hookPatch) payload.hooks = hookPatch;
+  const hookMsg = document.getElementById("hookMsg");
+  const chanMsg = document.getElementById("chanMsg");
+  if (hookMsg) { hookMsg.className = "save-state"; hookMsg.textContent = ""; }
+  if (chanMsg) { chanMsg.className = "save-state"; chanMsg.textContent = ""; }
   if (!token) {
     state.className = "save-state err";
     state.textContent = t("save.needToken", "token required");
@@ -1995,21 +2022,1083 @@ async function saveSettings() {
     }
     const body = await res.json();
     if (!res.ok) {
+      // the whole write is all-or-nothing: show EVERY server detail verbatim
+      // (they name keys / slots / grammar reasons — never a value), and mirror
+      // the block-owned details into their own status line.
+      const details = Array.isArray(body.details) ? body.details : [];
       state.className = "save-state err";
-      state.textContent = (body.details || [body.error || "error"]).join("; ").slice(0, 60);
+      state.textContent = details.length ? details.join("; ")
+        : (body.error || "error");
+      const hookErrs = details.filter(d => String(d).includes("hooks"));
+      const chanErrs = details.filter(d => String(d).includes("channels"));
+      if (hookMsg && hookErrs.length) {
+        hookMsg.className = "save-state err";
+        hookMsg.textContent = hookErrs.join("; ");
+      }
+      if (chanMsg && chanErrs.length) {
+        chanMsg.className = "save-state err";
+        chanMsg.textContent = chanErrs.join("; ");
+      }
       return;
     }
     settings = Object.assign(settings, body.settings || payload);
     state.className = "save-state";
     state.textContent = body.changed ? t("save.ok", "saved ✓") : t("save.same", "no change ✓");
     input.value = "";
+    // accepted -> the form is the source of truth again: clear the dirty
+    // marks and re-read the rows the server normalized (hooks/channels/tools).
+    chanDirty = false; usageDirty = false; mycDirty = false;
+    if (hookPatch) { hookDirty.clear(); renderHooks(); }
+    if (payload.channels) { renderChannels(); loadChanStatus(); }
+    if (toolsDirty) { toolsDirty = false; renderToolsOff(); }
     beep(880, 0.06);
     scheduleRefresh();
     refreshUsage();            // currency/fx may have changed (server cache cleared)
+    refreshCaps();             // tools_off / shell / env flags may have changed
   } catch (e) {
     state.className = "save-state err";
     state.textContent = String(e).slice(0, 50);
   }
+}
+
+/* ------------------------------------------- settings panels (car B1) --
+   Frontend coverage car, lane B1: the console faces for the remaining
+   settings blocks (usage paths, mycore extras, channel adapters, event
+   hooks) plus the runtime credential-slot editor.
+   Hard rules carried in this section:
+     - a credential VALUE never leaves its password input: it is never
+       copied into another node, attribute, log line or payload — the
+       status line shows slot name + length only, and SET clears the
+       input immediately;
+     - every panel is fail-soft: an endpoint this build does not have
+       (404 / network / shape) degrades to an honest "unavailable" note,
+       never to a fake state;
+     - only blocks the operator actually edited join the save payload;
+       the legacy 16-key payload above is built exactly as before. */
+const HOOK_EVENTS = ["turn_start", "turn_end", "tool_call", "compact",
+                     "cron_fire", "error"];
+/* JS mirror of web/server.py::_CHANNEL_SCHEMA (9 routes): [field, kind]
+   kinds: bool = checkbox · list = comma-separated strings ·
+          port = integer 1..65535 · str = single-line string */
+const CHAN_SCHEMA = {
+  discord: [["enabled", "bool"], ["allow", "list"], ["channel_ids", "list"]],
+  slack: [["enabled", "bool"], ["allow", "list"], ["channel_ids", "list"]],
+  email: [["enabled", "bool"], ["allow", "list"], ["to", "str"],
+          ["from", "str"], ["smtp_host", "str"], ["smtp_port", "port"],
+          ["smtp_ssl", "bool"], ["imap_host", "str"], ["imap_port", "port"]],
+  webhook: [["enabled", "bool"], ["url", "str"]],
+  dingtalk: [["enabled", "bool"]],
+  feishu: [["enabled", "bool"], ["allow", "list"], ["chat_ids", "list"]],
+  wechat: [["enabled", "bool"]],
+  whatsapp: [["enabled", "bool"], ["phone_number_id", "str"]],
+  signal: [["enabled", "bool"], ["url", "str"], ["allow", "list"]],
+};
+const CHAN_FIELD_KEYS = {
+  enabled: "chan.enabled", allow: "chan.allow", channel_ids: "chan.channelIds",
+  chat_ids: "chan.chatIds", to: "chan.to", from: "chan.from",
+  smtp_host: "chan.smtpHost", smtp_port: "chan.smtpPort",
+  smtp_ssl: "chan.smtpSsl", imap_host: "chan.imapHost",
+  imap_port: "chan.imapPort", url: "chan.url",
+  phone_number_id: "chan.phoneId",
+};
+const CRED_GROUPS = ["core", "gateway", "web3", "channels", "media",
+                     "connectors"];
+const CRED_HINTS = {
+  unavailable: ["cred.unavailable",
+    "credential slots unavailable — this build has no GET /api/secrets"],
+  readOnly: ["cred.readOnly",
+    "read-only: no WEB_TOKEN slot on this machine — rotate it by hand"],
+  needToken: ["cred.needToken",
+    "access token required — set it in Access"],
+};
+
+let credsData = null;      // last GET /api/secrets payload (names/lengths only)
+let credHintReason = "";   // "" | unavailable | readOnly | needToken
+let chanStatusRows = [];   // GET /api/channels rows (name/enabled/configured/note)
+let chanDirty = false, usageDirty = false, mycDirty = false, toolsDirty = false;
+const hookDirty = new Set();
+
+/* ---------------------------------------------------------- credentials -- */
+function credStatusText(slot) {
+  const s = slot && typeof slot === "object" ? slot : {};
+  const name = String(s.name || "");
+  if (s.set && typeof s.length === "number") {
+    return name + " · " + t("cred.st.chars", "{n} chars").replace("{n}", String(s.length));
+  }
+  if (s.set) return name + " · " + t("cred.st.set", "set");
+  return name + " · " + t("cred.st.empty", "empty");
+}
+
+function paintCredHint() {
+  const hint = document.getElementById("credTokenHint");
+  if (!hint) return;
+  if (!credHintReason) { hint.hidden = true; hint.textContent = ""; return; }
+  const spec = CRED_HINTS[credHintReason] || CRED_HINTS.needToken;
+  hint.textContent = t(spec[0], spec[1]);
+  hint.hidden = false;
+}
+
+/* Re-render the pure-data status lines ("NAME · set / empty / N chars")
+   after a language switch — rows are built once, so their pack-driven words
+   need an explicit repaint. Rows carrying an error keep their detail. */
+function repaintCredStatuses() {
+  if (!credsData || !Array.isArray(credsData.slots)) return;
+  credsData.slots.forEach(slot => {
+    if (!slot || !slot.name) return;
+    const row = document.querySelector(`#credList [data-slot="${slot.name}"]`);
+    if (!row) return;
+    const st = row.querySelector(".cred-status");
+    if (!st || st.dataset.errDetail) return;
+    st.textContent = credStatusText(slot);
+  });
+}
+
+function credErrDetail(st, detail) {
+  st.dataset.errDetail = String(detail);
+  st.className = "cred-status save-state err";
+  st.textContent = t("cred.err", "error: ") + String(detail);
+}
+
+function credRow(slot, writable) {
+  const name = String(slot && slot.name ? slot.name : "");
+  const wrap = document.createElement("div");
+  wrap.dataset.slot = name;
+  const row = document.createElement("div");
+  row.className = "ctl-row token-row";
+  row.style.marginTop = "6px";
+  const label = document.createElement("label");
+  label.textContent = name;
+  label.style.fontFamily = "var(--mono)";
+  row.appendChild(label);
+  const st = document.createElement("div");
+  st.className = "cred-status stat-note";
+  st.textContent = credStatusText(slot);
+  if (name === "WEB_TOKEN") {
+    // presence-only: the console never rewrites its own gate
+    st.style.marginLeft = "auto";
+    row.appendChild(st);
+    wrap.appendChild(row);
+    const note = document.createElement("div");
+    note.className = "stat-note";
+    note.dataset.i18n = "cred.rotateHint";
+    note.textContent = t("cred.rotateHint",
+      "WEB_TOKEN is presence-only here: rotate it by hand in secrets.env");
+    wrap.appendChild(note);
+    return wrap;
+  }
+  const input = document.createElement("input");
+  input.type = "password";
+  input.className = "cred-input";
+  input.autocomplete = "new-password";
+  input.maxLength = 4096;
+  input.dataset.i18nPh = "cred.ph";
+  input.placeholder = t("cred.ph", "value (never displayed back)");
+  if (!writable) input.disabled = true;
+  const mk = (cls, key, fb) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "btn " + cls;
+    b.dataset.i18n = key;
+    b.textContent = t(key, fb);
+    if (!writable) b.disabled = true;
+    return b;
+  };
+  row.appendChild(input);
+  row.appendChild(mk("cred-set", "cred.set", "SET"));
+  row.appendChild(mk("cred-clear", "cred.clear", "CLEAR"));
+  wrap.appendChild(row);
+  wrap.appendChild(st);
+  return wrap;
+}
+
+function renderCreds(body) {
+  const list = document.getElementById("credList");
+  if (!list) return;
+  const slots = Array.isArray(body.slots) ? body.slots : [];
+  const writable = body.writable !== false;
+  list.textContent = "";
+  const buckets = CRED_GROUPS.map(g => [g, []]);
+  slots.forEach(s => {
+    if (!s || typeof s !== "object" || !s.name) return;
+    const g = typeof s.group === "string" && s.group ? s.group : "core";
+    const bucket = buckets.find(b => b[0] === g);
+    if (bucket) bucket[1].push(s); else buckets.push([g, [s]]);
+  });
+  buckets.filter(b => b[1].length).forEach(([g, items]) => {
+    const head = document.createElement("div");
+    head.style.cssText =
+      "font-size:11px;letter-spacing:.14em;color:var(--blue-ink);" +
+      "margin-top:14px;text-transform:uppercase;";
+    if (CRED_GROUPS.includes(g)) {
+      head.dataset.i18n = "cred.group." + g;
+      head.textContent = t("cred.group." + g, g.toUpperCase());
+    } else {
+      head.textContent = g;          // unknown group: raw name, no invented label
+    }
+    list.appendChild(head);
+    items.forEach(s => list.appendChild(credRow(s, writable)));
+  });
+}
+
+async function loadCreds() {
+  const list = document.getElementById("credList");
+  if (!list) return;
+  try {
+    const res = await fetch("/api/secrets");
+    if (!res.ok) throw new Error("http " + res.status);
+    const body = await res.json();
+    if (!body || typeof body !== "object" || !Array.isArray(body.slots)) {
+      throw new Error("bad shape");
+    }
+    credsData = body;
+    renderCreds(body);
+    list.hidden = false;
+    credHintReason = body.writable === false ? "readOnly"
+      : ((localStorage.getItem(TOKEN_KEY) || "") ? "" : "needToken");
+  } catch (e) {                       // 404 / network: honest unavailable
+    credsData = null;
+    list.hidden = true;
+    credHintReason = "unavailable";
+  }
+  paintCredHint();
+}
+
+async function credWrite(name, value, wrap, input) {
+  const st = wrap.querySelector(".cred-status");
+  if (!st) return;
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    credHintReason = (credsData && credsData.writable === false) ? "readOnly" : "needToken";
+    paintCredHint();
+    st.className = "cred-status save-state err";
+    st.textContent = t("cred.needToken", "access token required — set it in Access");
+    return;
+  }
+  st.className = "cred-status save-state";
+  st.textContent = t("cred.working", "saving…");
+  try {
+    const res = await fetch("/api/secrets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify({ name: name, value: value }),
+    });
+    let body = {};
+    try { body = await res.json(); } catch (e) { body = {}; }
+    if (!res.ok) {
+      const details = Array.isArray(body.details) ? body.details : [];
+      credErrDetail(st, details[0] || body.error || ("HTTP " + res.status));
+      return;
+    }
+    if (input) input.value = "";      // the value never lingers anywhere
+    const slot = Object.assign({ name: name, set: value !== "" },
+                               body.slot && typeof body.slot === "object" ? body.slot : {});
+    if (credsData && Array.isArray(credsData.slots)) {
+      const i = credsData.slots.findIndex(s => s && s.name === name);
+      if (i >= 0) credsData.slots[i] = Object.assign({}, credsData.slots[i], slot);
+      else credsData.slots.push(slot);
+    }
+    st.className = "cred-status stat-note";
+    delete st.dataset.errDetail;
+    st.textContent = credStatusText(slot);
+    beep(880, 0.06);
+  } catch (e) {
+    credErrDetail(st, String(e).slice(0, 80));
+  }
+}
+
+function wireCredList() {
+  const list = document.getElementById("credList");
+  if (!list) return;
+  list.addEventListener("click", e => {
+    const btn = e.target.closest(".cred-set, .cred-clear");
+    if (!btn) return;
+    const wrap = e.target.closest("[data-slot]");
+    if (!wrap) return;
+    const name = wrap.dataset.slot;
+    const input = wrap.querySelector(".cred-input");
+    const clear = btn.classList.contains("cred-clear");
+    const st = wrap.querySelector(".cred-status");
+    if (clear && !window.confirm(t("cred.confirmClear", "Clear this slot in secrets.env?"))) {
+      return;
+    }
+    if (!clear) {
+      if (!input || !input.value) {   // SET with an empty box must never clear a slot
+        if (st) credErrDetail(st, t("cred.needValue", "type a value first"));
+        return;
+      }
+      credWrite(name, input.value, wrap, input);
+    } else {
+      credWrite(name, "", wrap, input);
+    }
+  });
+}
+
+/* -------------------------------------------------------------- channels -- */
+function chanField(key, kind, val) {
+  const row = document.createElement("div");
+  row.className = "ctl-row";
+  const label = document.createElement("label");
+  const lk = CHAN_FIELD_KEYS[key] || ("chan." + key);
+  label.dataset.i18n = lk;
+  label.textContent = t(lk, key);
+  row.appendChild(label);
+  let input;
+  if (kind === "bool") {
+    input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = !!val;
+    input.style.cssText = "width:auto;min-height:auto;accent-color:var(--blue);";
+  } else if (kind === "port") {
+    input = document.createElement("input");
+    input.type = "number";
+    input.min = "1";
+    input.max = "65535";
+    input.value = val == null ? "" : String(val);
+    input.style.width = "110px";
+  } else {
+    input = document.createElement("input");
+    input.type = "text";
+    input.maxLength = 2048;
+    input.autocomplete = "off";
+    input.spellCheck = false;
+    input.value = kind === "list" && Array.isArray(val)
+      ? val.join(", ") : (val == null ? "" : String(val));
+  }
+  input.dataset.chanField = key;
+  if (key === "enabled") input.classList.add("chan-enabled");
+  row.appendChild(input);
+  return row;
+}
+
+function renderChannels() {
+  const list = document.getElementById("chanList");
+  if (!list) return;
+  const base = (settings.channels && typeof settings.channels === "object")
+    ? settings.channels : {};
+  list.textContent = "";
+  Object.keys(CHAN_SCHEMA).forEach(route => {
+    const sub = (base[route] && typeof base[route] === "object") ? base[route] : {};
+    const blk = document.createElement("div");
+    blk.dataset.chanRoute = route;
+    blk.style.cssText =
+      "margin-top:10px;padding-top:8px;border-top:1px dashed var(--line);";
+    const head = document.createElement("div");
+    head.className = "ctl-row token-row";
+    const nm = document.createElement("span");
+    nm.textContent = route;           // server route id: data, never translated
+    nm.style.cssText =
+      "font-family:var(--mono);font-size:12.5px;letter-spacing:.06em;color:var(--navy);";
+    const chip = document.createElement("span");
+    chip.className = "chat-badge";
+    chip.dataset.chanChip = route;
+    head.appendChild(nm);
+    head.appendChild(chip);
+    blk.appendChild(head);
+    CHAN_SCHEMA[route].forEach(([key, kind]) =>
+      blk.appendChild(chanField(key, kind, sub[key])));
+    list.appendChild(blk);
+  });
+  paintChanChips();
+}
+
+function paintChanChips() {
+  document.querySelectorAll("#chanList [data-chan-chip]").forEach(chip => {
+    const route = chip.dataset.chanChip;
+    const row = chanStatusRows.find(r => r && String(r.name) === route);
+    if (!row) {
+      chip.textContent = t("chan.st.unknown", "status unavailable");
+      chip.title = "";
+      return;
+    }
+    chip.textContent =
+      (row.enabled ? t("chan.st.enabled", "enabled")
+                   : t("chan.st.disabled", "disabled")) + " · " +
+      (row.configured ? t("chan.st.configured", "configured")
+                      : t("chan.st.unconfigured", "not configured"));
+    chip.title = row.note ? String(row.note) : "";   // server note, verbatim
+  });
+}
+
+async function loadChanStatus() {
+  try {
+    const body = await fetch("/api/channels").then(r => r.json());
+    chanStatusRows = (body && Array.isArray(body.channels)) ? body.channels : [];
+  } catch (e) { chanStatusRows = []; }
+  paintChanChips();
+}
+
+/* The channels block joins the payload ALL-OR-NOTHING on the server, so the
+   form always sends the full 9-route tree — but only when a field really
+   changed, keeping the blast radius of one edit minimal. */
+function channelsPayload() {
+  const out = {};
+  const base = (settings.channels && typeof settings.channels === "object")
+    ? settings.channels : {};
+  Object.keys(CHAN_SCHEMA).forEach(route => {
+    const blk = document.querySelector(`#chanList [data-chan-route="${route}"]`);
+    if (!blk) return;
+    const sub = {};
+    const stored = (base[route] && typeof base[route] === "object") ? base[route] : {};
+    CHAN_SCHEMA[route].forEach(([key, kind]) => {
+      const input = blk.querySelector(`[data-chan-field="${key}"]`);
+      if (!input) return;
+      if (kind === "bool") {
+        sub[key] = !!input.checked;
+      } else if (kind === "list") {
+        sub[key] = String(input.value || "").split(",")
+          .map(s => s.trim()).filter(Boolean).slice(0, 256);
+      } else if (kind === "port") {
+        const n = parseInt(input.value, 10);
+        const fallback = parseInt(stored[key], 10);
+        const dflt = key === "smtp_port" ? 587 : 993;
+        sub[key] = Number.isFinite(n) ? n
+          : (Number.isFinite(fallback) ? fallback : dflt);
+      } else {
+        sub[key] = String(input.value || "").trim();
+      }
+    });
+    out[route] = sub;
+  });
+  return out;
+}
+
+async function chanSendTest() {
+  const msg = document.getElementById("chanTestMsg");
+  const btn = document.getElementById("chanTestBtn");
+  if (!msg) return;
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    msg.className = "save-state err";
+    msg.textContent = t("cred.needToken", "access token required — set it in Access");
+    return;
+  }
+  const route = (document.getElementById("chanTestRoute") || {}).value || "";
+  const target = ((document.getElementById("chanTestTarget") || {}).value || "").trim();
+  const text = ((document.getElementById("chanTestText") || {}).value || "").trim();
+  if (btn) btn.disabled = true;
+  msg.className = "save-state";
+  msg.textContent = t("chan.testWorking", "sending…");
+  try {
+    const res = await fetch("/api/channels/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify({ route: route, target: target, text: text }),
+    });
+    let body = {};
+    try { body = await res.json(); } catch (e) { body = {}; }
+    if (res.ok && body.ok === true) {
+      msg.className = "save-state";
+      msg.textContent = t("chan.testOk", "sent ✓");
+      return;
+    }
+    const details = Array.isArray(body.details) ? body.details : [];
+    const detail = details.length ? details.join("; ")
+      : (body.error || ("HTTP " + res.status));
+    msg.className = "save-state err";
+    msg.textContent = res.status + " · " + detail;   // 409/400/502 verbatim
+  } catch (e) {
+    msg.className = "save-state err";
+    msg.textContent = String(e).slice(0, 80);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+/* ---------------------------------------------------------- event hooks -- */
+function hookRowEl(cmd, timeout) {
+  const row = document.createElement("div");
+  row.className = "ctl-row token-row";
+  row.dataset.hookRow = "1";
+  row.style.marginTop = "6px";
+  const ta = document.createElement("textarea");
+  ta.className = "hook-cmd evo-input evo-body";
+  ta.rows = 2;
+  ta.style.cssText = "flex:1 1 220px;min-width:0;min-height:44px;";
+  ta.dataset.i18nPh = "hook.cmdPh";
+  ta.placeholder = t("hook.cmdPh",
+    "one argv element per line — executed directly, never through a shell");
+  ta.value = Array.isArray(cmd) ? cmd.join("\n") : "";
+  const lab = document.createElement("label");
+  lab.dataset.i18n = "hook.timeout";
+  lab.textContent = t("hook.timeout", "Timeout (s)");
+  const to = document.createElement("input");
+  to.type = "number";
+  to.className = "hook-timeout";
+  to.min = "1";
+  to.max = "30";
+  to.placeholder = "5";
+  to.value = (typeof timeout === "number" && timeout >= 1 && timeout <= 30)
+    ? String(timeout) : "";
+  to.style.width = "84px";
+  row.appendChild(ta);
+  row.appendChild(lab);
+  row.appendChild(to);
+  return row;
+}
+
+function hookCountOf(blk) {
+  let n = 0;
+  blk.querySelectorAll(".hook-cmd").forEach(ta => {
+    if (String(ta.value || "").split("\n").some(line => line.trim())) n += 1;
+  });
+  return n;
+}
+
+function paintHookCount(chip) {
+  chip.textContent = t("hook.count", "{n} hook(s)")
+    .replace("{n}", chip.dataset.n || "0");
+}
+
+function updateHookCount(blk) {
+  const chip = blk.querySelector("[data-hook-count]");
+  if (!chip) return;
+  chip.dataset.n = String(hookCountOf(blk));
+  paintHookCount(chip);
+}
+
+function updateHookCounts() {
+  document.querySelectorAll("#hookList [data-hook-event]").forEach(updateHookCount);
+}
+
+function renderHooks() {
+  const list = document.getElementById("hookList");
+  if (!list) return;
+  const stored = (settings.hooks && typeof settings.hooks === "object")
+    ? settings.hooks : {};
+  list.textContent = "";
+  HOOK_EVENTS.forEach(ev => {
+    const entries = Array.isArray(stored[ev]) ? stored[ev] : [];
+    const blk = document.createElement("div");
+    blk.dataset.hookEvent = ev;
+    blk.style.cssText =
+      "margin-top:10px;padding-top:8px;border-top:1px dashed var(--line);";
+    const head = document.createElement("div");
+    head.className = "ctl-row token-row";
+    const nm = document.createElement("span");
+    nm.textContent = ev;              // server event id: data, never translated
+    nm.style.cssText =
+      "font-family:var(--mono);font-size:12.5px;letter-spacing:.06em;color:var(--navy);";
+    const chip = document.createElement("span");
+    chip.className = "chat-badge";
+    chip.dataset.hookCount = ev;
+    const add = document.createElement("button");
+    add.type = "button";
+    add.className = "btn";
+    add.dataset.i18n = "hook.add";
+    add.textContent = t("hook.add", "+ ADD");
+    add.addEventListener("click", () => {
+      blk.appendChild(hookRowEl([], null));
+      hookDirty.add(ev);
+      updateHookCount(blk);
+    });
+    head.appendChild(nm);
+    head.appendChild(chip);
+    head.appendChild(add);
+    blk.appendChild(head);
+    const rows = entries.length ? entries : [null];
+    rows.forEach(en => {
+      const cmd = en && Array.isArray(en.cmd) ? en.cmd : [];
+      const to = en && typeof en.timeout === "number" ? en.timeout : null;
+      blk.appendChild(hookRowEl(cmd, to));
+    });
+    list.appendChild(blk);
+  });
+  updateHookCounts();
+}
+
+/* Only the events the operator edited enter the payload; an event whose
+   rows are all empty saves [] (that clears the event on the server). */
+function hooksPayload() {
+  if (!hookDirty.size) return null;
+  const out = {};
+  hookDirty.forEach(ev => {
+    const blk = document.querySelector(`#hookList [data-hook-event="${ev}"]`);
+    if (!blk) return;
+    const entries = [];
+    blk.querySelectorAll("[data-hook-row]").forEach(w => {
+      const ta = w.querySelector(".hook-cmd");
+      const cmd = String((ta && ta.value) || "").split("\n")
+        .map(s => s.trim()).filter(Boolean).slice(0, 32);
+      if (!cmd.length) return;
+      const to = parseInt((w.querySelector(".hook-timeout") || {}).value, 10);
+      entries.push({ cmd: cmd, timeout: Number.isFinite(to) ? to : 5 });
+    });
+    out[ev] = entries;
+  });
+  return Object.keys(out).length ? out : null;
+}
+
+/* -------------------------------------------- usage / mycore extras ---- */
+function renderToolsOff() {
+  const grid = document.getElementById("toolsOffList");
+  const labRow = document.getElementById("toolsOffRow");
+  if (!grid) return;
+  const mc = (capsData && capsData.mycore && typeof capsData.mycore === "object")
+    ? capsData.mycore : null;
+  const known = (mc && Array.isArray(mc.known_tools) && mc.known_tools.length)
+    ? mc.known_tools.filter(n => typeof n === "string").slice().sort() : null;
+  if (!known) {            // field absent in this build -> hide the grid, honestly
+    grid.hidden = true;
+    grid.style.cssText = "";   // no inline display may beat the [hidden] rule
+    if (labRow) { labRow.hidden = true; labRow.style.display = "none"; }
+    return;
+  }
+  // .ctl-row carries an author `display:flex`, so [hidden] alone would not
+  // hide the label row — clear it with an inline display instead.
+  if (labRow) { labRow.hidden = false; labRow.style.display = ""; }
+  grid.hidden = false;
+  const myc = (settings.mycore && typeof settings.mycore === "object")
+    ? settings.mycore : {};
+  const off = new Set(Array.isArray(myc.tools_off) ? myc.tools_off : []);
+  grid.textContent = "";
+  grid.style.cssText = "display:grid;" +
+    "grid-template-columns:repeat(auto-fill,minmax(150px,1fr));" +
+    "gap:6px 12px;margin-bottom:12px;";
+  known.forEach(name => {
+    const lab = document.createElement("label");
+    lab.style.cssText =
+      "display:flex;gap:6px;align-items:center;font-family:var(--mono);font-size:11.5px;";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.className = "tool-off";
+    cb.value = name;
+    cb.checked = off.has(name);       // checked = the tool is disabled
+    lab.appendChild(cb);
+    lab.appendChild(document.createTextNode(name));
+    grid.appendChild(lab);
+  });
+}
+
+function toolsOffValue() {
+  const grid = document.getElementById("toolsOffList");
+  if (!grid || grid.hidden) return null;
+  const out = [];
+  grid.querySelectorAll("input.tool-off").forEach(cb => {
+    if (cb.checked) out.push(cb.value);
+  });
+  return out.slice(0, 32);
+}
+
+function renderEnvOverride() {
+  const el = document.getElementById("envOverrideChip");
+  if (!el) return;
+  const names = (capsData && Array.isArray(capsData.env_overrides))
+    ? capsData.env_overrides.filter(n => typeof n === "string") : [];
+  if (!names.length) {      // field absent or empty -> the note stays hidden
+    el.hidden = true;
+    el.textContent = "";
+    return;
+  }
+  el.hidden = false;
+  el.textContent = t("ctl.envOverride",
+    "Environment overrides: {names} — the console value may be ignored")
+    .replace("{names}", names.join(", "));
+}
+
+function mycoreExtraPayload() {
+  const out = {};
+  if (mycDirty) {
+    const g = id => ((document.getElementById(id) || {}).value || "");
+    out.context_dirs = g("mycContextDirs").trim();
+    out.upstreams = g("mycUpstreams").trim();
+    out.mcp = g("mycMcp").trim();
+    out.shell = g("mycShell").trim();
+  }
+  if (toolsDirty) {
+    const off = toolsOffValue() || [];
+    const myc = (settings.mycore && typeof settings.mycore === "object")
+      ? settings.mycore : {};
+    const stored = Array.isArray(myc.tools_off) ? myc.tools_off : [];
+    // an empty list is sent only when it really clears a stored list — the
+    // server refuses tools_off: [] (1..32) and says so honestly
+    if (off.length || stored.length) out.tools_off = off;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+/* Builds the settings values of the panels once at boot (after
+   GET /api/settings resolved). Programmatic value writes fire no input
+   events, so no dirty flag is raised here. */
+function initSettingsPanels() {
+  const u = (settings.usage && typeof settings.usage === "object")
+    ? settings.usage : {};
+  const myc = (settings.mycore && typeof settings.mycore === "object")
+    ? settings.mycore : {};
+  const setField = (id, val) => {
+    const el = document.getElementById(id);
+    if (el) el.value = val == null ? "" : String(val);
+  };
+  setField("usageMetricsUrl", u.metrics_url);
+  setField("usagePricingCfg", u.pricing_config);
+  setField("usageLogDir", u.log_dir);
+  setField("mycContextDirs", myc.context_dirs);
+  setField("mycUpstreams", myc.upstreams);
+  setField("mycMcp", myc.mcp);
+  setField("mycShell", myc.shell);
+  chanDirty = false; usageDirty = false; mycDirty = false; toolsDirty = false;
+  hookDirty.clear();
+  renderToolsOff();
+  renderEnvOverride();
+  renderHooks();
+  renderChannels();
+  loadChanStatus();
+  loadCreds();
+  evoPrefill();                // B2: evolution schedule form <- settings
+  exCapPrefill();              // B2: exchange caps form <- settings.web3
+}
+
+/* Pack-driven texts that live inside JS-built rows: re-applied on a
+   language switch (data-i18n nodes are already handled by loadLang itself). */
+function settingsRelang() {
+  paintCredHint();
+  repaintCredStatuses();   // "set / empty / {n} chars" follows the language too
+  paintChanChips();
+  updateHookCounts();
+  document.querySelectorAll(".cred-status[data-err-detail]").forEach(el => {
+    el.textContent = t("cred.err", "error: ") + el.dataset.errDetail;
+  });
+  renderEnvOverride();
+  renderCapGrid();             // B2: system card + cron list follow the pack
+  renderCronList();
+  evoCrossCheck();
+}
+
+/* ------------------------------ car B2: evolution / exchange / overview --
+   Lane B2 of the frontend coverage car. Three console faces, all fail-soft:
+     - evolution schedule editor -> POST /api/settings {evolution:{...}}
+       (Bearer; all four keys), prefilled from GET /api/settings and
+       cross-checked against GET /api/evolution (the ACTIVE schedule);
+     - exchange cap editor -> POST /api/settings {web3:{...}} with BOTH keys
+       always (the server is all-or-nothing), then chips + capabilities
+       refresh so the read-only summary above shows the stored numbers;
+     - Overview system card -> GET /api/capabilities (names and counts only)
+       plus GET /api/cron, which is read-only BY DESIGN: jobs are created
+       through natural language / the CLI / Telegram, never from here.
+   Hard rules: a server 400 detail is shown VERBATIM (it names keys, bounds
+   and grammar — never a value); a field the server does not send degrades
+   to t("cap.unavailable") or a hidden row, never to an invented number. */
+const EVO_DAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+
+function evoSettingsBlock() {
+  return (settings.evolution && typeof settings.evolution === "object")
+    ? settings.evolution : {};
+}
+
+/* the form <- GET /api/settings evolution partition (always present after
+   lane A-1.5; the fallback below mirrors mycore.evolution.DEFAULT_SETTINGS
+   so an absent block renders the same defaults the server would apply) */
+function evoPrefill() {
+  const ev = evoSettingsBlock();
+  const en = document.getElementById("evoEnabled");
+  if (en) en.setAttribute("aria-pressed", String(ev.enabled === true));
+  const da = document.getElementById("evoDailyAt");
+  if (da) da.value = ev.daily_at || "09:10";
+  const wd = document.getElementById("evoWeeklyDay");
+  if (wd) wd.value = EVO_DAYS.indexOf(ev.weekly_day) >= 0 ? ev.weekly_day : "sun";
+  const md = document.getElementById("evoMonthlyDay");
+  if (md) {
+    const d = Number(ev.monthly_day);
+    md.value = String(Number.isInteger(d) && d >= 1 && d <= 28 ? d : 1);
+  }
+}
+
+/* display cross-check: the FORM (operator edits) vs the ACTIVE schedule
+   served by GET /api/evolution. Equal -> the note stays hidden; different
+   (unsaved edit, or settings stored elsewhere) -> one honest line saying
+   the form is not applied yet. Never a silent guess, never a rewrite. */
+function evoCrossCheck() {
+  const el = document.getElementById("evoCrossNote");
+  if (!el) return;
+  const sc = (evoData && typeof evoData === "object") ? evoData : null;
+  const da = document.getElementById("evoDailyAt");
+  const wd = document.getElementById("evoWeeklyDay");
+  const md = document.getElementById("evoMonthlyDay");
+  const en = document.getElementById("evoEnabled");
+  // before either side is loaded there is nothing honest to say
+  if (!sc || !sc.schedule || sc.schedule.daily_at === undefined ||
+      !da || !da.value || !wd || !md || !en) {
+    el.hidden = true; el.textContent = ""; return;
+  }
+  const s = sc.schedule;
+  const same = da.value === String(s.daily_at)
+    && wd.value === String(s.weekly_day)
+    && Number(md.value) === Number(s.monthly_day)
+    && (en.getAttribute("aria-pressed") === "true") === Boolean(sc.enabled);
+  el.hidden = same;
+  if (!same) el.textContent = t("evo.diff",
+    "form and the active schedule differ — press SAVE to apply");
+}
+
+async function evoSave() {
+  const state = document.getElementById("evoSaveState");
+  if (!state) return;
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    state.className = "save-state err";
+    state.textContent = t("save.needToken", "token required");
+    return;
+  }
+  const wd = document.getElementById("evoWeeklyDay");
+  const md = document.getElementById("evoMonthlyDay");
+  const patch = { evolution: {
+    enabled: document.getElementById("evoEnabled").getAttribute("aria-pressed") === "true",
+    daily_at: ((document.getElementById("evoDailyAt") || {}).value || ""),
+    weekly_day: wd ? wd.value : "sun",
+    // an empty input yields NaN -> JSON null: the SERVER then answers with
+    // its own 1..28 detail, shown verbatim below (nothing invented here)
+    monthly_day: md ? parseInt(md.value, 10) : 1,
+  } };
+  state.className = "save-state";
+  state.textContent = t("evo.working", "saving…");
+  try {
+    const res = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify(patch),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 401) {
+      state.className = "save-state err";
+      state.textContent = t("save.badToken", "401 · unauthorized");
+      return;
+    }
+    if (!res.ok) {
+      const details = Array.isArray(body.details) ? body.details : [];
+      state.className = "save-state err";
+      state.textContent = details.length ? details.join("; ")
+        : (body.error || ("HTTP " + res.status));
+      return;
+    }
+    settings = Object.assign(settings, body.settings || patch);
+    evoPrefill();              // re-read what the server actually stored
+    state.className = "save-state";
+    state.textContent = body.changed === false
+      ? t("save.same", "no change ✓") : t("save.ok", "saved ✓");
+    beep(880, 0.06);
+    refreshEvolution();        // status line + badge + cross-check follow
+  } catch (e) {
+    state.className = "save-state err";
+    state.textContent = String(e).slice(0, 60);
+  }
+}
+
+/* exchange caps: prefilled from settings.web3 (the stored value), falling
+   back to the capability block — both carry the same two numbers. */
+function exCapPrefill() {
+  const src = (settings.web3 && typeof settings.web3 === "object")
+    ? settings.web3
+    : ((capsData && typeof capsData.web3 === "object") ? capsData.web3 : null);
+  if (!src) return;            // honest: no source -> the inputs stay empty
+  const num = v => { const n = Number(v); return isFinite(n) ? String(n) : ""; };
+  const pt = document.getElementById("exCapPerTx");
+  const dc = document.getElementById("exCapDaily");
+  if (pt) pt.value = num(src.auto_usd_per_tx);
+  if (dc) dc.value = num(src.auto_usd_daily);
+}
+
+async function exCapSave() {
+  const state = document.getElementById("exCapState");
+  if (!state) return;
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    state.className = "save-state err";
+    state.textContent = t("save.needToken", "token required");
+    return;
+  }
+  const val = id => {
+    const el = document.getElementById(id);
+    return el ? parseFloat(el.value) : NaN;   // empty -> NaN -> JSON null -> 400
+  };
+  const patch = { web3: { auto_usd_per_tx: val("exCapPerTx"),
+                          auto_usd_daily: val("exCapDaily") } };
+  state.className = "save-state";
+  state.textContent = t("ex.capWorking", "saving…");
+  try {
+    const res = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify(patch),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 401) {
+      state.className = "save-state err";
+      state.textContent = t("save.badToken", "401 · unauthorized");
+      return;
+    }
+    if (!res.ok) {
+      const details = Array.isArray(body.details) ? body.details : [];
+      state.className = "save-state err";
+      state.textContent = details.length ? details.join("; ")
+        : (body.error || ("HTTP " + res.status));
+      return;
+    }
+    settings = Object.assign(settings, body.settings || patch);
+    state.className = "save-state";
+    state.textContent = body.changed === false
+      ? t("save.same", "no change ✓") : t("save.ok", "saved ✓");
+    beep(880, 0.06);
+    exCapPrefill();
+    renderExThreshold();       // chips repaint at once …
+    refreshCaps();             // … then the fresh catalog repaints them
+  } catch (e) {
+    state.className = "save-state err";
+    state.textContent = String(e).slice(0, 60);
+  }
+}
+
+/* ------------------------------------------ Overview system card (B2) --
+   One kv row per capability block; a block the server did not send shows
+   t("cap.unavailable") instead of a number. Names and counts only — this is
+   the same no-auth catalog the smoke test scrubs for value substrings. */
+function capRowsOf(c) {
+  const rows = [];
+  const NA = t("cap.unavailable", "unavailable");
+  const push = (key, fb, val) => rows.push(
+    [t(key, fb), (val === null || val === undefined) ? NA : String(val)]);
+  const none = t("cap.none", "none");
+
+  const tools = Array.isArray(c.tools) ? c.tools : null;
+  push("cap.tools", "Registered tools", tools ? tools.length : null);
+  if (tools) {
+    const exT = tools
+      .map(x => (x && typeof x === "object" ? String(x.name || "") : ""))
+      .filter(n => n.indexOf("exchange_") === 0);
+    if (exT.length) push("cap.exTools", "Exchange tools", exT.join(", "));
+  }
+  push("cap.skills", "Skills",
+    Array.isArray(c.skills) ? c.skills.length : null);
+
+  const ch = (c.channels && typeof c.channels === "object") ? c.channels : null;
+  push("cap.channels", "Channels",
+    (ch && Array.isArray(ch.enabled) && Array.isArray(ch.configured))
+      ? t("cap.chanCounts", "{e} enabled · {c} configured")
+          .replace("{e}", String(ch.enabled.length))
+          .replace("{c}", String(ch.configured.length))
+      : null);
+
+  const hk = (c.hooks && typeof c.hooks === "object") ? c.hooks : null;
+  push("cap.hooks", "Event hooks",
+    (hk && Array.isArray(hk.events))
+      ? (hk.events.length ? hk.events.join(", ") : none) : null);
+
+  const cr = (c.cron && typeof c.cron === "object") ? c.cron : null;
+  push("cap.cron", "Cron jobs",
+    (cr && typeof cr.jobs === "number") ? cr.jobs : null);
+
+  const br = (c.browser && typeof c.browser === "object") ? c.browser : null;
+  push("cap.browser", "Browser automation",
+    (br && typeof br.available === "boolean")
+      ? (br.available ? t("cap.avail", "available")
+                      : t("cap.noAvail", "not available"))
+      : null);
+
+  const tm = (c.terminal && typeof c.terminal === "object") ? c.terminal : null;
+  push("cap.terminal", "Terminal backend",
+    (tm && tm.backend !== undefined)
+      ? (tm.backend ? String(tm.backend)
+                    : (tm.note ? String(tm.note) : t("cap.terminalOff", "not set")))
+      : null);
+
+  const lm = (c.local_models && typeof c.local_models === "object")
+    ? c.local_models : null;
+  push("cap.localModels", "Local models",
+    (lm && typeof lm.count === "number") ? lm.count : null);
+
+  const myc = (c.mycore && typeof c.mycore === "object") ? c.mycore : null;
+  const mcp = (myc && myc.mcp_servers && typeof myc.mcp_servers === "object")
+    ? myc.mcp_servers : null;
+  push("cap.mcp", "MCP servers",
+    (mcp && Array.isArray(mcp.names))
+      ? (mcp.names.length ? mcp.names.join(", ") : none) : null);
+
+  const exb = (c.exchange && typeof c.exchange === "object") ? c.exchange : null;
+  push("cap.venues", "Exchange venues",
+    (exb && Array.isArray(exb.venues)) ? exb.venues.length : null);
+
+  const w3 = (c.web3 && typeof c.web3 === "object") ? c.web3 : null;
+  push("cap.web3", "Web3 auto caps",
+    (w3 && w3.auto_usd_per_tx !== undefined && w3.auto_usd_daily !== undefined)
+      ? t("ex.thr.perTx", "per-tx cap {v} USD")
+          .replace("{v}", exNum(w3.auto_usd_per_tx)) + " · " +
+        t("ex.thr.daily", "daily cap {v} USD")
+          .replace("{v}", exNum(w3.auto_usd_daily))
+      : null);
+
+  push("cap.env", "Environment overrides",
+    Array.isArray(c.env_overrides)
+      ? (c.env_overrides.length ? c.env_overrides.join(", ") : none) : null);
+
+  return rows;
+}
+
+function renderCapGrid() {
+  const grid = document.getElementById("capGrid");
+  if (!grid) return;
+  const c = (capsData && typeof capsData === "object") ? capsData : null;
+  if (!c) {
+    // before the FIRST fetch settles the table simply stays empty (nothing
+    // is claimed yet); a failed/shapeless fetch says "unavailable" honestly
+    if (!capsSeen) { grid.textContent = ""; return; }
+    grid.innerHTML = `<tr><td colspan="2">${escapeHtml(
+      t("cap.unavailable", "capability catalog unavailable"))}</td></tr>`;
+    return;
+  }
+  grid.innerHTML = capRowsOf(c).map(([k, v]) =>
+    `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(v == null ? "—" : String(v))}</td></tr>`)
+    .join("");
+}
+
+/* ---------------------------------------------------- cron list (B2) --
+   GET /api/cron, read-only by design (jobs are created through natural
+   language / CLI / Telegram). Absent endpoint or shape -> honest note. */
+let cronData = null;
+let cronSeen = false;        // false until the FIRST cron fetch settles
+
+async function refreshCron() {
+  try {
+    const d = await fetch("/api/cron").then(r => r.json());
+    cronData = (d && typeof d === "object" && Array.isArray(d.jobs)) ? d : null;
+  } catch (e) { cronData = null; }
+  cronSeen = true;
+  renderCronList();
+}
+
+function renderCronList() {
+  const el = document.getElementById("cronList");
+  if (!el) return;
+  if (!cronData) {
+    if (!cronSeen) { el.textContent = ""; return; }   // not fetched yet
+    el.innerHTML = `<div class="stat-note">${escapeHtml(
+      t("cron.unavailable", "cron list unavailable"))}</div>`;
+    return;
+  }
+  if (!cronData.jobs.length) {
+    el.innerHTML = `<div class="stat-note">${escapeHtml(t("cron.empty",
+      "no cron jobs yet — ask in chat, the CLI or Telegram to create one"))}</div>`;
+    return;
+  }
+  el.innerHTML = cronData.jobs.map(j => {
+    const job = (j && typeof j === "object") ? j : {};
+    const spec = String(job.spec || "");
+    const title = String(job.text || spec);
+    const meta = [];
+    if (spec && job.text) meta.push(spec);
+    if (job.origin !== null && job.origin !== undefined && job.origin !== "") {
+      meta.push(t("cron.origin", "origin {v}").replace("{v}", String(job.origin)));
+    }
+    if (job.next) {
+      meta.push(t("cron.next", "next {v}").replace("{v}", String(job.next)));
+    }
+    if (job.due) meta.push(t("cron.due", "due now"));
+    return `<div class="ctl-row" data-cron="${escapeHtml(String(job.id || ""))}">` +
+      `<label style="flex:1;min-width:0;overflow-wrap:anywhere;">${escapeHtml(title)}</label>` +
+      `<span class="stat-note" style="margin-top:0;">${escapeHtml(meta.join(" · "))}</span>` +
+      `</div>`;
+  }).join("");
 }
 
 /* --------------------------------------------------------------- polling -- */
@@ -2140,6 +3229,50 @@ if (voiceVolEl) voiceVolEl.addEventListener("input", e => {
 const voiceOrbEl = document.getElementById("voiceOrb");
 if (voiceOrbEl) voiceOrbEl.addEventListener("click", () => armVoice());
 document.getElementById("saveBtn").addEventListener("click", saveSettings);
+/* --- car B2: schedule editor + cap editor + system card wiring (all
+       guarded: an absent element is a no-op, never a page error) --- */
+const evoEnabledEl = document.getElementById("evoEnabled");
+if (evoEnabledEl) evoEnabledEl.addEventListener("click", e => {
+  const b = e.currentTarget;
+  b.setAttribute("aria-pressed", b.getAttribute("aria-pressed") !== "true");
+});
+const evoSaveBtnEl = document.getElementById("evoSaveBtn");
+if (evoSaveBtnEl) evoSaveBtnEl.addEventListener("click", evoSave);
+["evoEnabled", "evoDailyAt", "evoWeeklyDay", "evoMonthlyDay"].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) {
+    el.addEventListener("input", evoCrossCheck);
+    el.addEventListener("change", evoCrossCheck);
+  }
+});
+const exCapSaveBtnEl = document.getElementById("exCapSaveBtn");
+if (exCapSaveBtnEl) exCapSaveBtnEl.addEventListener("click", exCapSave);
+/* --- car B1: dirty tracking for the new blocks (delegated on the containers,
+       so rows rendered later are covered too). Programmatic fills at boot
+       fire no events, so only a real edit raises a flag. --- */
+["usageMetricsUrl", "usagePricingCfg", "usageLogDir"].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener("input", () => { usageDirty = true; });
+});
+["mycContextDirs", "mycUpstreams", "mycMcp", "mycShell"].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener("input", () => { mycDirty = true; });
+});
+const toolsOffEl = document.getElementById("toolsOffList");
+if (toolsOffEl) toolsOffEl.addEventListener("change", () => { toolsDirty = true; });
+const chanListEl = document.getElementById("chanList");
+if (chanListEl) {
+  chanListEl.addEventListener("input", () => { chanDirty = true; });
+  chanListEl.addEventListener("change", () => { chanDirty = true; });
+}
+const hookListEl = document.getElementById("hookList");
+if (hookListEl) hookListEl.addEventListener("input", e => {
+  const blk = e.target && e.target.closest ? e.target.closest("[data-hook-event]") : null;
+  if (blk) { hookDirty.add(blk.dataset.hookEvent); updateHookCount(blk); }
+});
+wireCredList();
+const chanTestBtnEl = document.getElementById("chanTestBtn");
+if (chanTestBtnEl) chanTestBtnEl.addEventListener("click", chanSendTest);
 const micBtnEl = document.getElementById("micBtn");
 if (micBtnEl) micBtnEl.addEventListener("click", () => { vsToggle(); });
 const imgGoEl = document.getElementById("imgGo");
@@ -2182,9 +3315,10 @@ const startLang = QS_LANG || localStorage.getItem(LANG_KEY) || "en";
 runBoot();
 setView(currentView, false);      // deep link applied before the first paint
 loadLang(startLang);
-loadSettings().then(() => { scheduleRefresh(); renderVoice(); });
+loadSettings().then(() => { scheduleRefresh(); renderVoice(); initSettingsPanels(); });
 refreshStatus(); refreshUsage(); refreshEvents(); refreshVersion(); refreshSkills();
 refreshEvolution();
+refreshCron();           // B2: read-only cron list for the Overview card
 loadChatHistory();   // console session restored at boot (read-only route)
 refreshVoiceCap();   // engine status visible before the first orb tap (#4)
 refreshCaps();       // media face: stt/image presence for the chat cards

@@ -44,6 +44,25 @@ def get(path: str) -> tuple[int, dict | list | str]:
         return 0, f"{type(e).__name__}: {e}"
 
 
+def get_auth(path: str, bearer: str) -> tuple[int, dict | list | str]:
+    """GET with an Authorization header (optional-auth legs) — same error
+    handling as get(); the token is never printed."""
+    req = urllib.request.Request(BASE + path)
+    req.add_header("Authorization", f"Bearer {bearer}")
+    try:
+        with urllib.request.urlopen(req, timeout=8) as r:
+            body = r.read().decode()
+            return r.status, json.loads(body) if body else {}
+    except urllib.error.HTTPError as e:
+        body = e.read().decode()
+        try:
+            return e.code, json.loads(body)
+        except ValueError:
+            return e.code, body
+    except Exception as e:  # noqa: BLE001
+        return 0, f"{type(e).__name__}: {e}"
+
+
 def post(path: str, doc, token: str | None) -> tuple[int, dict | str]:
     data = json.dumps(doc).encode()
     req = urllib.request.Request(BASE + path, data=data, method="POST")
@@ -1443,6 +1462,291 @@ def main() -> int:
           s == 200 and s2 == 200 and set_a == set_b and
           "profile" not in set_a and isinstance(set_a, dict),
           f"s={s}/{s2} profile-key={'profile' in set_a if isinstance(set_a, dict) else '?'}")
+
+    # --- frontend coverage car, lane A (1.1-1.8): credential slots,
+    # capabilities additions, cron list, settings partitions. Everything
+    # below either reads or fails BEFORE any write, so the live-endpoint legs
+    # are safe against the production secrets.env; the only successful writes
+    # run in-process against a temp file (module surgery on the imported
+    # console copy) — the real secrets.env is never touched. ---
+    import io as _io
+    import shutil as _shutil
+
+    _prod_secrets = SECRETS
+    _prod_bytes = _prod_secrets.read_bytes() if _prod_secrets.exists() else b""
+    _prod_map = dict(re.findall(r"(?m)^([A-Za-z0-9_]+)=(\S[^\r\n]*)$",
+                                _prod_bytes.decode("utf-8", "replace")))
+    _leak_vals = [v for v in _prod_map.values() if len(v.strip()) >= 6]
+    _groups = {"core", "gateway", "web3", "channels", "media", "connectors"}
+
+    # --- 1.1 GET /api/secrets: catalog shape, presence only, no values ----
+    s, secs = get("/api/secrets")
+    _rows = secs.get("slots") if isinstance(secs, dict) else None
+    _row_names = [r.get("name") for r in _rows] if isinstance(_rows, list) else []
+    _row_keys_ok = isinstance(_rows, list) and all(
+        set(r) <= {"name", "group", "set", "length", "writable"}
+        and isinstance(r.get("name"), str) and r.get("group") in _groups
+        and isinstance(r.get("set"), bool)
+        and isinstance(r.get("writable"), bool)
+        for r in _rows)
+    check("GET /api/secrets shape (33 rows, name/group/set/length/writable)",
+          s == 200 and isinstance(secs, dict)
+          and isinstance(_rows, list) and len(_rows) == 33
+          and len(set(_row_names)) == 33 and _row_keys_ok
+          and isinstance(secs.get("writable"), bool),
+          f"s={s} rows={len(_rows) if isinstance(_rows, list) else _rows} "
+          f"keys_ok={_row_keys_ok}")
+    _secs_text = json.dumps(secs, ensure_ascii=False) if isinstance(secs, dict) else ""
+    _orows = [r for r in _rows if isinstance(r, dict)] if isinstance(_rows, list) else []
+    check("GET /api/secrets carries no slot value, no value key, no length unauthenticated",
+          bool(_secs_text) and bool(_leak_vals)
+          and all(v not in _secs_text for v in _leak_vals)
+          and all("value" not in r for r in _orows)
+          and all(r.get("length") is None for r in _orows),
+          f"rows={len(_orows)}")
+    _present = {k for k, v in _prod_map.items() if v.strip()}
+    check("GET /api/secrets set flags mirror own-line presence",
+          isinstance(_rows, list)
+          and all(bool(r.get("set")) == (r.get("name") in _present)
+                  for r in _rows if isinstance(r, dict)),
+          f"set_rows={sum(1 for r in _orows if r.get('set'))}")
+    _tok_row = next((r for r in _orows if r.get("name") == "WEB_TOKEN"), {})
+    check("GET /api/secrets WEB_TOKEN is presence-only (writable:false, no length)",
+          bool(_tok_row) and _tok_row.get("writable") is False
+          and _tok_row.get("group") == "core"
+          and _tok_row.get("length") is None
+          and bool(_tok_row.get("set")) == ("WEB_TOKEN" in _present)
+          and secs.get("writable") == ("WEB_TOKEN" in _present),
+          f"row={_tok_row} writable={secs.get('writable') if isinstance(secs, dict) else None}")
+    check("GET /api/secrets writable=false rows are exactly WEB_TOKEN",
+          isinstance(_rows, list)
+          and [r.get("name") for r in _rows
+               if isinstance(r, dict) and r.get("writable") is False] == ["WEB_TOKEN"],
+          str([r.get("name") for r in _rows
+               if isinstance(r, dict) and not r.get("writable")]))
+
+    # --- 1.1 optional auth: a VALID Bearer reveals lengths, a wrong one
+    # stays 200 with lengths omitted (never 401) ---
+    if token:
+        s, secs_auth = get_auth("/api/secrets", token)
+        _arows = secs_auth.get("slots") if isinstance(secs_auth, dict) else None
+        _set_row = next((r for r in (isinstance(_arows, list) and _arows or [])
+                         if r.get("set")), {})
+        _unset_row = next((r for r in (isinstance(_arows, list) and _arows or [])
+                           if not r.get("set") and r.get("name") != "WEB_TOKEN"), {})
+        check("GET /api/secrets valid token -> integer lengths for set slots",
+              s == 200 and isinstance(_arows, list)
+              and isinstance(_set_row.get("length"), int)
+              and _set_row.get("length") == len(_prod_map.get(_set_row.get("name"), "").strip())
+              and _set_row.get("length", 0) > 0
+              and isinstance(_unset_row.get("length"), int)
+              and _unset_row.get("length") == 0
+              and next((r for r in _arows if r.get("name") == "WEB_TOKEN"), {}).get("length") is None,
+              f"s={s} set={_set_row} unset={_unset_row}")
+        s, secs_bad = get_auth("/api/secrets", "wrong-token-not-the-real-one")
+        _brows = secs_bad.get("slots") if isinstance(secs_bad, dict) else None
+        check("GET /api/secrets wrong token -> 200, lengths omitted (no 401)",
+              s == 200 and isinstance(_brows, list)
+              and all(r.get("length") is None for r in _brows),
+              f"s={s}")
+    else:
+        check("GET /api/secrets valid token -> integer lengths for set slots",
+              False, "WEB_TOKEN absent")
+
+    # --- 1.2 POST /api/secrets: gates fire BEFORE any write (prod-safe) ---
+    s, body = post("/api/secrets", {"name": "MODEL_API_KEY", "value": "x"}, None)
+    check("POST /api/secrets no token -> 401", s == 401, f"got {s}")
+    s, body = post("/api/secrets", {"name": "MODEL_API_KEY", "value": "x"},
+                   "wrong-token-not-the-real-one")
+    check("POST /api/secrets wrong token -> 401", s == 401, f"got {s}")
+    if token:
+        s, body = post("/api/secrets", {"name": "DEFINITELY_NOT_A_SLOT",
+                                        "value": "x"}, token)
+        check("POST /api/secrets unknown name -> 400 details",
+              s == 400 and isinstance(body, dict)
+              and any("unknown slot" in str(d) for d in body.get("details", [])),
+              f"got {s} {str(body)[:120]}")
+        s, body = post("/api/secrets", {"name": "WEB_TOKEN", "value": "x"}, token)
+        check("POST /api/secrets WEB_TOKEN (presence-only) -> 400 not writable",
+              s == 400 and isinstance(body, dict)
+              and any("not writable" in str(d) for d in body.get("details", [])),
+              f"got {s} {str(body)[:120]}")
+        s, body = post("/api/secrets", {"name": "MODEL_API_KEY",
+                                        "value": "bad\nvalue"}, token)
+        check("POST /api/secrets control char in value -> 400",
+              s == 400 and isinstance(body, dict)
+              and any("control characters" in str(d) for d in body.get("details", [])),
+              f"got {s} {str(body)[:120]}")
+        s, body = post("/api/secrets", {"name": "MODEL_API_KEY",
+                                        "value": "x" * 4097}, token)
+        check("POST /api/secrets value > 4096 chars -> 400",
+              s == 400 and isinstance(body, dict)
+              and any("too long" in str(d) for d in body.get("details", [])),
+              f"got {s} {str(body)[:120]}")
+        s, body = post("/api/secrets", {"name": "MODEL_API_KEY",
+                                        "value": " padded "}, token)
+        check("POST /api/secrets leading/trailing whitespace -> 400",
+              s == 400 and isinstance(body, dict)
+              and any("whitespace" in str(d) for d in body.get("details", [])),
+              f"got {s} {str(body)[:120]}")
+        s, body = post("/api/secrets", {"name": "MODEL_API_KEY"}, token)
+        check("POST /api/secrets missing value -> 400",
+              s == 400 and isinstance(body, dict)
+              and any("value must be a string" in str(d)
+                      for d in body.get("details", [])),
+              f"got {s} {str(body)[:120]}")
+    _bytes_now = _prod_secrets.read_bytes() if _prod_secrets.exists() else b""
+    check("rejected POST /api/secrets writes never touched prod secrets.env",
+          _bytes_now == _prod_bytes, f"changed={_bytes_now != _prod_bytes}")
+
+    # --- 1.2 module surgery: the successful set/clear roundtrip runs on an
+    # imported copy of web/server.py with SECRETS pointed at a TEMP file ---
+    import tempfile as _tempfile
+    _tmpdir = Path(_tempfile.mkdtemp(prefix="p3_secrets_"))
+    _tmp_secrets = _tmpdir / "secrets.env"
+    _tmp_secrets.write_text(f"WEB_TOKEN=temp-gate-token-0123456789\n"
+                            f"MODEL_API_KEY=\n"
+                            f"OTHER_LINE=keep-me\n", encoding="utf-8")
+    _tmp_secrets.chmod(0o600)
+    _real_secrets_const = _srv.SECRETS
+
+    def _srv_call(handler: str, doc, bearer: str | None = None):
+        """Run one Handler method in-process (module-surgery pattern): the
+        response lands in a box instead of a socket."""
+        raw = json.dumps(doc).encode() if doc is not None else b""
+        h = _srv.Handler.__new__(_srv.Handler)
+        h.headers = {"Content-Length": str(len(raw))}
+        if bearer is not None:
+            h.headers["Authorization"] = f"Bearer {bearer}"
+        h.rfile = _io.BytesIO(raw)
+        box: dict = {}
+        h._json = lambda obj, code=200: box.setdefault("res", (code, obj))
+        getattr(h, handler)()
+        return box.get("res")
+
+    try:
+        _srv.SECRETS = _tmp_secrets
+        _rt_value = "p3-roundtrip-token"
+        _r = _srv_call("_handle_secrets_write",
+                       {"name": "MODEL_API_KEY", "value": _rt_value},
+                       "temp-gate-token-0123456789")
+        check("secrets set (temp file) -> 200 ok + changed true + name/length only",
+              _r is not None and _r[0] == 200
+              and _r[1].get("ok") is True and _r[1].get("changed") is True
+              and _r[1].get("slot") == {"name": "MODEL_API_KEY", "group": "core",
+                                        "set": True, "length": len(_rt_value)}
+              and _rt_value not in json.dumps(_r[1])
+              and all(v not in json.dumps(_r[1]) for v in _leak_vals),
+              f"res={_r}")
+        check("secrets set reflected by the reader + other lines byte-exact",
+              _srv.read_env_slot("MODEL_API_KEY") == _rt_value
+              and "OTHER_LINE=keep-me\n" in _tmp_secrets.read_text()
+              and _tmp_secrets.read_text().count("MODEL_API_KEY=") == 1,
+              f"n_lines={_tmp_secrets.read_text().count(chr(10))}")
+        _r2 = _srv_call("_handle_secrets_write",
+                        {"name": "MODEL_API_KEY", "value": _rt_value},
+                        "temp-gate-token-0123456789")
+        check("secrets set is idempotent -> changed false",
+              _r2 is not None and _r2[0] == 200
+              and _r2[1].get("changed") is False,
+              f"res={_r2}")
+        _r3 = _srv_call("_handle_secrets_write",
+                        {"name": "MODEL_API_KEY", "value": ""},
+                        "temp-gate-token-0123456789")
+        check("secrets clear -> 200 set:false length:0 and slot reads absent",
+              _r3 is not None and _r3[0] == 200
+              and _r3[1].get("changed") is True
+              and _r3[1].get("slot") == {"name": "MODEL_API_KEY", "group": "core",
+                                        "set": False, "length": 0}
+              and _srv.read_env_slot("MODEL_API_KEY") is None
+              and "MODEL_API_KEY=\n" in _tmp_secrets.read_text()
+              and "OTHER_LINE=keep-me\n" in _tmp_secrets.read_text(),
+              f"res={_r3}")
+        check("secrets writes land with mode 0600",
+              (_tmp_secrets.stat().st_mode & 0o777) == 0o600,
+              oct(_tmp_secrets.stat().st_mode & 0o777))
+        _r4 = _srv_call("_handle_secrets_write",
+                        {"name": "MODEL_API_KEY", "value": "p3-again"},
+                        "wrong-gate-token")
+        check("secrets POST wrong bearer (in-process) -> 401, nothing written",
+              _r4 is not None and _r4[0] == 401
+              and _srv.read_env_slot("MODEL_API_KEY") is None,
+              f"res={_r4}")
+        _g = _srv_call("_handle_secrets_get", None, None)
+        _grows = _g[1].get("slots") if _g else None
+        check("secrets GET (in-process, temp file) reports presence, no values",
+              _g is not None and _g[0] == 200
+              and isinstance(_grows, list) and len(_grows) == 33
+              and all(r.get("length") is None for r in _grows)
+              and _g[1].get("writable") is True
+              and "p3-again" not in json.dumps(_g[1])
+              and "temp-gate-token-0123456789" not in json.dumps(_g[1]),
+              f"res={_g and _g[0]} rows={len(_grows) if isinstance(_grows, list) else _grows}")
+    finally:
+        _srv.SECRETS = _real_secrets_const
+        _shutil.rmtree(_tmpdir, ignore_errors=True)
+
+    # --- 1.3 capabilities additions: names only ---
+    s, caps2 = get("/api/capabilities")
+    _envo = caps2.get("env_overrides") if isinstance(caps2, dict) else None
+    _known8 = {"MYCORE_BASE_URL", "MYCORE_MODEL", "MYCORE_UPSTREAMS",
+               "MYCORE_MCP", "MYCORE_TOOLS_OFF", "AIDOG_CONTEXT_DIRS",
+               "AIDOG_IMAGE_URL", "AIDOG_TTS_URL"}
+    check("GET capabilities env_overrides = known names only",
+          s == 200 and isinstance(_envo, list)
+          and all(isinstance(n, str) for n in _envo)
+          and set(_envo) <= _known8 and len(set(_envo)) == len(_envo),
+          f"env_overrides={_envo}")
+    check("GET capabilities env_overrides carries no value",
+          isinstance(_envo, list)
+          and all(v not in json.dumps(_envo) for v in _leak_vals),
+          f"env_overrides={_envo}")
+    _kt = (caps2.get("mycore") or {}).get("known_tools") \
+        if isinstance(caps2, dict) else None
+    from mycore.tools import KNOWN_TOOL_NAMES as _KTN
+    check("GET capabilities mycore.known_tools == 25 sorted names",
+          isinstance(_kt, list) and len(_kt) == 25
+          and _kt == sorted(_KTN) and len(set(_kt)) == 25,
+          f"n={len(_kt) if isinstance(_kt, list) else _kt}")
+
+    # --- 1.4 GET /api/cron: read-only sanitized job list ---
+    s, cron = get("/api/cron")
+    _jobs = cron.get("jobs") if isinstance(cron, dict) else None
+    _cron_text = json.dumps(cron, ensure_ascii=False) if isinstance(cron, dict) else ""
+    check("GET /api/cron shape (jobs list + count, no absolute path)",
+          s == 200 and isinstance(cron, dict)
+          and isinstance(_jobs, list) and cron.get("count") == len(_jobs)
+          and all(isinstance(j, dict)
+                  and {"id", "type", "spec", "text", "kind", "done", "due",
+                       "next"} <= set(j)
+                  and isinstance(j.get("spec"), str)
+                  and isinstance(j.get("done"), bool)
+                  and isinstance(j.get("due"), bool)
+                  for j in _jobs)
+              and all("/" not in str(v) for j in _jobs
+                      for k, v in j.items() if k != "text")
+          and all(v not in _cron_text for v in _leak_vals),
+          f"s={s} n={len(_jobs) if isinstance(_jobs, list) else _jobs}")
+
+    # --- 1.5 settings partitions always present ---
+    s, set_c = get("/api/settings")
+    _evo = set_c.get("evolution") if isinstance(set_c, dict) else None
+    check("GET /api/settings always carries the evolution partition (4 keys)",
+          s == 200 and isinstance(_evo, dict)
+          and set(_evo) == {"enabled", "daily_at", "weekly_day", "monthly_day"}
+          and isinstance(_evo.get("enabled"), bool)
+          and isinstance(_evo.get("daily_at"), str)
+          and isinstance(_evo.get("weekly_day"), str)
+          and isinstance(_evo.get("monthly_day"), int),
+          f"evolution={_evo}")
+    check("GET /api/settings always carries the hooks partition (object)",
+          s == 200 and isinstance(set_c, dict)
+          and isinstance(set_c.get("hooks"), dict),
+          f"hooks={set_c.get('hooks') if isinstance(set_c, dict) else None}")
+
+    _bytes_end = _prod_secrets.read_bytes() if _prod_secrets.exists() else b""
+    check("prod secrets.env untouched by every lane-A secrets leg",
+          _bytes_end == _prod_bytes, f"changed={_bytes_end != _prod_bytes}")
 
     print(f"\n{len(PASS)} pass · {len(FAIL)} fail")
     if FAIL:

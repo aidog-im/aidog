@@ -118,3 +118,11 @@ line, detail to the log only). Dry-run evaluates + marks + logs, never sends.
   keys (packs 194 → 204).
 - `python3 deploy/check_publish.py` → `data/` is runtime state (gitignored),
   nothing new tracked; leak scan unchanged.
+- **Console coverage (frontend car, 0.5.39)**: the registry is now READABLE
+  from the console — Overview `#cronList` renders the new `GET /api/cron`
+  (id/spec/text/origin/next/due, fixed field whitelist so no absolute path
+  can enter the payload; absent/corrupt file → `count: 0`). Creation stays
+  natural-language/CLI/Telegram by design — there is no create button.
+  Evidence: `tmp/e2e_frontend_coverage.py` `L6` (seed → count/fields →
+  delete) and `tmp/e2e_frontend_ui.js` `U5` (list renders) — see
+  [frontend_coverage.md](frontend_coverage.md).

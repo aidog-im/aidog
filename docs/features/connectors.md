@@ -104,3 +104,9 @@ connector_search {query, source?=auto, limit?=5}
   `secrets.env` slots make `media.connectors` read `true` (values never
   serialized) and are restored **byte-for-byte**, followed by a green smoke
   re-run. Real-provider connectivity remains **pending credentials**.
+- **Console coverage (frontend car, 0.5.39)**: `LINEAR_API_KEY` and
+  `NOTION_API_KEY` now have `connectors`-group rows in the Settings
+  credential editor (set/clear behind the Bearer gate; echo = name +
+  length). Evidence: `tmp/e2e_frontend_coverage.py` `L1` (roundtrip +
+  zero-echo sweep) and `tmp/e2e_frontend_ui.js` `U2` (set/clear + DOM value
+  scan) — see [frontend_coverage.md](frontend_coverage.md).

@@ -111,7 +111,8 @@ from mycore.loop import run_turn  # noqa: E402
 from mycore.model import ChatClient  # noqa: E402
 from mycore.service import state_dir as mycore_state_dir  # noqa: E402
 from mycore.session import Session  # noqa: E402
-from mycore.tools import build_registry, resolve_disabled_tools  # noqa: E402
+from mycore.tools import (KNOWN_TOOL_NAMES, build_registry,  # noqa: E402
+                          resolve_disabled_tools)
 HOST, PORT = "127.0.0.1", int(os.environ.get("AIDOG_WEB_PORT", "8790"))
 try:
     VERSION = (REPO / "VERSION").read_text(encoding="utf-8").strip()  # single source of truth
@@ -234,6 +235,14 @@ DEFAULT_SETTINGS: dict = {
     # owner in the console. Non-secret numbers; mycore.exchanges.thresholds
     # re-validates them on every read and collapses anything unusable to 0.
     "web3": {"auto_usd_per_tx": 0.0, "auto_usd_daily": 0.0},
+    # Evolution loop schedule (frontend coverage 1.5): a copy of
+    # mycore.evolution.DEFAULT_SETTINGS — that constant stays the source of
+    # truth (copied, never invented) and this partition is always present in
+    # GET /api/settings so the console never has to treat absence as default.
+    "evolution": dict(evolution.DEFAULT_SETTINGS),
+    # Event hooks partition (car 4a): {} = no hook configured. Present by
+    # default for the same reason — the editor renders an honest empty set.
+    "hooks": {},
 }
 ALLOWED_TOP = ("language", "refresh_sec", "sound", "voice_volume",
                "alert_preview", "currency", "fx_rate", "mycore", "usage",
@@ -287,6 +296,40 @@ STT_MODELS = ("tiny", "base", "small")
 TTS_ENGINES = ("edge", "byok")
 WAKE_PHRASES_MAX = 3
 WAKE_PHRASE_MAX_LEN = 64
+
+# ------------------------------------------- credential-slot catalog (1.1) ---
+# Console-editable secrets.env slots: fixed allowlist, grouped for the
+# settings credential editor. Anything not listed here (owner infra slots
+# AIDOG_CF_* / AIDOG_R2_*, legacy dead slots) is NOT console-writable and is
+# never listed — deny by default. WEB_TOKEN is presence-only: the gate must
+# not rewrite itself (rotate it by hand), so it is listed but not writable.
+SECRET_GROUPS: dict = {
+    "core": ("MODEL_API_KEY", "MYCORE_TG_TOKEN", "AIDOG_TG_ALLOWED_USERS",
+             "AIDOG_GH_PAT", "MYCORE_WD_CHAT"),
+    "gateway": ("OPENAI_API_TOKEN",),
+    "web3": ("OKX_API_KEY", "OKX_API_SECRET", "OKX_API_PASSPHRASE",
+             "KRAKEN_API_KEY", "KRAKEN_API_SECRET",
+             "BINANCE_API_KEY", "BINANCE_API_SECRET"),
+    "channels": ("CHANNEL_WEBHOOK_SECRET", "CHANNEL_DISCORD_TOKEN",
+                 "CHANNEL_SLACK_TOKEN", "CHANNEL_SMTP_USER", "CHANNEL_SMTP_PASS",
+                 "CHANNEL_IMAP_USER", "CHANNEL_IMAP_PASS",
+                 "CHANNEL_DINGTALK_WEBHOOK", "CHANNEL_DINGTALK_SECRET",
+                 "CHANNEL_FEISHU_APP_ID", "CHANNEL_FEISHU_APP_SECRET",
+                 "CHANNEL_WECHAT_APPID", "CHANNEL_WECHAT_APP_SECRET",
+                 "CHANNEL_WHATSAPP_TOKEN", "CHANNEL_SIGNAL_TOKEN"),
+    "media": ("TTS_API_KEY", "IMAGE_API_KEY"),
+    "connectors": ("LINEAR_API_KEY", "NOTION_API_KEY"),
+}
+SECRET_SLOTS: dict = {name: group for group, names in SECRET_GROUPS.items()
+                      for name in names}          # 32 editable slots
+SECRET_PRESENCE_ONLY = ("WEB_TOKEN",)             # listed, never writable
+SECRET_VALUE_MAX = 4096                           # chars, one line
+# Env-var NAMES the operator may export into the console process; only the
+# names ever serialize into /api/capabilities (the value may be a URL with
+# embedded credentials or a model list).
+ENV_OVERRIDE_VARS = ("MYCORE_BASE_URL", "MYCORE_MODEL", "MYCORE_UPSTREAMS",
+                     "MYCORE_MCP", "MYCORE_TOOLS_OFF", "AIDOG_CONTEXT_DIRS",
+                     "AIDOG_IMAGE_URL", "AIDOG_TTS_URL")
 
 # ---------------------------------------------------------------- helpers ----
 
@@ -354,6 +397,42 @@ def _read_text(path: Path) -> str:
         return path.read_text()
     except OSError:
         return ""
+
+
+def write_env_slot(name: str, value: str) -> bool:
+    """Own-line atomic write of one secrets.env slot (frontend coverage 1.2).
+    Returns True only when the stored value actually changed (idempotent).
+
+    Every OTHER line of the file is preserved byte-exact: the edit happens on
+    the raw bytes, the temp file lands in the same directory and
+    `os.replace` swaps it in, then mode 0600 is enforced. `value` stays
+    inside this frame — it never reaches a log line, response or exception;
+    failures surface as OSError to the caller, which maps them to a
+    type-name-only error."""
+    path = SECRETS
+    try:
+        raw = path.read_bytes() if path.exists() else b""
+    except OSError:
+        raise
+    new_val = value.encode("utf-8")
+    # Line detection allows the EMPTY value (`NAME=`): an existing placeholder
+    # line is replaced in place, never duplicated by an append.
+    line_re = re.compile(rb"(?m)^" + re.escape(name.encode("ascii"))
+                         + rb"=([^\r\n]*)$")
+    hit = line_re.search(raw)
+    if hit:
+        if hit.group(1) == new_val:
+            return False                      # already stored — no write
+        updated = raw[:hit.start(1)] + new_val + raw[hit.end(1):]
+    else:
+        sep = b"" if (not raw or raw.endswith(b"\n")) else b"\n"
+        updated = raw + sep + name.encode("ascii") + b"=" + new_val + b"\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    tmp.write_bytes(updated)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+    return True
 
 
 # --------------------------------------------------- mycore runtime probes ---
@@ -2125,6 +2204,12 @@ def collect_capabilities() -> dict:
     except Exception as e:  # noqa: BLE001
         sys.stderr.write(f"capabilities cron failed err={type(e).__name__}\n")
         jobs = 0
+    # Frontend coverage 1.3: env-var NAMES exported into this process (names
+    # only — a value may carry credentials) + the known-tool catalog the
+    # tools_off checkboxes are rendered from.
+    env_overrides = [n for n in ENV_OVERRIDE_VARS
+                     if os.environ.get(n, "").strip()]
+    known_tools = sorted(KNOWN_TOOL_NAMES)
     # Browser automation (car 4b): availability probe only — no launch, and
     # the six tools register in `tools` above IFF this returns True.
     try:
@@ -2220,7 +2305,9 @@ def collect_capabilities() -> dict:
     return {
         "version": VERSION,
         "mycore": {"model": model, "upstreams_configured": upstreams_ok,
-                   "mcp_servers": mcp_block},
+                   "mcp_servers": mcp_block,
+                   "known_tools": known_tools},
+        "env_overrides": env_overrides,
         "tools": tools,
         "skills": skills,
         "channels": channels,
@@ -2236,6 +2323,43 @@ def collect_capabilities() -> dict:
         "exchange": exchange_blk,
         "web3": web3_blk,
     }
+
+
+
+def collect_cron() -> dict:
+    """GET /api/cron — read-only view of the natural-language cron registry
+    (frontend coverage 1.4). Fail-soft by contract: an absent, unreadable or
+    corrupt state file answers {"jobs": [], "count": 0}, never a 500, and
+    nothing here mutates the registry (load_jobs hands back fresh dicts).
+
+    Rows are built from a fixed field whitelist — the scheduler's own display
+    fields (id/spec/schedule/text/origin/due marks) — so no filesystem path
+    can enter this payload by construction."""
+    try:
+        from mycore import scheduler as _scheduler
+        jobs = _scheduler.load_jobs(_scheduler.default_jobs_path())
+        now = time.time()
+        rows: list[dict] = []
+        for job in jobs:
+            rows.append({
+                "id": str(job.get("id", "")),
+                "type": str(job.get("type", "")),
+                "spec": _scheduler.describe(job),
+                "text": str(job.get("text", "")),
+                "kind": str(job.get("kind", "")),
+                "source": str(job.get("source", "")),
+                "origin": job.get("origin")
+                          if isinstance(job.get("origin"), (int, str)) else None,
+                "created_at": job.get("created_at"),
+                "last_fired": job.get("last_fired"),
+                "done": bool(job.get("done")),
+                "due": bool(_scheduler.is_due(job, now)),
+                "next": _scheduler.fmt_beijing(_scheduler.next_fire(job, now)),
+            })
+        return {"jobs": rows, "count": len(rows)}
+    except Exception as e:  # noqa: BLE001 — catalog must not break the console
+        sys.stderr.write(f"cron list failed err={type(e).__name__}\n")
+        return {"jobs": [], "count": 0}
 
 
 # ----------------------------------------------------------------- server ----
@@ -2310,6 +2434,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_openai_models()
         if path == "/api/capabilities":
             return self._json(collect_capabilities())
+        if path == "/api/secrets":
+            return self._handle_secrets_get()
+        if path == "/api/cron":
+            return self._json(collect_cron())
         if path == "/api/exchange/quote":
             return self._handle_exchange_quote()
         if path == "/api/exchange/plans":
@@ -2330,6 +2458,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == "/api/settings":
             return self._handle_settings_write()
+        if path == "/api/secrets":
+            return self._handle_secrets_write()
         if path == "/api/say":
             return self._handle_say()
         if path == "/api/stt":
@@ -2352,6 +2482,95 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_exchange_plan_decide(
                 path[len("/api/exchange/plans/"):])
         return self._json({"error": "not found"}, 404)
+
+    # ------------------------------------------ credential-slot endpoints ---
+    def _secrets_authed(self) -> bool:
+        """Optional Bearer WEB_TOKEN check for GET /api/secrets: lengths are
+        revealed only to the valid token. Absent/invalid token omits them and
+        answers 200 — presence stays readable like the rest of the catalog
+        (no 401). The token value itself never appears in any output."""
+        token = read_env_slot("WEB_TOKEN")
+        if not token:
+            return False
+        auth = self.headers.get("Authorization", "")
+        provided = auth[7:] if auth.startswith("Bearer ") else ""
+        return bool(provided) and hmac.compare_digest(provided.encode(),
+                                                       token.encode())
+
+    @staticmethod
+    def _secret_row(name: str, group: str, authed: bool,
+                    writable: bool = True) -> dict:
+        """One catalog row: name/group/presence (+ length only for a valid
+        token). The value is read for presence and immediately dropped — it
+        never leaves this frame."""
+        val = read_env_slot(name)
+        present = val is not None
+        return {"name": name, "group": group, "set": present,
+                "length": (len(val) if present else 0) if authed else None,
+                "writable": writable}
+
+    def _handle_secrets_get(self) -> None:
+        """GET /api/secrets — the console credential-slot catalog (loopback,
+        optional auth). Slot VALUES are never present in this payload."""
+        authed = self._secrets_authed()
+        rows = [self._secret_row(name, group, authed)
+                for group, names in SECRET_GROUPS.items()
+                for name in names]
+        # WEB_TOKEN: presence only — the gate never rewrites itself.
+        token = read_env_slot("WEB_TOKEN")
+        rows.append({"name": "WEB_TOKEN", "group": "core",
+                     "set": token is not None, "length": None,
+                     "writable": False})
+        return self._json({"slots": rows, "writable": bool(token)})
+
+    def _handle_secrets_write(self) -> None:
+        """POST /api/secrets — set/clear one allowlisted slot.
+
+        Gate order: Bearer WEB_TOKEN -> body cap (MAX_BODY via
+        _read_json_body) -> name allowlist -> value rules. Nothing is
+        written before every check passes. The VALUE never appears in the
+        response, the stderr line, or an exception — only name, set, length."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        name = doc.get("name")
+        value = doc.get("value")
+        if not isinstance(name, str) or not name:
+            return self._json({"error": "validation failed",
+                               "details": ["name must be a non-empty string"]}, 400)
+        group = SECRET_SLOTS.get(name)
+        if group is None:
+            detail = ("slot is not writable: WEB_TOKEN"
+                      if name in SECRET_PRESENCE_ONLY
+                      else f"unknown slot: {name[:64]}")
+            return self._json({"error": "validation failed",
+                               "details": [detail]}, 400)
+        if not isinstance(value, str):
+            return self._json({"error": "validation failed",
+                               "details": ["value must be a string"]}, 400)
+        if len(value) > SECRET_VALUE_MAX:
+            return self._json({"error": "validation failed",
+                               "details": [f"value too long (max {SECRET_VALUE_MAX} chars)"]}, 400)
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+            return self._json({"error": "validation failed",
+                               "details": ["value must be a single line (no control characters)"]}, 400)
+        if value != value.strip():
+            # a value the own-line reader could not round-trip is refused
+            # rather than silently stored shorter than what was sent.
+            return self._json({"error": "validation failed",
+                               "details": ["value must not start or end with whitespace"]}, 400)
+        try:
+            changed = write_env_slot(name, value)
+        except OSError as e:  # noqa: BLE001 — type name only, never the value
+            return self._json({"error": f"persist failed: {type(e).__name__}"}, 500)
+        sys.stderr.write(f"secrets slot updated name={name} "
+                         f"set={bool(value)} len={len(value)}\n")
+        return self._json({"ok": True, "changed": changed,
+                           "slot": {"name": name, "group": group,
+                                    "set": bool(value),
+                                    "length": len(value)}})
 
     # ------------------------------------------------------ evolution legs ---
     def _require_token(self) -> bool:

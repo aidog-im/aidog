@@ -102,3 +102,12 @@ Progress evidence is unit-level (`mycore/tests/run.py`): a fake stdio server
 emits `notifications/progress` (+ a stale token and a foreign notification)
 and the bound registry sink must receive exactly the live-token frames; the
 HTTP interleaved-SSE case is asserted with an injected `post` (no sockets).
+
+## Console coverage (frontend car, 0.5.39)
+
+Settings now has the `#mycMcp` textarea (JSON array, ≤4000 chars, hint:
+reference secrets as `$SLOT` names — never values), joined into the payload
+only when edited; the Overview `#capGrid` renders the configured server
+names. Evidence: `tmp/e2e_frontend_coverage.py` `L3` (write →
+`capabilities.mycore.mcp_servers.names`) and `tmp/e2e_frontend_ui.js` `U5`
+(system card) — see [frontend_coverage.md](frontend_coverage.md).

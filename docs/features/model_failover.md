@@ -139,6 +139,17 @@ Fallback chain = enabled when `mycore.upstreams` is non-empty.
   nothing invented when absent, streamed final-chunk usage surfaced,
   byte-identical system prefix + stable stack digest across two builds.
 
+## Console coverage (frontend car, 0.5.39)
+
+Settings now has the `#mycUpstreams` field (single line, passed through
+`modeltier.parse_upstreams()` at write time — a bad grammar is refused with
+a 400 before anything is stored) and the `#envOverrideChip` honestly names
+any `MYCORE_UPSTREAMS`/`MYCORE_BASE_URL`/… export that beats it. Evidence:
+`tmp/e2e_frontend_coverage.py` `L3` (write → `upstreams_configured`) and
+`L5` (env override name-only), `tmp/e2e_frontend_ui.js` `U1` — see
+[frontend_coverage.md](frontend_coverage.md). Process cooldown state is
+still **not** rendered (unchanged, documented below).
+
 ## Related
 
 - Module: `mycore/modeltier.py` (parsing + classification + health policy

@@ -49,7 +49,9 @@ Delivery (why the notebook says "MYCORE_WD_CHAT unset -> log, no error"):
     job.origin as str "route:target" (a channel   -> same-route channel send
       turn endpoint; an unknown route or a failed
       send falls back down this list)
-    else env MYCORE_WD_CHAT (int)                    -> _send
+    else env/slot MYCORE_WD_CHAT (int; empty env falls back
+                                          to the secrets.env slot —
+                                          mycore.envslots)      -> _send
     else                                             -> log only
 State: <state>/cron_jobs.json — env AIDOG_MC_STATE when set, else
 <repo>/data/mycore_service (next to the chat-service runtime state,

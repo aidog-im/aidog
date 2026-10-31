@@ -112,3 +112,10 @@ leaks into a TG chat and vice versa — each side drains only what it created.
   restarted) → real `POST /api/image` → `200` with a sha256-named record →
   `GET /api/media/<name>` returns PNG magic; byte-for-byte restore + smoke
   re-run at the end.
+- **Console coverage (frontend car, 0.5.39)**: `IMAGE_API_KEY` joins the
+  `media` group of the Settings credential editor, so the BYOK fallback
+  chain (`IMAGE_API_KEY` → `MODEL_API_KEY`) is now visible as presence —
+  both slots are listed, neither value ever serializes. Evidence:
+  `tmp/e2e_frontend_coverage.py` `L1` (slot catalog, set/clear roundtrip,
+  sentinel sweep) and `tmp/e2e_frontend_ui.js` `U2` (editor + DOM scan) —
+  see [frontend_coverage.md](frontend_coverage.md).

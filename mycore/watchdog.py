@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Callable
 
 from .tg import TgClient, TgError
+from .envslots import wd_chat_target  # noqa: E402  (slot fallback, car 1.6)
 
 DEFAULT_INTERVAL = 60
 DEFAULT_THROTTLE = 300
@@ -337,7 +338,8 @@ def main(argv: list[str] | None = None) -> int:
     Defaults to DRY-RUN shadow mode: every decision is logged, no process is
     touched. --execute flips live restarts (owner authorized process switches,
     2026-10-18) — operator intent must be explicit every single run.
-    Notification chat id: env MYCORE_WD_CHAT ("" = log-only). Token: env
+    Notification chat id: env MYCORE_WD_CHAT, else the secrets.env slot of
+    the same name (mycore.envslots; "" = log-only). Token: env
     TELEGRAM_BOT_TOKEN read lazily by TgClient (send-only, no polling conflict).
     Exit: 0 healthy / 1 any target down / 2 bad invocation.
     """
@@ -354,7 +356,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     try:
-        cfg = WatchConfig.load(args.config, chat_id=os.environ.get("MYCORE_WD_CHAT", ""))
+        cfg = WatchConfig.load(args.config, chat_id=wd_chat_target())
     except WatchConfigError as e:
         print(f"config error: {e}", file=sys.stderr)
         return 2

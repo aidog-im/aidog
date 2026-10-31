@@ -133,6 +133,11 @@ against the survey/spec before widening the surface.
       `overlay/skills`; GA next step: read `config.yaml skills.extraDirs`
       directly once the product config schema lands)
 - [ ] budgets surfaced on the web console (status API already exposes numbers)
+- [x] skill count surfaced on the web console — Overview `#capGrid`
+      (frontend car 0.5.39, names/counts only; evidence
+      `tmp/e2e_frontend_ui.js` `U5` — the catalog itself stays value-free
+      per `tmp/e2e_frontend_coverage.py` `L1` — see
+      [frontend_coverage.md](frontend_coverage.md))
 
 ## Cross-machine portability (P4, 2026-10-18)
 

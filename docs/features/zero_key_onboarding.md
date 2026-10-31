@@ -102,6 +102,13 @@ before the manual `base_url` prompt.**
   host **without Ollama installed** — the suites fake the endpoint instead of
   requiring the server; the live-wire leg lives in the repo-local E2E script
   `tmp/e2e_car4b.py` (tmp harness, outside the gate suites).
+- **Console coverage (frontend car, 0.5.39)**: the detected-local-model
+  count is rendered for the first time — Overview `#capGrid` shows
+  `local_models.count` alongside the rest of the catalog (names/counts only,
+  base URLs stripped by the endpoint itself). Adoption still happens through
+  `aidog setup`, not the console.
+  Evidence: `tmp/e2e_frontend_ui.js` `U5` — see
+  [frontend_coverage.md](frontend_coverage.md).
 
 Suite totals after car G (v0.5.32): core **1020/1020**, smoke **154/154**, wizard
 **99/99**.

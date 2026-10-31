@@ -138,3 +138,10 @@ the `model`-ignored echo with a `tools` array in the same request, SSE frame
 order ending in `[DONE]`, the 400 legs, `usage` presence, and this file's
 `chars/4` declaration matching the implementation. The dedicated slot is
 snapshotted and restored byte-for-byte around the run.
+
+**Console coverage (frontend car, 0.5.39)**: `OPENAI_API_TOKEN` now has a
+`gateway`-group row in the Settings credential editor — presence and length
+only, the value never serializes; the 503/401 contract above is unchanged.
+Evidence: `tmp/e2e_frontend_coverage.py` `L1` (slot catalog + set/clear
+roundtrip) and `tmp/e2e_frontend_ui.js` `U2` (editor + DOM value scan) —
+see [frontend_coverage.md](frontend_coverage.md).

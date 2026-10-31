@@ -195,6 +195,20 @@
           <div class="reason-list" id="reasonList"></div>
         </div>
 
+        <!-- car B2: system capability catalog + the read-only cron list.
+             Both render from no-auth GET /api/capabilities and GET /api/cron
+             (names and counts only); a field the server does not send shows
+             "unavailable" instead of a guess, and nothing here can write. -->
+        <div class="card span-3">
+          <h2 data-i18n="sec.system">SYSTEM CAPABILITIES</h2>
+          <table class="kv" id="capGrid"></table>
+          <div class="ctl-row token-row" style="margin-top:16px">
+            <label data-i18n="cron.title">CRON JOBS</label>
+          </div>
+          <div id="cronList"></div>
+          <div class="stat-note" data-i18n="cron.hint">jobs are created through natural language, the CLI or Telegram — this list is read-only here</div>
+        </div>
+
         <!-- Draft E signature card: hold-to-seal authority preview + four
              guilloche medallions. Honest by contract: this card previews a
              gesture only — it never claims a live service or an executed
@@ -355,6 +369,23 @@
           <h2><span data-i18n="ex.thr">AUTO-APPROVAL THRESHOLDS</span></h2>
           <div class="head-status" id="exThreshold"></div>
           <div class="stat-note" id="exThresholdHint" hidden></div>
+          <!-- car B2: the cap editor — BOTH web3 keys always travel together
+               (the server is all-or-nothing); 0 stays the fail-closed default. -->
+          <div class="ctl-row" style="margin-top:14px">
+            <label data-i18n="ex.capPerTx">Per-tx cap (USD)</label>
+            <input type="number" id="exCapPerTx" min="0" max="1000000" step="0.01"
+                   inputmode="decimal">
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="ex.capDaily">Daily cap (USD)</label>
+            <input type="number" id="exCapDaily" min="0" max="1000000" step="0.01"
+                   inputmode="decimal">
+          </div>
+          <div class="stat-note" data-i18n="ex.capNote">both caps are saved together (all-or-nothing); 0 = fail-closed, nothing auto-approves</div>
+          <div class="ctl-actions">
+            <button class="btn primary" id="exCapSaveBtn" type="button" data-i18n="ex.capSave">SAVE</button>
+            <span class="save-state" id="exCapState" role="status"></span>
+          </div>
         </section>
 
         <section class="card span-3">
@@ -409,6 +440,41 @@
         <div class="evo-cols">
           <div class="evo-left">
             <div class="evo-status" id="evoStatus">–</div>
+            <!-- car B2: the schedule editor sits next to the status line it
+                 cross-checks. Writes ONLY the evolution partition of
+                 POST /api/settings (Bearer); the status line above keeps
+                 rendering GET /api/evolution (the active schedule). -->
+            <div style="margin-top:12px;padding-top:10px;border-top:1px dashed var(--line);">
+              <div class="ctl-row">
+                <label data-i18n="evo.enabled">Loop enabled</label>
+                <button class="toggle" id="evoEnabled" type="button" aria-pressed="false"><span></span></button>
+              </div>
+              <div class="ctl-row">
+                <label data-i18n="evo.dailyAt">Daily fire time</label>
+                <input type="time" id="evoDailyAt" class="evo-input" style="width:132px;">
+              </div>
+              <div class="ctl-row">
+                <label data-i18n="evo.weeklyDay">Weekly fire day</label>
+                <select id="evoWeeklyDay">
+                  <option value="mon" data-i18n="wd.mon">Mon</option>
+                  <option value="tue" data-i18n="wd.tue">Tue</option>
+                  <option value="wed" data-i18n="wd.wed">Wed</option>
+                  <option value="thu" data-i18n="wd.thu">Thu</option>
+                  <option value="fri" data-i18n="wd.fri">Fri</option>
+                  <option value="sat" data-i18n="wd.sat">Sat</option>
+                  <option value="sun" data-i18n="wd.sun">Sun</option>
+                </select>
+              </div>
+              <div class="ctl-row">
+                <label data-i18n="evo.monthlyDay">Monthly fire day (1-28)</label>
+                <input type="number" id="evoMonthlyDay" min="1" max="28" step="1">
+              </div>
+              <div class="stat-note" id="evoCrossNote" hidden></div>
+              <div class="ctl-actions">
+                <button class="btn primary" id="evoSaveBtn" type="button" data-i18n="evo.save">SAVE</button>
+                <span class="save-state" id="evoSaveState" role="status"></span>
+              </div>
+            </div>
             <ul class="evo-log" id="evoLog"></ul>
           </div>
           <div class="evo-form">
@@ -497,6 +563,21 @@
             <label data-i18n="ctl.fx">FX rate (0 = auto)</label>
             <input type="number" id="fxInput" min="0" max="100000" step="0.01" value="0">
           </div>
+          <div class="ctl-row">
+            <label data-i18n="ctl.usageMetrics">Metrics URL (loopback)</label>
+            <input type="text" id="usageMetricsUrl" maxlength="512" autocomplete="off"
+                   spellcheck="false" placeholder="http://127.0.0.1:3456/metrics">
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="ctl.usagePricing">Pricing config (absolute path)</label>
+            <input type="text" id="usagePricingCfg" maxlength="512" autocomplete="off"
+                   spellcheck="false" placeholder="/path/to/pricing.json">
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="ctl.usageLogDir">Usage log dir (absolute path)</label>
+            <input type="text" id="usageLogDir" maxlength="512" autocomplete="off"
+                   spellcheck="false" placeholder="/path/to/logs">
+          </div>
         </div>
 
         <div class="card">
@@ -511,6 +592,32 @@
             <input type="text" id="mycUrl" maxlength="256" placeholder="http://127.0.0.1:3460/v1"
                    data-i18n-ph="ctl.mycUrlPh" autocomplete="off">
           </div>
+          <div class="ctl-row">
+            <label data-i18n="ctl.mycContextDirs">Context dirs (":" separated)</label>
+            <input type="text" id="mycContextDirs" maxlength="256" autocomplete="off"
+                   spellcheck="false" data-i18n-ph="ctl.emptyOff" placeholder="empty = off">
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="ctl.mycUpstreams">Failover upstreams</label>
+            <input type="text" id="mycUpstreams" maxlength="1024" autocomplete="off"
+                   spellcheck="false" placeholder="url[|key_env[|model]], …">
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="ctl.mycShell">Terminal backend</label>
+            <input type="text" id="mycShell" maxlength="256" autocomplete="off"
+                   spellcheck="false" data-i18n-ph="ctl.emptyOff" placeholder="empty = off">
+          </div>
+          <div class="ctl-row token-row">
+            <label data-i18n="ctl.mycMcp">MCP servers (JSON array)</label>
+          </div>
+          <textarea id="mycMcp" class="evo-input evo-body" rows="3" maxlength="4000"
+                    spellcheck="false" data-i18n-ph="ctl.mycMcpPh"
+                    placeholder="JSON array — reference secrets as $SLOT"></textarea>
+          <div class="ctl-row" id="toolsOffRow">
+            <label data-i18n="ctl.toolsOff">Disabled tools (checked = off)</label>
+          </div>
+          <div id="toolsOffList" hidden></div>
+          <div class="stat-note" id="envOverrideChip" hidden></div>
         </div>
 
         <div class="card">
@@ -554,6 +661,57 @@
             <label data-i18n="ctl.wake">Wake phrases (comma separated)</label>
             <input type="text" id="wakePhrases" maxlength="256" autocomplete="off"
                    data-i18n-ph="ctl.wakePh" placeholder="hey aidog, ni hao ai duo">
+          </div>
+        </div>
+
+        <div class="card">
+          <h2 data-i18n="sec.creds">CREDENTIALS</h2>
+          <div class="stat-note" id="credTokenHint" hidden></div>
+          <div id="credList"></div>
+        </div>
+
+        <div class="card">
+          <h2 data-i18n="sec.channels">CHANNELS</h2>
+          <div id="chanList"></div>
+          <div class="ctl-row token-row" style="margin-top:14px">
+            <label data-i18n="chan.testGo">SEND TEST</label>
+            <select id="chanTestRoute" aria-label="channel route">
+              <option value="discord">discord</option>
+              <option value="slack">slack</option>
+              <option value="email">email</option>
+              <option value="webhook">webhook</option>
+              <option value="dingtalk">dingtalk</option>
+              <option value="feishu">feishu</option>
+              <option value="wechat">wechat</option>
+              <option value="whatsapp">whatsapp</option>
+              <option value="signal">signal</option>
+            </select>
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="chan.testTarget">Target</label>
+            <input type="text" id="chanTestTarget" maxlength="256" autocomplete="off"
+                   data-i18n-ph="chan.testTargetPh" placeholder="channel id / address / phone">
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="chan.testText">Message</label>
+            <input type="text" id="chanTestText" maxlength="4000" autocomplete="off"
+                   data-i18n-ph="chan.testTextPh" placeholder="text to send">
+          </div>
+          <div class="ctl-actions">
+            <button class="btn primary" id="chanTestBtn" type="button"
+                    data-i18n="chan.testGoBtn">SEND</button>
+            <span class="save-state" id="chanTestMsg" role="status"></span>
+          </div>
+          <div class="stat-note" data-i18n="chan.hint">channel credentials live in secrets.env CHANNEL_* slots — edit them under Credentials</div>
+          <div class="ctl-actions"><span class="save-state" id="chanMsg" role="status"></span></div>
+        </div>
+
+        <div class="card">
+          <h2 data-i18n="sec.hooks">EVENT HOOKS</h2>
+          <div id="hookList"></div>
+          <div class="stat-note" data-i18n="hook.hint">argv[0] must exist at save time; hook output is never echoed</div>
+          <div class="ctl-actions">
+            <span class="save-state" id="hookMsg" role="status"></span>
           </div>
         </div>
 

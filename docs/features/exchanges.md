@@ -538,3 +538,12 @@ it for `qty`:
 - **Real-provider connectivity is BYOK**: with slots filled, the same tools
   hit production endpoints; without them the account/order tools are absent
   (§3) and nothing in the product surface claims otherwise.
+- **Console coverage (frontend car, 0.5.39)**: the EXCHANGE view gained the
+  cap editor `#exCapPerTx` / `#exCapDaily` / `#exCapSaveBtn` (both `web3`
+  keys always travel together), the read-only chips `#exThreshold` repaint
+  from the stored numbers, and the three CEX slot triplets are editable in
+  the credential editor (name + presence/length only, never a value).
+  Evidence: `tmp/e2e_frontend_coverage.py` `L1` (slot catalog + zero-echo
+  sweep) + `L3` (caps → `capabilities.web3`), `tmp/e2e_frontend_ui.js` `U4`
+  (save → chips + catalog) + `U2` (editor) — see
+  [frontend_coverage.md](frontend_coverage.md).

@@ -91,5 +91,12 @@ an unreadable/corrupt settings file just means "no hooks configured").
   naming the whitelist, `cmd` as string → 400 schema error, legal write →
   200 with byte-consistent file + `GET /api/settings` readback (settings
   restored afterwards), and responses never echo a slot value.
+- **Console coverage (frontend car, 0.5.39)**: Settings now carries the
+  `#hookList` editor — one row per event, argv one-per-line, timeout 1..30 s,
+  count chip — and only edited events join the save payload. Evidence:
+  `tmp/e2e_frontend_coverage.py` `L3` (`hooks` write →
+  `capabilities.hooks.events`), `tmp/e2e_frontend_ui.js` `U1` (row → Bearer
+  read-back) + `U6` (zh labels) — see
+  [frontend_coverage.md](frontend_coverage.md).
 
 Suite totals after car G (v0.5.32): core **1020/1020**, smoke **154/154**.

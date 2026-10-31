@@ -94,6 +94,14 @@ settings = off, dedupe, missing dir dropped). @reference coverage runs as
 missing/denied/limit markers, 16-ref bound, byte-identical no-@,
 10 checks — car G).
 
+## Console coverage (frontend car, 0.5.39)
+
+Settings now has the `#mycContextDirs` field (pathsep list, same single-line
+validator as the API), joined into the payload only when edited. Evidence:
+`tmp/e2e_frontend_coverage.py` `L3` (write → `GET /api/settings` round trip)
+and `tmp/e2e_frontend_ui.js` `U1` (save round trip) — see
+[frontend_coverage.md](frontend_coverage.md).
+
 ## Related
 
 - Stack assembly: `mycore/assembly.py` (module doc lists slots 1/2/2b/2c/3)
