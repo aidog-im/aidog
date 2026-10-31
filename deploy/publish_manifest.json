@@ -4,6 +4,7 @@
   "allow": [
     "AGENTS.md",
     "README.md",
+    "README_cn.md",
     "VERSION",
     "release.json",
     ".gitignore",

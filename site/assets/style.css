@@ -648,3 +648,102 @@ button { font: inherit; }
   .hero-cta .btn { width: 100%; }
   .nav-gh { display: none; }
 }
+
+/* =============================================================== *
+ *  Silicon-life layer — car B (2026-10-24, owner-approved).       *
+ *  Direction: white base #fcfcfa KEPT, layered with silicon       *
+ *  elements — fine circuit grid, cyan-blue glow card borders,     *
+ *  HUD corner brackets, scanning data-flow micro-motion.          *
+ *  Gate-safe: background-color / primary blue / droplets /        *
+ *  badge facts are untouched by construction.                     *
+ * =============================================================== */
+
+/* fine fixed circuit grid + top cyan scan haze (keeps original halos) */
+body {
+  background-color: var(--bg);
+  background-image:
+    linear-gradient(rgba(40, 146, 255, .05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(40, 146, 255, .05) 1px, transparent 1px),
+    radial-gradient(1100px 420px at 50% -60px, rgba(112, 228, 253, .17), transparent 72%),
+    radial-gradient(900px 540px at 78% -8%, rgba(112, 228, 253, .16), transparent 60%),
+    radial-gradient(780px 540px at -10% 34%, rgba(40, 146, 255, .09), transparent 55%),
+    radial-gradient(700px 520px at 106% 94%, rgba(112, 228, 253, .10), transparent 60%);
+  background-size: 44px 44px, 44px 44px, auto, auto, auto, auto;
+  background-attachment: fixed;
+}
+
+/* HUD corner brackets on cards (low-key, brighten on hover) */
+.feature::after, .trust-card::after, .mcard::after, .empty-card::after {
+  content: ""; position: absolute; inset: 5px; pointer-events: none;
+  background:
+    linear-gradient(#70e4fd, #70e4fd) 0 0 / 13px 2px no-repeat,
+    linear-gradient(#70e4fd, #70e4fd) 0 0 / 2px 13px no-repeat,
+    linear-gradient(#70e4fd, #70e4fd) 100% 0 / 13px 2px no-repeat,
+    linear-gradient(#70e4fd, #70e4fd) 100% 0 / 2px 13px no-repeat,
+    linear-gradient(#70e4fd, #70e4fd) 0 100% / 13px 2px no-repeat,
+    linear-gradient(#70e4fd, #70e4fd) 0 100% / 2px 13px no-repeat,
+    linear-gradient(#70e4fd, #70e4fd) 100% 100% / 13px 2px no-repeat,
+    linear-gradient(#70e4fd, #70e4fd) 100% 100% / 2px 13px no-repeat;
+  opacity: .38; transition: opacity .3s;
+}
+.mcard { position: relative; }
+.mcard::after { opacity: .3; }
+.feature:hover::after, .trust-card:hover::after, .mcard:hover::after {
+  opacity: .95;
+}
+.feature:hover, .trust-card:hover {
+  box-shadow: 0 0 0 1px rgba(112, 228, 253, .4),
+              0 0 24px rgba(112, 228, 253, .32), var(--shadow);
+}
+.empty-card::after { opacity: .55; }
+
+/* hero: downward data-scan sweep (silicon read-out feel) */
+.hero::after {
+  content: ""; position: absolute; left: 0; right: 0; top: 0; height: 150px;
+  pointer-events: none; z-index: 1;
+  background: linear-gradient(180deg,
+    transparent 0%, rgba(112, 228, 253, .10) 46%,
+    rgba(40, 146, 255, .20) 50%,
+    rgba(112, 228, 253, .10) 54%, transparent 100%);
+  animation: hb-scan 7.5s linear infinite;
+}
+@keyframes hb-scan {
+  0%   { transform: translateY(-160px); opacity: 0; }
+  8%   { opacity: 1; }
+  92%  { opacity: 1; }
+  100% { transform: translateY(calc(100vh + 10px)); opacity: 0; }
+}
+
+/* mascot halo — soft cyan breathing glow behind the orb */
+.hero-orb::after {
+  content: ""; position: absolute; inset: -30px; border-radius: 50%;
+  background: radial-gradient(circle, rgba(112, 228, 253, .40),
+              rgba(40, 146, 255, .14) 55%, transparent 72%);
+  filter: blur(7px); z-index: 0;
+  animation: hb-halo 4.6s ease-in-out infinite;
+}
+.orb-img, .orb-ring, .orb-drop { z-index: 1; }
+@keyframes hb-halo {
+  0%, 100% { opacity: .5; transform: scale(.97); }
+  50%      { opacity: .95; transform: scale(1.04); }
+}
+
+/* section heading tick rail (mono read-out accent) */
+.section-head::after {
+  content: ""; display: block; height: 6px; width: 168px; margin-top: 12px;
+  background: repeating-linear-gradient(90deg,
+    rgba(40, 146, 255, .85) 0 12px, transparent 12px 20px);
+  -webkit-mask-image: linear-gradient(90deg, #000, transparent);
+          mask-image: linear-gradient(90deg, #000, transparent);
+  opacity: .6;
+}
+
+/* primary CTA gets a cyan halo on hover (buttons otherwise untouched) */
+.btn-primary:hover {
+  box-shadow: 0 0 0 1px rgba(112, 228, 253, .55),
+              0 10px 30px rgba(40, 146, 255, .45);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero::after, .hero-orb::after { animation: none !important; }
+}

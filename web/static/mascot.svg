@@ -1,0 +1,174 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="480" viewBox="0 0 480 480" role="img" aria-label="I'm AiDog mascot — an anime-style AI dog">
+  <!-- I'm AiDog mascot — cel-shaded anime AI dog, derived from the product
+       logo: blue armor fur, glowing cyan eyes, orange inner ears, circuit
+       traces, droplet collar tag (site motif). Palette: #fcfcfa canvas,
+       #001633 outlines, #2892ff primary, #1c519a shade, #70e4fd glow,
+       #e98667 coral. Pure vector, no external resources. -->
+  <defs>
+    <radialGradient id="halo" cx="50%" cy="42%" r="60%">
+      <stop offset="0%" stop-color="#eaf6ff"/>
+      <stop offset="55%" stop-color="#f4f8fc"/>
+      <stop offset="100%" stop-color="#fcfcfa" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="plate" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#5aa9ff"/>
+      <stop offset="60%" stop-color="#2892ff"/>
+      <stop offset="100%" stop-color="#1c72d6"/>
+    </linearGradient>
+    <linearGradient id="plateSide" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#3f95ff"/>
+      <stop offset="100%" stop-color="#1c519a"/>
+    </linearGradient>
+    <linearGradient id="iris" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#d9fbff"/>
+      <stop offset="42%" stop-color="#70e4fd"/>
+      <stop offset="100%" stop-color="#2892ff"/>
+    </linearGradient>
+    <linearGradient id="tag" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#70e4fd"/>
+      <stop offset="100%" stop-color="#2892ff"/>
+    </linearGradient>
+    <filter id="soft" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="7"/>
+    </filter>
+    <filter id="soft2" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="3"/>
+    </filter>
+    <g id="ear">
+      <path d="M158 142 C 126 104, 100 62, 104 44 C 107 31, 128 40, 152 62
+               C 172 80, 190 100, 202 118 Z"
+            fill="url(#plateSide)" stroke="#001633" stroke-width="9"
+            stroke-linejoin="round"/>
+      <path d="M152 128 C 130 100, 114 70, 116 56 C 118 47, 131 53, 147 70
+               C 162 85, 174 100, 182 112 Z"
+            fill="#e98667" stroke="#001633" stroke-width="5"
+            stroke-linejoin="round"/>
+    </g>
+  </defs>
+
+  <!-- backdrop: soft halo + HUD circuit rings -->
+  <circle cx="240" cy="232" r="216" fill="url(#halo)"/>
+  <circle cx="240" cy="232" r="196" fill="none" stroke="#70e4fd"
+          stroke-width="2" stroke-dasharray="3 14" stroke-linecap="round"
+          opacity=".65"/>
+  <circle cx="240" cy="232" r="212" fill="none" stroke="#2892ff"
+          stroke-width="1.5" stroke-dasharray="26 18" opacity=".3"/>
+  <g stroke="#2892ff" stroke-width="3" stroke-linecap="round" opacity=".55">
+    <path d="M240 12 v14"/><path d="M240 438 v14"/>
+    <path d="M20 232 h14"/><path d="M446 232 h14"/>
+  </g>
+  <g fill="#70e4fd" opacity=".8">
+    <circle cx="72" cy="118" r="3.5"/><circle cx="408" cy="118" r="3.5"/>
+    <circle cx="56" cy="330" r="3"/><circle cx="424" cy="330" r="3"/>
+  </g>
+  <g stroke="#e98667" stroke-width="2.5" stroke-linecap="round" opacity=".7">
+    <path d="M96 86 l8 8 M104 86 l-8 8"/>
+    <path d="M384 86 l8 8 M392 86 l-8 8"/>
+  </g>
+
+  <!-- ears -->
+  <use href="#ear"/>
+  <use href="#ear" transform="translate(480,0) scale(-1,1)"/>
+
+  <!-- cheek fluff -->
+  <path d="M132 262 l-30 6 24 20 -22 16 34 4 Z" fill="url(#plateSide)"
+        stroke="#001633" stroke-width="8" stroke-linejoin="round"/>
+  <path d="M348 262 l30 6 -24 20 22 16 -34 4 Z" fill="url(#plateSide)"
+        stroke="#001633" stroke-width="8" stroke-linejoin="round"/>
+
+  <!-- head -->
+  <path d="M240 96
+           C 172 96, 124 146, 124 212
+           C 124 252, 133 292, 152 320
+           C 170 346, 202 366, 240 372
+           C 278 366, 310 346, 328 320
+           C 347 292, 356 252, 356 212
+           C 356 146, 308 96, 240 96 Z"
+        fill="url(#plate)" stroke="#001633" stroke-width="9"/>
+
+  <!-- cranium sheen + center ridge -->
+  <path d="M170 132 C 152 152, 142 178, 141 204 C 156 168, 184 142, 214 130
+           C 200 128, 182 128, 170 132 Z"
+        fill="#ffffff" opacity=".38"/>
+  <path d="M240 100 v22" stroke="#d9fbff" stroke-width="4"
+        stroke-linecap="round" opacity=".8"/>
+
+  <!-- forehead circuit: core hex + trace -->
+  <path d="M240 128 v26 M240 168 v18" stroke="#70e4fd" stroke-width="3.5"
+        stroke-linecap="round"/>
+  <path d="M240 154 l13 7.5 v15 l-13 7.5 -13 -7.5 v-15 Z"
+        fill="#001633" stroke="#70e4fd" stroke-width="3"/>
+  <circle cx="240" cy="169" r="4.5" fill="#70e4fd"/>
+  <circle cx="240" cy="169" r="8" fill="#70e4fd" filter="url(#soft2)" opacity=".9"/>
+  <path d="M213 186 h-22 M267 186 h22" stroke="#70e4fd" stroke-width="3"
+        stroke-linecap="round" opacity=".85"/>
+  <circle cx="189" cy="186" r="3.5" fill="#70e4fd"/>
+  <circle cx="291" cy="186" r="3.5" fill="#70e4fd"/>
+
+  <!-- brow marks (white husky wedges) -->
+  <path d="M156 208 C 170 194, 196 188, 216 192 C 204 200, 196 210, 192 222
+           C 178 218, 164 214, 156 208 Z"
+        fill="#fbfdff" stroke="#001633" stroke-width="6" stroke-linejoin="round"/>
+  <path d="M324 208 C 310 194, 284 188, 264 192 C 276 200, 284 210, 288 222
+           C 302 218, 316 214, 324 208 Z"
+        fill="#fbfdff" stroke="#001633" stroke-width="6" stroke-linejoin="round"/>
+
+  <!-- eye glow (under) -->
+  <g fill="#70e4fd" opacity=".55" filter="url(#soft)">
+    <rect x="160" y="228" width="64" height="52" rx="22"/>
+    <rect x="256" y="228" width="64" height="52" rx="22"/>
+  </g>
+  <!-- eyes -->
+  <g>
+    <rect x="162" y="230" width="60" height="50" rx="20"
+          fill="url(#iris)" stroke="#001633" stroke-width="8"/>
+    <rect x="258" y="230" width="60" height="50" rx="20"
+          fill="url(#iris)" stroke="#001633" stroke-width="8"/>
+    <ellipse cx="180" cy="246" rx="10" ry="8" fill="#ffffff"/>
+    <ellipse cx="276" cy="246" rx="10" ry="8" fill="#ffffff"/>
+    <rect x="176" y="262" width="30" height="7" rx="3.5" fill="#d9fbff" opacity=".9"/>
+    <rect x="272" y="262" width="30" height="7" rx="3.5" fill="#d9fbff" opacity=".9"/>
+  </g>
+
+  <!-- cheek circuit marks -->
+  <path d="M148 296 h26 M152 310 h20" stroke="#70e4fd" stroke-width="3.5"
+        stroke-linecap="round"/>
+  <path d="M332 296 h-26 M328 310 h-20" stroke="#70e4fd" stroke-width="3.5"
+        stroke-linecap="round"/>
+  <!-- blush -->
+  <ellipse cx="176" cy="318" rx="16" ry="8" fill="#e98667" opacity=".45"/>
+  <ellipse cx="304" cy="318" rx="16" ry="8" fill="#e98667" opacity=".45"/>
+
+  <!-- muzzle -->
+  <path d="M240 300
+           C 268 300, 288 314, 288 334
+           C 288 354, 268 368, 240 368
+           C 212 368, 192 354, 192 334
+           C 192 314, 212 300, 240 300 Z"
+        fill="#fbfdff" stroke="#001633" stroke-width="8"/>
+  <!-- nose -->
+  <path d="M222 316 h36 c4 0 7 3 5.6 6.6 L248 342 c-2.4 4.4-9.2 4.4-11.6 0
+           L216.4 322.6 C215 319 218 316 222 316 Z"
+        fill="#001633"/>
+  <ellipse cx="232" cy="323" rx="5" ry="3" fill="#4c6684" opacity=".7"/>
+  <!-- mouth -->
+  <path d="M240 344 v6 M240 350 c-6 8 -18 8 -24 1 M240 350 c6 8 18 8 24 1"
+        fill="none" stroke="#001633" stroke-width="5" stroke-linecap="round"/>
+  <!-- freckles -->
+  <g fill="#a5b7ca">
+    <circle cx="212" cy="340" r="2.4"/><circle cx="206" cy="350" r="2.4"/>
+    <circle cx="268" cy="340" r="2.4"/><circle cx="274" cy="350" r="2.4"/>
+  </g>
+
+  <!-- tech collar + droplet tag -->
+  <path d="M170 372 C 196 392, 284 392, 310 372 L 316 396
+           C 286 418, 194 418, 164 396 Z"
+        fill="#001633" stroke="#001633" stroke-width="8" stroke-linejoin="round"/>
+  <rect x="222" y="384" width="36" height="18" rx="6" fill="#2892ff"
+        stroke="#70e4fd" stroke-width="2.5"/>
+  <circle cx="240" cy="393" r="4" fill="#70e4fd"/>
+  <path d="M240 414 c-13 18 -21 27 -21 36 a21 21 0 0 0 42 0 c0-9 -8-18 -21-36 Z"
+        fill="url(#tag)" stroke="#001633" stroke-width="7" stroke-linejoin="round"/>
+  <path d="M232 440 a8 8 0 0 0 5 8" fill="none" stroke="#ffffff"
+        stroke-width="4" stroke-linecap="round" opacity=".85"/>
+</svg>
