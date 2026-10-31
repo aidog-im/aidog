@@ -1166,3 +1166,15 @@ footer { border-top: 1px solid var(--ink); font-family: var(--mono); }
 .stat-note.warn { color: var(--amber); }
 #chatImgNote { flex: 1 0 100%; }   /* attachment status gets its own line */
 #sessList .ctl-row { align-items: flex-start; }
+
+/* delta4 — community panel (GitHub Discussions) */
+.comm-row { align-items: flex-start; }
+.comm-main { flex: 1; min-width: 0; }
+.comm-title {
+  display: inline-block; font-size: 13.5px; font-weight: 600;
+  color: var(--blue-ink); overflow-wrap: anywhere;
+}
+a.comm-title:hover { text-decoration: underline; }
+.comm-meta { margin-top: 3px; overflow-wrap: anywhere; }
+#commChecked { margin-top: 10px; }
+#commCat { max-width: 240px; }

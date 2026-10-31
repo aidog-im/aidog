@@ -54,6 +54,7 @@ async function loadLang(lang) {
   mediaLangRefresh();          // voice session + image badge texts follow too
   settingsRelang();            // rows built by JS keep their pack strings too
   renderExchange();            // venue rows / probe labels follow the language too
+  renderCommunity();           // delta4: reason note / filter / rows re-translate
   chatBadge(chatBusy);            // badge label follows the active language
   renderCtx(lastCtx);             // X14: context line label follows too
   refreshEventTexts();
@@ -1350,9 +1351,9 @@ function fmtCost(cny) {
    under the Services panels — service pid / last event, watchdog liveness /
    state-file age / per-target verdicts / last sanitized line.
    Labels use reserved keys whose fallback is the English metric name: the
-   console packs stay frozen at 662 this lane (that number is pinned by the
-   site fact strip and site/llms.txt, neither in this lane's file set), so
-   t() honestly falls back in both locales.
+   0.5.53 i18n completion lane added both pack entries (795 keys per pack),
+   so t() resolves in each locale and still falls back honestly if a key is
+   ever missing.
    Fail-soft by shape: no mycore object, or neither sub-object with a state,
    hides the whole block — never a guessed state. */
 function renderMycoreFacts() {
@@ -1552,7 +1553,8 @@ function renderUsage() {
   const st = (k, v) => `<div><div class="k">${escapeHtml(t(k[0], k[1]))}</div><div class="v">${escapeHtml(v)}</div></div>`;
   /* Wave 3 (X4): the eight-key `pool` block of /api/usage (metrics source),
      seven of which the card never showed. Reserved label keys with English
-     fallback (packs frozen at 662 this lane — see renderMycoreFacts). Each
+     fallback (pack entries added by the 0.5.53 i18n lane — see
+     renderMycoreFacts). Each
      chip hides itself when its value is null/absent; no `pool` object at all
      = no pool chips (honest shape-hide, never an invented 0). The ACTIVE
      KEYS chip travels here too, so the classic row keeps its fourth chip and
@@ -3903,8 +3905,8 @@ async function cronCreate() {
    presence + counts (a slot value never renders); create/remove are
    Bearer-gated POSTs that run the SAME `aidog profile` CLI rules — the
    server owns every refusal and its details[0] shows word for word.
-   All copy below is an English inline/fallback string: the console packs
-   stay frozen at 662 keys this lane (site/README pin that number). */
+   All copy below is a t(key, fallback) string whose pack entries were added
+   by the 0.5.53 i18n completion lane (795 keys per pack). */
 let ckptData = null;
 
 async function refreshCheckpoints() {
@@ -5389,7 +5391,9 @@ async function refreshStatus() {
     // stream lines rendered before status arrived still carry placeholders
     // (e.g. the boot event's {v}) — repaint them now that version is known
     refreshEventTexts();
-  } catch (e) { document.getElementById("ts").textContent = "status error"; }
+  } catch (e) {
+    document.getElementById("ts").textContent = t("tool.statusErr", "status error");
+  }
 }
 
 async function refreshUsage() {
@@ -5442,11 +5446,148 @@ function reasonHtml(r) {
 }
 function reasonLi(r) { return `<li>&gt; ${reasonHtml(r)}</li>`; }
 
+/* ------------------------------------------------------------ community -- */
+/* Product GitHub Discussions panel (delta4): the SERVER reads the repo's
+   discussions anonymously through GET /api/discussions (600s cache, one
+   outbound fetch at a time); this side only renders the payload:
+     - available:false  -> one honest note with the server's category reason
+                           mapped through comm.reason.* (never a URL, never a
+                           token); the header link to GitHub stays usable;
+     - available:true   -> cards with category / title / author / replies /
+                           relative time, a category filter built FROM the
+                           data, and an honest empty state when there is
+                           nothing to show.
+   Lazy: the first fetch happens when the view opens (setView), a manual
+   REFRESH sends ?fresh=1 to bust the server cache. All copy is t(key, fb). */
+let commData = null;   // /api/discussions payload (null = never loaded)
+let commCat = "";      // active category filter ("" = all categories)
+
+function commReasonText(reason) {
+  const word = /^[a-z_]+$/.test(String(reason || "")) ? reason : "unknown";
+  return t("comm.reason." + word,
+    t("comm.reason.unknown",
+      "discussions could not be loaded right now"));
+}
+
+function commRelTime(iso) {
+  const ts = Date.parse(iso || "");
+  if (!Number.isFinite(ts)) return "";
+  const s = (Date.now() - ts) / 1000;
+  if (s < 60) return t("comm.justNow", "just now");
+  if (s < 3600) return t("comm.agoM", "{n}m ago")
+    .replace("{n}", String(Math.floor(s / 60)));
+  if (s < 86400) return t("comm.agoH", "{n}h ago")
+    .replace("{n}", String(Math.floor(s / 3600)));
+  if (s < 86400 * 30) return t("comm.agoD", "{n}d ago")
+    .replace("{n}", String(Math.floor(s / 86400)));
+  return new Date(ts).toLocaleDateString();
+}
+
+async function refreshCommunity(fresh) {
+  const list = document.getElementById("commList");
+  if (list && !commData) {
+    list.innerHTML = `<div class="stat-note">${escapeHtml(
+      t("comm.loading", "loading discussions\u2026"))}</div>`;
+  }
+  try {
+    const r = await fetch("/api/discussions" + (fresh ? "?fresh=1" : ""));
+    const d = r.ok ? await r.json() : null;
+    commData = (d && typeof d.available === "boolean") ? d
+      : { available: false, discussions: [], checked_at: "",
+          reason: "unknown" };
+  } catch (e) {
+    commData = { available: false, discussions: [], checked_at: "",
+                 reason: "unknown" };
+  }
+  renderCommunity();
+}
+
+function renderCommunity() {
+  const list = document.getElementById("commList");
+  const badge = document.getElementById("commBadge");
+  const note = document.getElementById("commNote");
+  const sel = document.getElementById("commCat");
+  const checked = document.getElementById("commChecked");
+  if (!list || !commData) return;            // not loaded yet: leave as-is
+
+  if (!commData.available) {
+    if (badge) badge.textContent = "\u2013";
+    if (note) note.textContent = "";
+    if (sel) { sel.innerHTML = ""; sel.disabled = true; }
+    if (checked) checked.hidden = true;
+    list.innerHTML = `<div class="gal-empty">${escapeHtml(
+      commReasonText(commData.reason))}</div>`;
+    return;
+  }
+
+  const rows = Array.isArray(commData.discussions) ? commData.discussions : [];
+  if (badge) badge.textContent = String(rows.length);
+  if (sel) sel.disabled = false;
+
+  // category filter: built FROM the data (never seeded), selection survives
+  // a refresh while it still exists, otherwise it resets to "all".
+  const cats = [];
+  rows.forEach(r => {
+    const c = String(r.category || "");
+    if (c && cats.indexOf(c) < 0) cats.push(c);
+  });
+  if (commCat && cats.indexOf(commCat) < 0) commCat = "";
+  if (sel) {
+    const want = [""].concat(cats);
+    const have = Array.prototype.map.call(sel.options, o => o.value);
+    if (want.join("\u0000") !== have.join("\u0000")) {
+      sel.innerHTML = `<option value="">${escapeHtml(
+        t("comm.all", "All categories"))}</option>` +
+        cats.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
+    }
+    sel.value = commCat;
+  }
+
+  const shown = commCat
+    ? rows.filter(r => String(r.category || "") === commCat) : rows;
+  if (!shown.length) {
+    list.innerHTML = `<div class="gal-empty">${escapeHtml(commCat
+      ? t("comm.noCat", "no discussion in this category yet")
+      : t("comm.empty", "no discussions yet \u2014 start the first one"))}</div>`;
+  } else {
+    list.innerHTML = shown.map(r => {
+      const title = String(r.title || "");
+      const url = String(r.url || "");
+      // link only to the canonical github.com form the server passed through
+      const head = /^https:\/\/github\.com\//.test(url)
+        ? `<a class="comm-title" href="${escapeHtml(url)}" target="_blank" ` +
+          `rel="noopener">${escapeHtml(title)}</a>`
+        : `<span class="comm-title">${escapeHtml(title)}</span>`;
+      const n = Number(r.comments) || 0;
+      const replies = n === 1
+        ? t("comm.reply", "{n} reply").replace("{n}", "1")
+        : t("comm.replies", "{n} replies").replace("{n}", String(n));
+      const bits = [
+        String(r.category || ""),
+        t("comm.by", "by {a}").replace("{a}", String(r.author || "\u2014")),
+        replies,
+        commRelTime(r.updated_at),
+      ].filter(Boolean);
+      return `<div class="ctl-row comm-row"><div class="comm-main">` +
+        head + `<div class="stat-note comm-meta">${escapeHtml(bits.join(" \u00b7 "))}</div>` +
+        `</div></div>`;
+    }).join("");
+  }
+
+  if (checked) {
+    const when = commRelTime(commData.checked_at);
+    checked.textContent = when
+      ? t("comm.checked", "checked {t}").replace("{t}", when) : "";
+    checked.hidden = !checked.textContent;
+  }
+}
+
 /* ---------------------------------------------------------------- views -- */
-/* All seven views live in the same document; the inactive ones are hidden with
+/* All eight views live in the same document; the inactive ones are hidden with
    CSS, so every poller keeps writing into real DOM and ids stay stable.
    ?view=<name> deep-links the active view (default: overview). */
-const VIEWS = ["overview", "chat", "skills", "exchange", "evolution", "stream", "settings"];
+const VIEWS = ["overview", "chat", "skills", "exchange", "evolution", "stream",
+               "community", "settings"];
 const QS_VIEW = (params.get("view") || "").toLowerCase();
 let currentView = VIEWS.includes(QS_VIEW) ? QS_VIEW : "overview";
 
@@ -5456,8 +5597,9 @@ let currentView = VIEWS.includes(QS_VIEW) ? QS_VIEW : "overview";
                      each thumb opens the SAME single-image route
                      (/api/media/<name>); an empty dir says so honestly.
      X13 sessions — GET /api/sessions list/search/export in the CHAT view:
-                     substring search is LABELED as a substring scan (no FTS
-                     claim), rows carry id/time/size/summary only, exports
+                     ?q= runs real FTS5 full-text search and the panel SAYS
+                     which method ran (full-text vs the labelled substring
+                     fallback), rows carry id/time/size/summary only, exports
                      download the server's own JSON/MD verbatim. Read-only.
      X12 prune    — the settings switch renders its state + the one-shot disk
                      advisory on the same panel (server owns every number).
@@ -5466,8 +5608,8 @@ let currentView = VIEWS.includes(QS_VIEW) ? QS_VIEW : "overview";
      X16 vision   — an attached image is resized client-side to <=1024px JPEG
                      and rides ONE chat turn; the server persists an honest
                      '[image]' marker and never base64 bytes.
-   All copy is inline English or t(key, fallback): locale packs stay frozen
-   at 662 keys this lane (site/README pin that number). */
+   All copy is t(key, fallback): the 0.5.53 i18n completion lane added every
+   pack entry (795 keys per pack), so both locales render translated text. */
 let artData = null;      // X17 gallery payload (null = never loaded)
 let sessData = null;     // X13 sessions payload (null = never loaded)
 let pendingImage = null; // X16 {name, dataUrl} waiting for the next turn
@@ -5555,8 +5697,15 @@ function renderSessions(q) {
   const rows = sessData.sessions || [];
   if (badge) badge.textContent = String(sessData.count ?? rows.length);
   if (!rows.length) {
+    // honest branch on how the SERVER ran the search: real FTS5 vs the
+    // labelled substring fallback (search is absent without ?q=).
+    const sm = sessData.search;
+    const label = !sm ? t("sess.methodFts", "full-text (fts5)")
+      : (sm.fallback || sm.method !== "fts5"
+        ? t("sess.methodSub", "substring fallback")
+        : t("sess.methodFts", "full-text (fts5)"));
     list.innerHTML = `<div class="stat-note">${escapeHtml(q
-      ? t("sess.noMatch", "no session matches (substring scan)")
+      ? t("sess.noMatch", "no session matches") + " (" + label + ")"
       : t("sess.empty", "no sessions yet"))}</div>`;
   } else {
     list.innerHTML = rows.map(s => {
@@ -5565,7 +5714,7 @@ function renderSessions(q) {
         s.when ? new Date(s.when * 1000).toLocaleString() : "",
         fmtBytes(s.size)];
       const hits = (s.hits != null) ? ` · ${s.hits} hit(s)` : "";
-      const partial = s.partial ? " · partial scan" : "";
+      const partial = s.partial ? " · " + t("sess.partial", "partial scan") : "";
       const exp = fmt => `<button class="btn" type="button" ` +
         `data-sess-exp="${escapeHtml(sid)}" data-sess-fmt="${fmt}" ` +
         `aria-label="${escapeHtml("export session " + sid + " as " + fmt)}" ` +
@@ -5575,7 +5724,7 @@ function renderSessions(q) {
       const open = `<button class="btn" type="button" ` +
         `data-sess-open="${escapeHtml(sid)}" ` +
         `aria-label="${escapeHtml("open session " + sid + " as the live chat session")}" ` +
-        `style="padding:2px 9px;font-size:12px;">OPEN</button>`;
+        `style="padding:2px 9px;font-size:12px;">${t("sess.openBtn", "OPEN")}</button>`;
       return `<div class="ctl-row">` +
         `<label style="flex:1;min-width:0;overflow-wrap:anywhere;">` +
         `${escapeHtml(bits.filter(Boolean).join(" · "))}` +
@@ -5586,10 +5735,15 @@ function renderSessions(q) {
     }).join("");
     if (sessData.search) {
       const m = sessData.search;
+      // which method actually ran — never a baked-in "no index" claim
+      const label = (m.fallback || m.method !== "fts5")
+        ? t("sess.methodSub", "substring fallback")
+        : t("sess.methodFts", "full-text (fts5)");
+      const why = (m.fallback && m.reason) ? ` (${m.reason})` : "";
       list.innerHTML += `<div class="stat-note">${escapeHtml(
-        t("sess.matchNote", "match: ") + m.method + " scan" +
+        t("sess.matchNote", "match: ") + label + why +
         (m.case_insensitive ? ", case-insensitive" : "") +
-        " · " + sessData.count + " session(s) — no full-text index")}</div>`;
+        " · " + sessData.count + " session(s)")}</div>`;
     }
   }
   // X12: prune state + the one-shot advisory, server-owned wording
@@ -5597,13 +5751,17 @@ function renderSessions(q) {
   if (pruneEl) {
     if (!pr) { pruneEl.hidden = true; return; }
     const bits = [pr.enabled
-      ? `session auto-prune: on · keep ${pr.days} day${pr.days === 1 ? "" : "s"}`
-      : "session auto-prune: off (Settings → Model)"];
+      ? t("sess.pruneOn", "session auto-prune: on · keep {n} day{s}")
+          .replace("{n}", pr.days).replace("{s}", pr.days === 1 ? "" : "s")
+      : t("sess.pruneOff", "session auto-prune: off (Settings → Model)")];
     if (pr.enabled && pr.ran_at) {
-      bits.push(`last run ${new Date(pr.ran_at * 1000).toLocaleString()}` +
-        ` · removed ${pr.removed} · freed ${fmtBytes(pr.freed)}`);
+      bits.push(t("sess.pruneRun", "last run {t} · removed {n} · freed {b}")
+        .replace("{t}", new Date(pr.ran_at * 1000).toLocaleString())
+        .replace("{n}", pr.removed).replace("{b}", fmtBytes(pr.freed)));
     }
-    if (pr.errors) bits.push(`${pr.errors} file error(s)`);
+    if (pr.errors) {
+      bits.push(t("sess.pruneErr", "{n} file error(s)").replace("{n}", pr.errors));
+    }
     let txt = bits.join(" · ");
     if (pr.advisory) txt += " — " + pr.advisory;
     pruneEl.textContent = txt;
@@ -5894,6 +6052,9 @@ function setView(name, fromUser) {
   // with the SAME rule — first open, then only on a user nav click.
   if (name === "stream" && (fromUser || !artData)) refreshArtifacts();
   if (name === "chat" && (fromUser || !sessData)) refreshSessions("");
+  // delta4: the community panel fetches on first open, then only on a user
+  // nav click (the server cache keeps the upstream read rate sane anyway).
+  if (name === "community" && (fromUser || !commData)) refreshCommunity(false);
 }
 
 /* --------------------------------------------------------- topbar height -- */
@@ -5916,6 +6077,19 @@ document.getElementById("langBtn").addEventListener("click", () => {
 document.querySelectorAll(".nav-item").forEach(btn => {
   btn.addEventListener("click", () => setView(btn.dataset.view, true));
 });
+/* delta4: community panel — manual refresh busts the server's 600s cache,
+   the category select just re-filters the payload already in memory. */
+const commRefreshEl = document.getElementById("commRefresh");
+if (commRefreshEl) {
+  commRefreshEl.addEventListener("click", () => refreshCommunity(true));
+}
+const commCatEl = document.getElementById("commCat");
+if (commCatEl) {
+  commCatEl.addEventListener("change", e => {
+    commCat = e.target.value || "";
+    renderCommunity();
+  });
+}
 document.getElementById("soundToggle").addEventListener("click", e => {
   const b = e.currentTarget;
   b.setAttribute("aria-pressed", b.getAttribute("aria-pressed") !== "true");

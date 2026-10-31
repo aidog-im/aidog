@@ -19,7 +19,8 @@
     "tests/**",
     "web/**",
     "site/**",
-    "aidog"
+    "aidog",
+    ".github/**"
   ],
   "deny": {
     "secrets.env": "real credentials — never exported",

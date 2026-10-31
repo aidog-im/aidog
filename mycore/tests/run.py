@@ -11628,7 +11628,7 @@ def test_delta2() -> None:
               r is not None and r[0] == 400
               and "0..3650" in str(r[1].get("details")), str(r)[:200])
 
-        # ---------------- X13 list / substring search / export -------------
+        # ---------------- X13 list / FTS5 search / export ------------------
         sdir = TMP / "s13"
         (sdir / "archive").mkdir(parents=True)
 
@@ -11665,11 +11665,13 @@ def test_delta2() -> None:
               and brow["summary"].endswith("…")
               and len(brow["summary"]) <= 121, brow["summary"][:40])
         sr = _sess.list_sessions(sdir, q="purple")
-        check("delta2 search: case-insensitive substring hits + honest method label",
+        check("delta2 search: FTS5 case-insensitive hits + honest method label",
               sr["count"] == 2
               and {r_["id"] for r_ in sr["sessions"]}
               == {"alpha", "archive/web.1700000123"}
-              and sr["search"]["method"] == "substring"
+              and sr["search"]["method"] == "fts5"
+              and sr["search"]["engine"] == "fts5"
+              and sr["search"]["fallback"] is False
               and sr["search"]["case_insensitive"] is True
               and all(r_["hits"] >= 1 for r_ in sr["sessions"]), str(sr))
         miss = _sess.list_sessions(sdir, q="zzz-no-such-text")
@@ -11716,9 +11718,10 @@ def test_delta2() -> None:
               and "advisory" in r[1]["prune"] and "search" not in r[1],
               str(r)[:200])
         r = call("_handle_sessions_get", "/api/sessions?q=PURPLE")
-        check("delta2 GET /api/sessions?q= -> substring search labeled",
+        check("delta2 GET /api/sessions?q= -> fts5 search labeled",
               r[0] == 200 and r[1]["count"] == 2
-              and r[1]["search"]["method"] == "substring", str(r)[:160])
+              and r[1]["search"]["method"] == "fts5"
+              and r[1]["search"]["fallback"] is False, str(r)[:160])
         r = call("_handle_sessions_get", "/api/sessions?q=" + "x" * 300)
         check("delta2 GET /api/sessions: oversized q -> 400", r[0] == 400)
         r = call("_handle_sessions_get", "/api/sessions?limit=0")
@@ -11734,6 +11737,152 @@ def test_delta2() -> None:
               r is not None and r[0] == 200
               and r[1][1].startswith("text/markdown")
               and b"**user:**" in r[1][0], str(r)[:120])
+
+        # ------------- FTS5 real full-text search (owner decision) --------
+        # Persistent index sits BESIDE the sessions dir (never inside it);
+        # BM25 ordering, incremental (mtime,size) sync, honest degradation.
+        fdir = TMP / "fts_case" / "sessions"
+        (fdir / "archive").mkdir(parents=True)
+
+        def fmk(name: str, lines: list, parent: Path = fdir,
+                age_days: float = 0.0) -> Path:
+            p = parent / name
+            p.write_text("\n".join(json.dumps(x) for x in lines) + "\n",
+                         encoding="utf-8")
+            if age_days:
+                ts = _time.time() - age_days * 86400
+                os.utime(p, (ts, ts))
+            return p
+
+        dense = fmk("dense.jsonl", [
+            {"meta": {"created": 1.0}},
+            {"role": "user", "content": "quokka quokka quokka quokka"}],
+            age_days=5)
+        fmk("sparse.jsonl", [
+            {"meta": {"created": 2.0}},
+            {"role": "user", "content": "one quokka buried inside a rather "
+             "long message of padding words padding words padding words "
+             "padding words padding words padding words padding words"}],
+            age_days=0.01)
+        fmk("zh.jsonl", [
+            {"meta": {"created": 3.0}},
+            {"role": "user", "content": "\u4eca\u5929\u5929\u6c14\u4e0d\u9519"},
+            {"role": "assistant",
+             "content": "\u5929\u6c14\u9884\u62a5\u8bf4\u660e\u5929\u6709\u96e8"}])
+        fmk("sym.jsonl", [
+            {"meta": {"created": 4.0}},
+            {"role": "user", "content": "!!! special punctuation !!!"}])
+        fmk("arch.jsonl", [{"role": "user",
+                            "content": "archived purple thought"}],
+            parent=fdir / "archive", age_days=1)
+
+        r = _sess.list_sessions(fdir, q="quokka")
+        check("fts5: BM25 dense hit outranks the NEWER sparse hit + labels",
+              r["count"] == 2
+              and [x["id"] for x in r["sessions"]] == ["dense", "sparse"]
+              and r["search"]["method"] == "fts5"
+              and r["search"]["engine"] == "fts5"
+              and r["search"]["fallback"] is False
+              and r["search"]["case_insensitive"] is True, str(r)[:220])
+
+        idx = fdir.parent / _sess.INDEX_NAME
+        check("fts5: index lives BESIDE sessions/, sessions stays .jsonl-only",
+              idx.is_file() and not (fdir / _sess.INDEX_NAME).exists()
+              and sorted(p.name for p in fdir.iterdir() if p.is_file())
+              == ["dense.jsonl", "sparse.jsonl", "sym.jsonl", "zh.jsonl"],
+              str(sorted(p.name for p in fdir.iterdir())))
+
+        r = _sess.list_sessions(fdir, q="QuOkKa")
+        check("fts5: case-insensitive query, hits = matching messages",
+              r["count"] == 2
+              and all(x["hits"] >= 1 for x in r["sessions"]), str(r)[:160])
+
+        r = _sess.list_sessions(fdir, q="\u5929\u6c14")
+        check("fts5: no-space-script (zh) adjacent-phrase match, hits=2",
+              r["count"] == 1 and r["sessions"][0]["id"] == "zh"
+              and r["sessions"][0]["hits"] == 2, str(r)[:200])
+
+        os.unlink(dense)
+        (fdir / "sparse.jsonl").unlink()
+        r = _sess.list_sessions(fdir, q="quokka")
+        check("fts5: deleted sessions are never searchable again (reconciled)",
+              r["count"] == 0 and r["sessions"] == []
+              and r["search"]["method"] == "fts5", str(r)[:160])
+
+        # X12 prune consistency: pruned content leaves the index too
+        vic = fmk("old.jsonl", [{"role": "user",
+                                 "content": "stale walrus chatter"}],
+                  age_days=90)
+        r = _sess.list_sessions(fdir, q="walrus")
+        check("fts5: pre-prune hit on the aged session",
+              r["count"] == 1 and r["sessions"][0]["id"] == "old"
+              and r["search"]["method"] == "fts5", str(r)[:160])
+        pr = _sess.prune_old(fdir, 30, keep=())
+        r = _sess.list_sessions(fdir, q="walrus")
+        check("fts5: after X12 prune the pruned content is unsearchable",
+              pr["removed"] == 1 and not vic.exists()
+              and r["count"] == 0 and r["sessions"] == [],
+              f"{pr} {str(r)[:140]}")
+
+        # X20 resume-style rotation: rows follow the files (path-keyed sync)
+        rot = TMP / "fts_rot" / "sessions"
+        (rot / "archive").mkdir(parents=True)
+        rlive = fmk("web.jsonl", [{"role": "user",
+                                   "content": "live session about nimbus"}],
+                    parent=rot)
+        rtgt = fmk("web.1.jsonl",
+                   [{"role": "user",
+                     "content": "target session about cumulus"}],
+                   parent=rot / "archive")
+        r0 = _sess.list_sessions(rot, q="nimbus")
+        prev = rlive.read_bytes()               # X20 emulation: target ->
+        rlive.write_bytes(rtgt.read_bytes())    # live, previous live ->
+        rtgt.unlink()                           # archive, source dropped
+        (rot / "archive" / "web.2.jsonl").write_bytes(prev)
+        r1 = _sess.list_sessions(rot, q="nimbus")
+        r2 = _sess.list_sessions(rot, q="cumulus")
+        check("fts5: after X20-style rotation rows follow the files",
+              r0["count"] == 1
+              and [x["id"] for x in r0["sessions"]] == ["web"]
+              and r1["count"] == 1
+              and [x["id"] for x in r1["sessions"]] == ["archive/web.2"]
+              and r2["count"] == 1
+              and [x["id"] for x in r2["sessions"]] == ["web"],
+              f"{[x['id'] for x in r0['sessions']]} "
+              f"{[x['id'] for x in r1['sessions']]} "
+              f"{[x['id'] for x in r2['sessions']]}")
+
+        # corrupt index -> one rebuild -> still honest fts5
+        idx2 = rot.parent / _sess.INDEX_NAME
+        idx2.write_bytes(b"corrupt-index-not-a-database")
+        r = _sess.list_sessions(rot, q="cumulus")
+        check("fts5: corrupt index auto-rebuilds and search stays honest",
+              r["count"] == 1 and r["search"]["method"] == "fts5"
+              and r["search"]["fallback"] is False
+              and idx2.stat().st_size > 0, str(r)[:200])
+
+        # FTS5 unavailable -> honest substring degradation (monkeypatch seam)
+        avail = _sess._FTS5_AVAILABLE
+        _sess._FTS5_AVAILABLE = False
+        try:
+            r = _sess.list_sessions(fdir, q="\u5929\u6c14")
+        finally:
+            _sess._FTS5_AVAILABLE = avail
+        check("fts5 unavailable -> substring fallback, honestly labelled",
+              r["search"]["method"] == "substring"
+              and r["search"]["fallback"] is True
+              and r["search"]["reason"] == "fts5_unavailable"
+              and r["count"] == 1 and r["sessions"][0]["hits"] >= 1,
+              str(r)[:200])
+
+        # punctuation-only query: FTS cannot index it -> substring, labelled
+        r = _sess.list_sessions(fdir, q="!!!")
+        check("unindexable query degrades to substring (reason, still matches)",
+              r["search"]["method"] == "substring"
+              and r["search"]["fallback"] is True
+              and r["search"]["reason"] == "unindexable_query"
+              and r["count"] == 1
+              and r["sessions"][0]["id"] == "sym", str(r)[:200])
 
         # ---------------- X17 artifacts endpoint ---------------------------
         mdir = TMP / "media"

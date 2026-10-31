@@ -128,15 +128,35 @@ Routes:
   GET  /api/sessions            -> X13 read face: {sessions[{id, when, size,
                                    summary[, hits, partial]}], count,
                                    truncated, limit, search?{q, method:
-                                   "substring"}, prune{enabled, days, removed,
-                                   kept, freed, errors, ran_at, advisory},
+                                   "fts5", engine, fallback,
+                                   case_insensitive}, prune{enabled, days,
+                                   removed, kept, freed, errors, ran_at,
+                                   advisory},
                                    advisory is one-shown per process; ?q= is
-                                   a case-insensitive substring scan (no FTS,
-                                   said out loud), ?limit= 1..500;
+                                   real FTS5 full-text search over a lazily
+                                   synced persistent index (BM25 order),
+                                   honestly degrading to a labelled substring
+                                   scan (method "substring", fallback true,
+                                   reason fts5_unavailable|
+                                   index_unusable|unindexable_query),
+                                   ?limit= 1..500;
                                    ?id=<sid>&format=json|md exports ONE
                                    session as an attachment (400 bad id/
                                    format, 404 unknown id) — message content
                                    only, never a credential slot value
+  GET  /api/discussions         -> community panel: the product repo's GitHub
+                                   Discussions (anonymous REST read, 600s
+                                   module cache, ?fresh=1 busts it):
+                                   {available, discussions[{number, title,
+                                   category, author, comments, updated_at,
+                                   url}], checked_at[, reason]} — every
+                                   failure answers 200 with available:false
+                                   and a category-word reason only
+                                   (not_public_yet | not_enabled |
+                                   rate_limited | upstream_error | network):
+                                   never a URL, an exception string, or a
+                                   credential. While the repo is private this
+                                   is the DESIGN state, not an error.
   GET  /api/skills/remote       -> official skills catalog (car 4, 0.5.47):
                                    {source: remote|cache|unavailable,
                                    fetched_at, count, skills[7-field rows]};
@@ -243,7 +263,8 @@ CHAT_SESSION_NAME = "web"             # console session file stem (numeric
 # Wave 6 delta2 (X12/X13/X16/X17): caps for the session/gallery/vision faces.
 SESSION_LIST_LIMIT = 200          # GET /api/sessions default page size
 SESSION_LIST_MAX = 500            # hard cap on ?limit=
-SESSIONS_Q_MAX = 200              # chars in ?q= (substring scan)
+SESSIONS_Q_MAX = 200              # chars in ?q= (FTS5 search, honest
+                                  # substring fallback — mycore.session)
 ARTIFACTS_LIMIT = 60              # GET /api/artifacts default page size
 ARTIFACTS_MAX = 200               # hard cap on ?limit=
 CHAT_BODY_MAX = 2_000_000         # chat POST body budget (X16 image attach;
@@ -2041,6 +2062,105 @@ def _skills_remote_ladder() -> dict:
         return data
 
 
+# ------------------------------------------- community discussions feed ----
+# Community view (product GitHub Discussions): the console reads the repo's
+# discussion list ANONYMOUSLY (no token ever rides this request) and caches
+# it module-wide for DISCUSSIONS_TTL so a browser reload never stacks
+# upstream reads. Until the repo flips public GitHub answers 404/410 and the
+# endpoint honestly reports `available:false` with a category-word `reason` —
+# a designed state the UI renders as an honest card.
+DISCUSSIONS_URL = "https://api.github.com/repos/aidog-im/aidog/discussions?per_page=20"
+DISCUSSIONS_TTL = 600.0         # in-process reuse window (seconds)
+DISCUSSIONS_TIMEOUT = 8.0       # one outbound attempt, hard ceiling
+_discussions_lock = threading.Lock()
+_discussions_cache: dict = {"ts": 0.0, "data": None}
+
+
+def _discussion_rows(doc: object) -> list[dict]:
+    """Map GitHub Discussions REST items to the console's six-field rows.
+    Nested `category`/`user` objects degrade to "", a non-list payload maps
+    to [], and only an https://github.com/ html_url survives as `url` (a
+    tampered link degrades to "", which the UI renders as plain text)."""
+    out: list[dict] = []
+    items = doc if isinstance(doc, list) else []
+    for it in items[:20]:
+        if not isinstance(it, dict):
+            continue
+        cat = it.get("category")
+        if isinstance(cat, dict):
+            cat = cat.get("name") or cat.get("slug") or ""
+        user = it.get("user")
+        author = user.get("login") if isinstance(user, dict) else (user or "")
+        try:
+            comments = int(it.get("comments") or 0)
+        except (TypeError, ValueError):
+            comments = 0
+        num = it.get("number")
+        url = str(it.get("html_url") or "")
+        if not url.startswith("https://github.com/"):
+            url = ""
+        out.append({
+            "number": num if isinstance(num, int) else None,
+            "title": str(it.get("title") or ""),
+            "category": str(cat or ""),
+            "author": str(author or ""),
+            "comments": max(0, comments),
+            "updated_at": str(it.get("updated_at") or it.get("created_at") or ""),
+            "url": url,
+        })
+    return out
+
+
+def _fetch_discussions() -> dict:
+    """One outbound GitHub read -> the /api/discussions payload. Every
+    failure path yields a category WORD (never a URL, never an exception
+    string, never a credential), so the payload is always safe to render."""
+    stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    url = (os.environ.get("AIDOG_DISCUSSIONS_URL") or "").strip() \
+        or DISCUSSIONS_URL                 # test seam, same ladder as skills
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "aidog-console",
+            "Accept": "application/vnd.github+json"})
+        with urllib.request.urlopen(req, timeout=DISCUSSIONS_TIMEOUT) as resp:
+            doc = json.loads(resp.read().decode("utf-8", "replace"))
+        if not isinstance(doc, list):
+            raise ValueError("payload is not a list")
+        return {"available": True, "discussions": _discussion_rows(doc),
+                "checked_at": stamp}
+    except urllib.error.HTTPError as e:
+        code = getattr(e, "code", 0)
+        reason = ("not_public_yet" if code in (401, 404) else
+                  "not_enabled" if code == 410 else
+                  "rate_limited" if code in (403, 429) else
+                  "upstream_error")
+        sys.stderr.write(f"discussions fetch failed code={code}\n")
+    except Exception as e:  # noqa: BLE001 — offline degrades, never 500
+        # ValueError here = a 200 whose body would not parse; URLError and
+        # friends = transport. Both are logged as a type/code word only.
+        reason = "upstream_error" if isinstance(e, ValueError) else "network"
+        sys.stderr.write(f"discussions fetch failed err={type(e).__name__}\n")
+    return {"available": False, "discussions": [], "checked_at": stamp,
+            "reason": reason}
+
+
+def collect_discussions(fresh: bool = False) -> dict:
+    """GET /api/discussions — the product's GitHub Discussions (community
+    panel). Read, loopback, no auth (same contract as GET /api/mission).
+    One module fetch per DISCUSSIONS_TTL; the lock is held across the fetch
+    so concurrent callers wait out ONE upstream read instead of stacking
+    their own. `?fresh=1` (the panel's refresh button) skips the cache."""
+    now = time.time()
+    with _discussions_lock:
+        cached = _discussions_cache
+        if (not fresh and cached["data"] is not None
+                and now - cached["ts"] < DISCUSSIONS_TTL):
+            return cached["data"]
+        data = _fetch_discussions()
+        _discussions_cache.update(ts=time.time(), data=data)
+        return data
+
+
 def collect_events() -> dict:
     events: list[dict] = []
     for rb in system_facts().get("reboots", []):
@@ -3744,6 +3864,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(collect_skills())
         if path == "/api/skills/remote":
             return self._json(collect_skills_remote())
+        if path == "/api/discussions":
+            q = urllib.parse.parse_qs(self.path.split("?", 1)[1]) \
+                if "?" in self.path else {}
+            return self._json(collect_discussions(
+                fresh=q.get("fresh", [""])[0] == "1"))
         if path == "/api/voice":
             return self._json(collect_voice())
         if path == "/api/channels":

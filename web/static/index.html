@@ -22,7 +22,7 @@
 <div class="alert-layer" id="alertLayer" hidden>
   <div class="alert-scan"></div>
   <div class="alert-box">
-    <div class="alert-title" id="alertTitle">⚠ URGENT</div>
+    <div class="alert-title" id="alertTitle" data-i18n="alert.title">⚠ URGENT</div>
     <ul class="alert-reasons" id="alertReasons"></ul>
     <div class="alert-foot">
       <span id="alertHint" data-i18n="alert.hint">tap / Esc to dismiss</span>
@@ -31,7 +31,7 @@
   </div>
 </div>
 
-<!-- app shell: slim topbar + fixed side nav + main view area (seven views) -->
+<!-- app shell: slim topbar + fixed side nav + main view area (eight views) -->
 <div class="shell">
   <header class="topbar">
     <div class="brand">
@@ -115,6 +115,19 @@
         <span class="nav-label" data-i18n="view.stream.title">Stream</span>
         <span class="nav-drop" aria-hidden="true"></span>
       </button>
+      <!-- community panel (delta4): reads the product repo's GitHub Discussions
+           through GET /api/discussions — anonymous, cached, honest when the
+           repo is still private. -->
+      <button class="nav-item" type="button" data-view="community">
+        <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"
+          stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="6.1" cy="5.5" r="2.2"/>
+          <path d="M2.4 13a3.7 3.7 0 0 1 7.4 0"/>
+          <circle cx="11.5" cy="6.3" r="1.7"/>
+          <path d="M11.1 9.7a3 3 0 0 1 2.5 3"/></svg></span>
+        <span class="nav-label" data-i18n="view.community.title">Community</span>
+        <span class="nav-drop" aria-hidden="true"></span>
+      </button>
       <button class="nav-item" type="button" data-view="settings">
         <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"
           stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
@@ -127,7 +140,7 @@
     </nav>
 
     <div class="tool-strip" id="toolStrip">
-      <span class="tool" id="toolBj" title="Beijing time">BJ --:--:--</span>
+      <span class="tool" id="toolBj" title="Beijing time" data-i18n-t="tool.bjT">BJ --:--:--</span>
       <span class="tool" id="toolUtc">UTC --:--</span>
       <span class="tool" id="toolUp">UP –</span>
       <span class="tool" id="toolHb" data-i18n-t="tool.hbTip">HB –</span>
@@ -190,7 +203,7 @@
           <div id="ckptBlock" hidden>
             <div class="ctl-row token-row"
                  style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--line);margin-bottom:6px;">
-              <label>CHECKPOINTS</label>
+              <label data-i18n="ckpt.head">CHECKPOINTS</label>
               <span class="save-state" id="ckptMsg" role="status"></span>
             </div>
             <div id="ckptList"></div>
@@ -273,7 +286,7 @@
                    aria-label="cron name"
                    data-i18n-ph="cron.namePh" placeholder="name (list label, no slash)">
             <input type="text" id="cronSpec" maxlength="120" autocomplete="off"
-                   spellcheck="false" aria-label="cron schedule"
+                   spellcheck="false" aria-label="cron schedule" data-i18n-ph="cron.schedPh"
                    placeholder="every 30m | daily 08:00 | weekly mon 08:00 | once 2026-10-26 09:00">
             <input type="text" id="cronPrompt" maxlength="4000" autocomplete="off"
                    aria-label="cron message"
@@ -367,7 +380,8 @@
                  data-i18n-ph="chat.ph" placeholder="ask the assistant…">
           <button class="btn primary" id="chatSend" data-i18n="chat.send">SEND</button>
           <button class="btn" id="chatClear" data-i18n="chat.clear">CLEAR</button>
-          <label class="btn" title="attach an image for your next message — the model endpoint must support vision; a non-multimodal endpoint answers with an honest refusal, never a fake">IMG
+          <label class="btn" title="attach an image for your next message — the model endpoint must support vision; a non-multimodal endpoint answers with an honest refusal, never a fake"
+                 data-i18n-t="img.attachT"><span data-i18n="img.attach">IMG</span>
             <input type="file" id="chatImg" accept="image/png,image/jpeg,image/webp" hidden>
           </label>
           <span class="stat-note" id="chatImgNote" hidden></span>
@@ -378,18 +392,19 @@
       </section>
 
       <!-- Wave 6 delta2 (X13 + X12) + delta3 (X20): session browser — list /
-           search / empty states, substring search honestly labeled (no FTS
-           claim), per-row OPEN (X20: make it the LIVE chat session — the
+           search / empty states, FTS5 full-text with an honest labelled
+           substring fallback (no index claim baked into the copy), per-row OPEN (X20: make it the LIVE chat session — the
            server rotates the old live file into archive/, crash-safe) +
            JSON/MD export downloads, and the opt-in auto-prune state +
            one-shot disk advisory (X12) on one line. -->
       <section class="card">
-        <h2><span>SESSIONS</span><span class="chat-badge" id="sessBadge">–</span></h2>
+        <h2><span data-i18n="sec.sessions">SESSIONS</span><span class="chat-badge" id="sessBadge">–</span></h2>
         <div class="ctl-row">
           <input type="search" id="sessSearch" maxlength="200" autocomplete="off"
-                 placeholder="search session text (substring match — no full-text index)">
-          <button class="btn" id="sessGo" type="button">SEARCH</button>
-          <button class="btn" id="sessAll" type="button">LIST</button>
+                 data-i18n-ph="sess.searchPh"
+                 placeholder="search session text (full-text when available)">
+          <button class="btn" id="sessGo" type="button" data-i18n="sess.go">SEARCH</button>
+          <button class="btn" id="sessAll" type="button" data-i18n="sess.all">LIST</button>
           <span class="save-state" id="sessMsg" role="status"></span>
         </div>
         <div id="sessList"></div>
@@ -621,8 +636,40 @@
            the media dir, newest first, each thumb opens the SAME single-image
            route (/api/media/<name>). Empty state is honest, never seeded. -->
       <section class="card">
-        <h2><span>ARTIFACTS</span><span class="chat-badge" id="artBadge">–</span></h2>
+        <h2><span data-i18n="sec.artifacts">ARTIFACTS</span><span class="chat-badge" id="artBadge">–</span></h2>
         <div class="art-grid" id="artList"></div>
+      </section>
+    </section>
+
+    <!-- COMMUNITY (delta4): the product repository's GitHub Discussions —
+         fetched server-side by GET /api/discussions (anonymous, 600s cache),
+         rendered with an honest unavailable/empty state while the repo is
+         private. Every row link and the header button open GitHub in a new
+         tab; nothing here is ever seeded or faked. -->
+    <section class="view" id="view-community" data-view="community">
+      <div class="view-head">
+        <div class="view-titles">
+          <h2 data-i18n="view.community.title">Community</h2>
+          <p class="view-sub" data-i18n="view.community.sub">Product discussions on GitHub</p>
+        </div>
+        <div class="view-actions">
+          <button class="btn" id="commRefresh" type="button"
+                  data-i18n="comm.refresh">REFRESH</button>
+          <a class="btn primary" id="commOpen"
+             href="https://github.com/aidog-im/aidog/discussions/new"
+             target="_blank" rel="noopener" data-i18n="comm.open">OPEN A DISCUSSION</a>
+        </div>
+      </div>
+      <section class="card">
+        <h2><span data-i18n="sec.community">DISCUSSIONS</span>
+            <span class="chat-badge" id="commBadge">–</span></h2>
+        <div class="ctl-row">
+          <label for="commCat" data-i18n="comm.catLabel">Category</label>
+          <select id="commCat"></select>
+          <span class="stat-note" id="commNote" role="status"></span>
+        </div>
+        <div id="commList"></div>
+        <div class="stat-note" id="commChecked" hidden></div>
       </section>
     </section>
 
@@ -669,19 +716,21 @@
                card can never delete a profile that still holds state. -->
           <div id="profBlock" style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--line);">
             <div class="ctl-row token-row" style="margin-bottom:6px;">
-              <label title="Named isolated runtime dirs: aidog profile list / create / rm">Profile directories</label>
+              <label data-i18n="prof.dirs"
+                     title="Named isolated runtime dirs: aidog profile list / create / rm"
+                     data-i18n-t="prof.dirsT">Profile directories</label>
               <span class="save-state" id="profMsg" role="status"></span>
             </div>
             <div id="profList"></div>
             <div class="cron-create" id="profCreate" style="margin-top:8px;">
               <input type="text" id="profName" maxlength="32" autocomplete="off"
-                     spellcheck="false" aria-label="profile name"
+                     spellcheck="false" aria-label="profile name" data-i18n-ph="prof.namePh"
                      placeholder="new profile name (a-z0-9, then a-z0-9 _ -)">
               <div class="ctl-actions">
-                <button class="btn primary" id="profCreateBtn" type="button">CREATE</button>
+                <button class="btn primary" id="profCreateBtn" type="button" data-i18n="prof.create">CREATE</button>
               </div>
             </div>
-            <div class="stat-note">a profile is a separate dog — own bot token, own state, own console port · remove needs an empty state dir</div>
+            <div class="stat-note" data-i18n="prof.note">a profile is a separate dog — own bot token, own state, own console port · remove needs an empty state dir</div>
           </div>
         </div>
 
@@ -730,29 +779,32 @@
           <div class="ctl-row">
             <label data-i18n="ctl.mycModels">Model whitelist (comma separated)</label>
             <input type="text" id="mycModels" maxlength="2048" autocomplete="off"
-                   spellcheck="false" placeholder="per-task model whitelist, e.g. model-a, model-b">
+                   spellcheck="false" data-i18n-ph="ctl.mycModelsPh"
+                   placeholder="per-task model whitelist, e.g. model-a, model-b">
           </div>
           <div class="ctl-row">
             <label data-i18n="ctl.mycBudget">Compaction budget (chars)</label>
             <input type="number" id="mycBudget" min="4000" max="1000000" step="1"
-                   placeholder="24000 = default">
+                   data-i18n-ph="ctl.mycBudgetPh" placeholder="24000 = default">
           </div>
           <!-- Wave 6 delta2 (X12/X15): OPT-IN switches — an untouched form
                changes nothing (0 days = off; effort off = the default wire
                byte-for-byte). Prune age is applied on save, at most hourly
                afterwards; the disk advisory shows once in Sessions. -->
           <div class="ctl-row">
-            <label title="Delete console/TG session files older than N days (0 = off). The live console session is never pruned.">Session auto-prune (days, 0 = off)</label>
+            <label data-i18n="ctl.mycPrune" data-i18n-t="ctl.mycPruneT"
+                   title="Delete console/TG session files older than N days (0 = off). The live console session is never pruned.">Session auto-prune (days, 0 = off)</label>
             <input type="number" id="mycPrune" min="0" max="3650" step="1"
-                   placeholder="0 = off" spellcheck="false">
+                   data-i18n-ph="ctl.mycPrunePh" placeholder="0 = off" spellcheck="false">
           </div>
           <div class="ctl-row">
-            <label title="Sends reasoning_effort with each chat request when set (OpenAI-style param). Off = never sent — endpoints that reject unknown params stay safe.">Reasoning effort (extra request param)</label>
+            <label data-i18n="ctl.mycEffort" data-i18n-t="ctl.mycEffortT"
+                   title="Sends reasoning_effort with each chat request when set (OpenAI-style param). Off = never sent — endpoints that reject unknown params stay safe.">Reasoning effort (extra request param)</label>
             <select id="mycEffort">
-              <option value="">off — endpoint default</option>
-              <option value="low">low</option>
-              <option value="medium">medium</option>
-              <option value="high">high</option>
+              <option value="" data-i18n="ctl.effortOff">off — endpoint default</option>
+              <option value="low" data-i18n="ctl.effortLow">low</option>
+              <option value="medium" data-i18n="ctl.effortMedium">medium</option>
+              <option value="high" data-i18n="ctl.effortHigh">high</option>
             </select>
           </div>
           <div class="ctl-row">

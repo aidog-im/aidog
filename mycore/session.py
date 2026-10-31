@@ -16,7 +16,9 @@ English comments per repo i18n policy.
 from __future__ import annotations
 
 import json
+import os
 import re
+import sqlite3
 import time
 from pathlib import Path
 
@@ -132,7 +134,8 @@ class Session:
 # The class above is deliberately minimal (append-only write + load). The
 # module faces below add the three maintenance/read surfaces the upstream
 # parity audit flagged as missing: age pruning (X12, opt-in from settings),
-# list + substring search and single-session export (X13). Design rules hold
+# list + real FTS5 full-text search (X13, honest substring fallback) and
+# single-session export (X13). Design rules hold
 # throughout:
 #   - fail-soft or explicitly typed errors (ValueError / FileNotFoundError),
 #     never an OSError escaping to an HTTP 500;
@@ -151,6 +154,39 @@ _SID_RE = re.compile(
     r"[A-Za-z0-9][A-Za-z0-9._-]{0,95}"
     r"(/[A-Za-z0-9][A-Za-z0-9._-]{0,95})?")
 _CTRL_RE = re.compile(r"[\x00-\x1f\x7f]+")
+
+# ------------------------------------- FTS5 full-text session search -------
+# Owner decision (2026-10-27): `?q=` runs REAL full-text search over a
+# SQLite FTS5 index; the old substring scan survives only as an honest,
+# labelled fallback. Design rules:
+#   - INDEX LOCATION: `<state root>/session_search.sqlite3` — the directory
+#     CONTAINING sessions/, NEVER inside it (X12 prune touches only .jsonl
+#     and _session_files must not see the index), and outside every probe
+#     byte-identity surface (secrets.env / web/settings.json / profiles/** /
+#     data/images / the checkpoints index).
+#   - LAZY SYNC at query time, keyed by (mtime ms, size): new/changed files
+#     are (re)indexed; rows of vanished files are dropped BEFORE matching,
+#     so pruned or resume-rotated content can never be matched again.
+#   - one row per message; text normalized by _fts_norm (casefold + a space
+#     around every character of a no-space script that unicode61 cannot
+#     split into tokens); sessions rank by their best FTS5 BM25 score,
+#     ties newest first.
+#   - HONEST DEGRADATION: no FTS5 build, an index still unusable after one
+#     rebuild, or a query with nothing indexable (punctuation-only) runs the
+#     original substring scan and SAYS SO (`method:"substring",
+#     fallback:true, reason:...`); success reports `method:"fts5",
+#     engine:"fts5", fallback:false`.
+INDEX_NAME = "session_search.sqlite3"
+_FTS5_AVAILABLE = True          # monkeypatch seam: degradation test flips it
+# No-space scripts: han ideographs (incl. ext A/B+), kana, hangul — runs of
+# these carry no spaces, so unicode61 would tokenize a whole run as ONE
+# token and a mid-run query could never match without the spacing below.
+_NSS_CLASS = ("\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
+              "\u3040-\u30ff"
+              "\uac00-\ud7af\u1100-\u11ff"
+              "\U00020000-\U0003134f")
+_NSS_RE = re.compile("[" + _NSS_CLASS + "]+")
+_WORD_RE = re.compile(r"\w+", re.UNICODE)
 
 
 def _session_files(directory: str | Path) -> list[tuple[Path, str]]:
@@ -239,16 +275,200 @@ def _summary_of(docs: list[dict]) -> str:
     return chosen
 
 
+def _fts_norm(text: str) -> str:
+    """Index/query normalization: casefold, then isolate every character of a
+    no-space script (han/kana/hangul) with spaces so ONE character becomes
+    ONE FTS5 token — unicode61 would otherwise tokenize a whole run as a
+    single token and a mid-run query could never match."""
+    return _NSS_RE.sub(lambda m: " " + " ".join(m.group(0)) + " ",
+                       text.casefold())
+
+
+def _fts_expr(qf: str) -> str | None:
+    """FTS5 MATCH expression for a casefolded query; None when the query has
+    nothing FTS can index (punctuation/underscore only) — the caller then
+    runs the substring scan, which still matches those characters.
+
+    Terms are ANDed. A word-ish term matches as a PREFIX phrase (a typed
+    fragment still finds the word). Each word-run segment made only of
+    no-space-script characters matches as an exact adjacent-token phrase —
+    substring-style matching for scripts unicode61 cannot split."""
+    terms: list[str] = []
+    for seg in _WORD_RE.findall(qf):          # raw word runs of the query
+        phrase: list[str] = []
+        for tok in _WORD_RE.findall(_fts_norm(seg)):
+            if len(tok) == 1 and _NSS_RE.fullmatch(tok):
+                phrase.append(tok)            # one no-space-script char
+                continue
+            if phrase:
+                terms.append('"' + " ".join(phrase) + '"')
+                phrase = []
+            if tok.strip("_"):
+                terms.append('"%s"*' % tok)
+        if phrase:
+            terms.append('"' + " ".join(phrase) + '"')
+    return " ".join(terms) or None
+
+
+def _fts_index_path(directory: str | Path) -> Path:
+    """`<parent of sessions>/session_search.sqlite3` - never inside the
+    sessions directory itself."""
+    return Path(directory).parent / INDEX_NAME
+
+
+def _fts_drop_index(directory: str | Path) -> None:
+    """Best-effort removal of a broken index (plus journal/wal siblings) so
+    the next attempt rebuilds it from the live files. Fail-soft."""
+    base = _fts_index_path(directory)
+    for cand in (base, Path(str(base) + "-journal"),
+                 Path(str(base) + "-wal"), Path(str(base) + "-shm")):
+        try:
+            cand.unlink()
+        except OSError:
+            pass
+
+
+def _fts_schema(conn) -> None:
+    """Create the two tables if missing (a corrupt file never gets this far —
+    sqlite raises before)."""
+    conn.execute("CREATE TABLE IF NOT EXISTS session_index ("
+                 "path TEXT PRIMARY KEY, root TEXT NOT NULL, "
+                 "mtime INTEGER NOT NULL, size INTEGER NOT NULL)")
+    conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS session_fts USING "
+                 "fts5(text, root UNINDEXED, path UNINDEXED, "
+                 "tokenize='unicode61')")
+    conn.commit()
+
+
+def _fts_sync(conn, root: str, stat: dict[str, tuple[int, int]]) -> None:
+    """Incremental sync for ONE sessions root, keyed by (mtime ms, size):
+    rows for files that vanished are dropped BEFORE anything is searchable
+    (prune / resume rotation can never leak), changed or new files are
+    re-scanned over the same SCAN_CAP window the substring scan reads."""
+    known = {p: (m, s) for p, m, s in conn.execute(
+        "SELECT path, mtime, size FROM session_index WHERE root=?", (root,))}
+    for path in known:
+        if path not in stat:
+            conn.execute("DELETE FROM session_fts WHERE path=?", (path,))
+            conn.execute("DELETE FROM session_index WHERE path=?", (path,))
+    for path, (mtime, size) in stat.items():
+        if known.get(path) == (mtime, size):
+            continue
+        conn.execute("DELETE FROM session_fts WHERE path=?", (path,))
+        conn.execute("DELETE FROM session_index WHERE path=?", (path,))
+        docs, _partial = _scan_docs(Path(path))
+        rows = []
+        for doc in docs:
+            if "role" not in doc:
+                continue
+            text = _fts_norm(_msg_text(doc))
+            if text.strip():
+                rows.append((text, root, path))
+        conn.executemany(
+            "INSERT INTO session_fts(text, root, path) VALUES (?,?,?)", rows)
+        conn.execute(
+            "INSERT INTO session_index(path, root, mtime, size) "
+            "VALUES (?,?,?,?)", (path, root, mtime, size))
+    conn.commit()
+
+
+def _fts_attempt(directory: str | Path, root: str,
+                 stat: dict[str, tuple[int, int]], expr: str
+                 ) -> list[tuple[str, int, float]]:
+    """One open → schema → sync → match pass over the index. Returns
+    [(absolute path, hits, bm25 score)] best-first (BM25 ascending; a
+    session's rows collapse to its FIRST = best row, extra rows add hits).
+    Raises sqlite3.Error/OSError for the caller's rebuild/degrade ladder."""
+    conn = sqlite3.connect(str(_fts_index_path(directory)), timeout=5.0)
+    try:
+        _fts_schema(conn)
+        _fts_sync(conn, root, stat)
+        order: list[str] = []
+        hits: dict[str, int] = {}
+        scores: dict[str, float] = {}
+        for path, score in conn.execute(
+                "SELECT path, bm25(session_fts) AS score FROM session_fts "
+                "WHERE session_fts MATCH ? AND root=? ORDER BY score",
+                (expr, root)):
+            if path in hits:
+                hits[path] += 1
+            else:
+                hits[path] = 1
+                scores[path] = score
+                order.append(path)
+        return [(p, hits[p], scores[p]) for p in order]
+    finally:
+        conn.close()
+
+
+def _fts_lookup(directory: str | Path, files: list[tuple[Path, str]],
+                qf: str) -> tuple[list[tuple[Path, str, int, int, int,
+                                            float]] | None, str]:
+    """FTS5 search for the casefolded `qf` over `files` [(path, id)]:
+    -> ([ (path, id, when, size, hits, score) ... ] best-first, "") on
+    success, or (None, reason) when list_sessions must degrade to the
+    substring scan. reason ∈ fts5_unavailable | unindexable_query |
+    index_unusable. Fail-soft by design: ANY failure degrades, never raises."""
+    global _FTS5_AVAILABLE
+    if not _FTS5_AVAILABLE:
+        return None, "fts5_unavailable"
+    expr = _fts_expr(qf)
+    if expr is None:
+        return None, "unindexable_query"
+    root = os.path.abspath(str(directory))
+    stat: dict[str, tuple[int, int]] = {}
+    info: dict[str, tuple[str, int, int]] = {}
+    for path, sid in files:
+        try:
+            st = path.stat()
+        except OSError:                     # vanished after the listing
+            continue
+        ap = os.path.abspath(str(path))
+        stat[ap] = (int(st.st_mtime * 1000), st.st_size)
+        info[ap] = (sid, int(st.st_mtime), st.st_size)
+    rebuilt = False
+    while True:                             # at most: plain → after rebuild
+        try:
+            matched = _fts_attempt(directory, root, stat, expr)
+            break
+        except sqlite3.OperationalError as e:
+            if "fts5" in str(e).lower():   # no such module: fts5 → honest
+                _FTS5_AVAILABLE = False    # permanent degradation this run
+                return None, "fts5_unavailable"
+            if rebuilt:
+                return None, "index_unusable"
+            rebuilt = True
+            _fts_drop_index(directory)      # corrupt/locked → rebuild once
+        except (sqlite3.Error, OSError):
+            if rebuilt:
+                return None, "index_unusable"
+            rebuilt = True
+            _fts_drop_index(directory)
+    rows: list[tuple[Path, str, int, int, int, float]] = []
+    for ap, hits, score in matched:
+        if ap not in info or not os.path.isfile(ap):
+            continue        # deleted between sync and now — never surface
+        sid, when, size = info[ap]
+        rows.append((Path(ap), sid, when, size, hits, score))
+    rows.sort(key=lambda r: (r[5], -r[2]))  # BM25 best first, ties newest
+    return rows, ""
+
+
 def list_sessions(directory: str | Path, *, q: str | None = None,
                   limit: int = LIST_LIMIT_DEFAULT) -> dict:
-    """X13 read face: session rows newest-first.
+    """X13 read face: session rows.
 
-    Row: {id, when (mtime epoch), size, summary[, hits, partial]}. `q` is a
-    case-insensitive SUBSTRING scan over message text — honestly labelled in
-    the result (`search.method: "substring"`): there is no full-text index and
-    we never claim one. `count` = matched total (rows returned may be fewer;
-    `truncated` says so). Fail-soft: an unreadable file becomes a missing row,
-    never a raised error."""
+    Without `q`: newest-first rows {id, when, size, summary[, partial]},
+    `count` = all sessions and NO `search` key (contract unchanged).
+
+    With `q` (casefolded by the caller's contract): REAL FTS5 full-text
+    search — rows in BM25 order, `hits` = matching messages, and an honest
+    search block `{q, method:"fts5", engine:"fts5", fallback:false,
+    case_insensitive:true}`; any degradation runs the original substring
+    scan and says so instead (`method:"substring", fallback:true,
+    reason:...`). `count` = matched sessions (rows returned may be fewer;
+    `truncated` says so). Fail-soft: an unreadable file becomes a missing
+    row, never a raised error."""
     try:
         limit = int(limit)
     except (TypeError, ValueError):
@@ -257,32 +477,57 @@ def list_sessions(directory: str | Path, *, q: str | None = None,
     qf = str(q).casefold() if q else None
     files = _session_files(directory)
     files.sort(key=lambda pair: _mtime(pair[0]), reverse=True)
-    rows: list[dict] = []
-    matched = 0
-    for path, sid in files:
-        docs, partial = _scan_docs(path)
-        if qf is not None:
+
+    if qf is None:
+        rows: list[dict] = []
+        for path, sid in files:
+            if len(rows) >= limit:
+                break
+            docs, partial = _scan_docs(path)
+            row: dict = {"id": sid, "when": _mtime(path), "size": _size(path),
+                         "summary": _summary_of(docs)}
+            if partial:
+                row["partial"] = True
+            rows.append(row)
+        return {"sessions": rows, "count": len(files),
+                "truncated": len(files) > len(rows), "limit": limit}
+
+    matched, reason = _fts_lookup(directory, files, qf)
+    rows = []
+    if matched is not None:
+        search: dict = {"q": str(q), "method": "fts5", "engine": "fts5",
+                        "fallback": False, "case_insensitive": True}
+        count = len(matched)
+        for path, sid, when, size, hits, _score in matched[:limit]:
+            docs, partial = _scan_docs(path)
+            row = {"id": sid, "when": when, "size": size,
+                   "summary": _summary_of(docs)}
+            if partial:
+                row["partial"] = True
+            row["hits"] = hits
+            rows.append(row)
+    else:
+        # honest degradation: the original substring scan, labelled as such
+        search = {"q": str(q), "method": "substring", "fallback": True,
+                  "case_insensitive": True, "reason": reason}
+        count = 0
+        for path, sid in files:
+            docs, partial = _scan_docs(path)
             hits = sum(1 for d in docs if qf in _msg_text(d).casefold())
             if not hits:
                 continue
-        else:
-            hits = 0
-        matched += 1
-        if len(rows) >= limit:
-            continue
-        row: dict = {"id": sid, "when": _mtime(path), "size": _size(path),
-                     "summary": _summary_of(docs)}
-        if partial:
-            row["partial"] = True
-        if qf is not None:
+            count += 1
+            if len(rows) >= limit:
+                continue
+            row = {"id": sid, "when": _mtime(path), "size": _size(path),
+                   "summary": _summary_of(docs)}
+            if partial:
+                row["partial"] = True
             row["hits"] = hits
-        rows.append(row)
-    out: dict = {"sessions": rows, "count": matched,
-                 "truncated": matched > len(rows), "limit": limit}
-    if qf is not None:
-        out["search"] = {"q": str(q), "method": "substring",
-                         "case_insensitive": True}
-    return out
+            rows.append(row)
+    return {"sessions": rows, "count": count,
+            "truncated": count > len(rows), "limit": limit,
+            "search": search}
 
 
 def _mtime(path: Path) -> int:
