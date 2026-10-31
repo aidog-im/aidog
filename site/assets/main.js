@@ -19,6 +19,47 @@
   var dicts = {};           // cache: lang -> {key: value}
   var reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
+  /* ------------------------------------------------- guilloche --- */
+  /* Engraved signature pattern of the Draft E skin: a hypotrochoid rosette
+     turned into an SVG path (fill none, hairline stroke) and used for the
+     hero halo, the horizontal band, the certificate watermark and the seal. */
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  function rosette(n, R, d, turns) {
+    var r = R / (n + 1), g = R - r, pts = [], i, t;
+    for (i = 0; i <= 1800; i++) {
+      t = i / 1800 * Math.PI * 2 * turns;
+      pts.push((g * Math.cos(t) + d * Math.cos(n * t)).toFixed(2) + "," +
+        (g * Math.sin(t) - d * Math.sin(n * t)).toFixed(2));
+    }
+    return "M" + pts.join("L");
+  }
+  function addPath(parent, d, animate) {
+    var p = document.createElementNS(SVG_NS, "path");
+    p.setAttribute("d", d);
+    p.setAttribute("fill", "none");
+    p.setAttribute("stroke", "currentColor");
+    p.setAttribute("stroke-width", ".7");
+    p.setAttribute("vector-effect", "non-scaling-stroke");
+    parent.appendChild(p);
+    if (animate && !reduced) {
+      var L = p.getTotalLength();
+      p.style.strokeDasharray = String(L);
+      p.style.strokeDashoffset = String(L);
+      requestAnimationFrame(function () {
+        p.style.transition = "stroke-dashoffset 2.4s cubic-bezier(.2,.7,.2,1)";
+        p.style.strokeDashoffset = "0";
+      });
+    }
+    return p;
+  }
+  function svgEl(name, attrs) {
+    var el = document.createElementNS(SVG_NS, name), k;
+    for (k in attrs) {
+      if (Object.prototype.hasOwnProperty.call(attrs, k)) el.setAttribute(k, attrs[k]);
+    }
+    return el;
+  }
+
   /* ---------------------------------------------------------- i18n --- */
   function loadDict(l) {
     if (dicts[l]) return Promise.resolve(dicts[l]);
@@ -108,6 +149,179 @@
   var track = document.getElementById("factTrack");
   if (track) track.innerHTML += track.innerHTML; // seamless -50% loop
 
+  /* ------------------------------------- engraved graphics (Draft E) --- */
+  // hero halo: three concentric rosettes that draw themselves in
+  (function () {
+    var halo = document.getElementById("halo");
+    if (!halo) return;
+    [[17, 150, 42, 1], [13, 124, 34, 1], [9, 98, 26, 1]].forEach(function (a, i) {
+      var p = addPath(halo, rosette(a[0], a[1], a[2], a[3]), true);
+      p.style.transitionDelay = (i * 0.28) + "s";
+    });
+  })();
+
+  // horizontal banknote band under the hero
+  (function () {
+    var band = document.getElementById("band1");
+    if (!band) return;
+    var out = "", k, x, pts, y;
+    for (k = 0; k < 7; k++) {
+      pts = [];
+      for (x = 0; x <= 1440; x += 8) {
+        y = 17 + Math.sin(x / 58 + k * Math.PI / 7) * (7.4 - k * 0.55) *
+          Math.sin(x / 1440 * Math.PI);
+        pts.push(x.toFixed(0) + "," + y.toFixed(2));
+      }
+      out += '<path d="M' + pts.join("L") + '" fill="none" stroke="currentColor"' +
+        ' stroke-width=".6" opacity="' + (0.85 - k * 0.08).toFixed(2) + '"/>';
+    }
+    band.innerHTML = out;
+  })();
+
+  // the watch: one continuous engraved rail, lit by scroll (nodes are
+  // visible by default — scrolling only lights the marks up).
+  // Geometry comes from the live layout instead of a fixed viewBox: the rail
+  // runs through the node centres and every mark is stitched to the line by a
+  // short horizontal rule, so the connection reads at any viewport width.
+  (function () {
+    var rail = document.getElementById("rail");
+    var spine = document.getElementById("spine");
+    if (!rail || !spine) return;
+    var beats = Array.prototype.slice.call(spine.querySelectorAll(".beat"));
+    var drawPath = null, len = 0, prog = 0, conns = [];
+
+    function geom() {
+      var box = spine.getBoundingClientRect();
+      var W = Math.round(box.width), H = Math.round(box.height);
+      if (!W || !H) return false;
+      rail.setAttribute("viewBox", "0 0 " + W + " " + H);
+      while (rail.firstChild) rail.removeChild(rail.firstChild);
+      conns = [];
+      var pts = [];
+      beats.forEach(function (b) {
+        var n = b.querySelector(".node"), c = b.querySelector(".beat-card");
+        if (!n || !c) return;
+        var nb = n.getBoundingClientRect(), cb = c.getBoundingClientRect();
+        pts.push({ x: nb.left - box.left + nb.width / 2,
+          y: nb.top - box.top + nb.height / 2,
+          l: cb.left - box.left, r: cb.right - box.left, beat: b });
+      });
+      if (!pts.length) return false;
+
+      // card edge -> node centre: the stitch that ties each mark to the line
+      pts.forEach(function (pt) {
+        var ln = null;
+        if (pt.r <= pt.x + 1) {
+          ln = svgEl("line", { x1: pt.r, y1: pt.y, x2: pt.x, y2: pt.y });
+        } else if (pt.l >= pt.x - 1) {
+          ln = svgEl("line", { x1: pt.x, y1: pt.y, x2: pt.l, y2: pt.y });
+        }
+        if (ln) {
+          ln.setAttribute("stroke", "#a5b7ca");
+          ln.setAttribute("stroke-width", "1");
+          rail.appendChild(ln);
+          conns.push({ el: ln, beat: pt.beat });
+        }
+      });
+
+      // one path through every node, bulging alternately like an engraved line
+      var d = "M" + pts[0].x.toFixed(1) + " 0 L" + pts[0].x.toFixed(1) + " " +
+        pts[0].y.toFixed(1), side = 1, i, p, q, dy, room, s, amp;
+      for (i = 1; i < pts.length; i++) {
+        p = pts[i - 1]; q = pts[i]; dy = q.y - p.y;
+        s = side;
+        room = s > 0 ? (W - p.x - 8) : (p.x - 8);
+        if (room < 12) {
+          s = -s;
+          room = s > 0 ? (W - p.x - 8) : (p.x - 8);
+        }
+        amp = Math.min(34, Math.max(8, room));
+        d += " C" + (p.x + s * amp).toFixed(1) + " " +
+          (p.y + dy * 0.34).toFixed(1) + " " + (q.x - s * amp).toFixed(1) + " " +
+          (p.y + dy * 0.66).toFixed(1) + " " + q.x.toFixed(1) + " " +
+          q.y.toFixed(1);
+        side = -side;
+      }
+      d += " L" + pts[pts.length - 1].x.toFixed(1) + " " + H;
+
+      rail.appendChild(svgEl("path", { d: d, fill: "none", stroke: "#a5b7ca",
+        "stroke-width": "1.2" }));
+      drawPath = svgEl("path", { d: d, fill: "none", stroke: "#2892ff",
+        "stroke-width": "1.6", "stroke-linecap": "round" });
+      rail.appendChild(drawPath);
+      len = drawPath.getTotalLength();
+      drawPath.style.strokeDasharray = String(len);
+      drawPath.style.strokeDashoffset = reduced ? "0" : String(len * (1 - prog));
+      return true;
+    }
+
+    function light() {
+      var box = spine.getBoundingClientRect();
+      var span = box.height * 0.82 || 1;
+      prog = Math.min(1, Math.max(0,
+        (window.innerHeight * 0.72 - box.top) / span));
+      if (drawPath && !reduced) {
+        drawPath.style.strokeDashoffset = String(len * (1 - prog));
+      }
+      beats.forEach(function (b) {
+        b.classList.toggle("on", b.getBoundingClientRect().top <
+          window.innerHeight * 0.68);
+      });
+      conns.forEach(function (c) {
+        c.el.setAttribute("stroke", c.beat.classList.contains("on") ?
+          "#2892ff" : "#a5b7ca");
+      });
+    }
+
+    function rebuild() { if (geom()) light(); }
+    var rt;
+    window.addEventListener("scroll", light, { passive: true });
+    window.addEventListener("resize", function () {
+      clearTimeout(rt); rt = setTimeout(rebuild, 150);
+    });
+    window.addEventListener("load", rebuild);
+    rebuild();
+  })();
+
+  // certificate watermark + free seal
+  (function () {
+    var wm = document.getElementById("certWm");
+    if (wm) {
+      addPath(wm, rosette(19, 140, 40, 1), false);
+      addPath(wm, rosette(11, 104, 30, 1), false);
+    }
+    var seal = document.getElementById("certSeal");
+    if (!seal) return;
+    seal.appendChild(svgEl("circle", { r: "140", fill: "none",
+      stroke: "currentColor", "stroke-width": "1" }));
+    addPath(seal, rosette(15, 126, 36, 1), true);
+    addPath(seal, rosette(9, 84, 24, 1), true);
+    seal.appendChild(svgEl("circle", { r: "46", fill: "none",
+      stroke: "currentColor", "stroke-width": "1" }));
+    var txt = svgEl("text", { "text-anchor": "middle", y: "7", "font-size": "30",
+      fill: "currentColor", "font-family": "Georgia, serif" });
+    txt.textContent = "free";
+    seal.appendChild(txt);
+  })();
+
+  // the portrait is present, not printed: the plate follows the cursor
+  (function () {
+    var wrapEl = document.querySelector(".plate-wrap");
+    var plateEl = document.getElementById("plate");
+    if (!wrapEl || !plateEl || reduced) return;
+    if (!window.matchMedia || !window.matchMedia("(pointer: fine)").matches) return;
+    wrapEl.addEventListener("pointermove", function (e) {
+      var r = wrapEl.getBoundingClientRect();
+      var x = (e.clientX - r.left) / r.width - 0.5;
+      var y = (e.clientY - r.top) / r.height - 0.5;
+      plateEl.style.transform = "rotateY(" + (x * 7).toFixed(2) +
+        "deg) rotateX(" + (-y * 7).toFixed(2) + "deg)";
+    });
+    wrapEl.addEventListener("pointerleave", function () {
+      plateEl.style.transform = "";
+    });
+  })();
+
   /* --------------------------------------------------- droplet field -- */
   /* Falling teardrops over the hero: soft blue/cyan drops drifting upward
      like bubbles in water — the logo's water-drop motif, canvas edition. */
@@ -144,8 +358,24 @@
         x, y - r * 1.7);
       ctx.closePath();
     }
+    /* engraved wave field: the paper's guilloche under-layer, painted on
+       every frame so the canvas always carries ink (gate: non-transparent) */
+    function engraveField() {
+      ctx.lineWidth = 1;
+      for (var k = 0; k < 7; k++) {
+        ctx.beginPath();
+        for (var ex = 0; ex <= w; ex += 12) {
+          var ey = h * (0.12 + k * 0.13) + Math.sin(ex / 90 + k * 1.7) * 14 *
+            Math.sin((ex / (w || 1)) * Math.PI);
+          if (ex === 0) ctx.moveTo(ex, ey); else ctx.lineTo(ex, ey);
+        }
+        ctx.strokeStyle = "rgba(0,22,51," + (0.05 + k * 0.011).toFixed(3) + ")";
+        ctx.stroke();
+      }
+    }
     function draw(t) {
       ctx.clearRect(0, 0, w, h);
+      engraveField();
       for (var i = 0; i < drops.length; i++) {
         var d = drops[i];
         var sway = reduced ? 0 : Math.sin(t / 1400 + d.p) * 6;
@@ -245,11 +475,19 @@
   /* --------------------------------------------- visits counter --- */
   /* Footer page-view counter: GET /api/visits once per page load. Every
      load counts (refreshes and crawlers included — approximate by design).
-     If the endpoint is missing, fails, or returns a non-numeric count, the
-     whole block stays hidden: never render a fabricated number. */
+     The endpoint only exists on the deployed site; the local static preview
+     server has no /api/visits route, so loopback hosts skip the probe (a 404
+     there would only pollute the console). If the endpoint is missing, fails,
+     or returns a non-numeric count, the whole block stays hidden: never
+     render a fabricated number. */
   var vw = document.getElementById("visitsWrap");
   var vc = document.getElementById("visits");
-  if (vw && vc) {
+  function loopbackHost() {
+    var h = location.hostname;
+    return !h || h === "127.0.0.1" || h === "localhost" ||
+      h === "[::1]" || h === "::1";
+  }
+  if (vw && vc && !loopbackHost()) {
     fetch("/api/visits", { cache: "no-store" })
       .then(function (r) { if (!r.ok) throw new Error("http " + r.status); return r.json(); })
       .then(function (d) {

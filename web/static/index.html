@@ -185,6 +185,62 @@
           </div>
           <div class="reason-list" id="reasonList"></div>
         </div>
+
+        <!-- Draft E signature card: hold-to-seal authority preview + four
+             guilloche medallions. Honest by contract: this card previews a
+             gesture only — it never claims a live service or an executed
+             action (all copy lives in the locale packs, auth.*). -->
+        <div class="card span-3" id="authCard">
+          <h2><span data-i18n="auth.title">Your authority</span>
+              <span class="auth-stamp" data-i18n="auth.stamp">Preview · no live service</span></h2>
+          <div class="auth-cols">
+            <div class="auth-seal">
+              <p class="auth-lead" data-i18n="auth.lead">Hold the seal to authorise a read-only review preview. This preview does not connect to any service, sends nothing and executes nothing.</p>
+              <button class="sealbtn" id="authSeal" type="button"
+                      data-i18n-t="auth.sealTip" title="Hold to authorise a read-only preview">
+                <svg viewBox="-110 -110 220 220" id="authSealSvg" aria-hidden="true"></svg>
+                <span class="cap">
+                  <b id="authSealLabel" data-i18n="auth.holdLabel">Hold to seal</b>
+                  <span id="authSealSub" data-i18n="auth.holdSub">1.2s · read-only preview</span>
+                </span>
+              </button>
+              <div class="auth-hint" id="authHint" data-i18n="auth.hintIdle">Press and hold · release early to cancel</div>
+              <div class="auth-result" id="authResult">
+                <b data-i18n="auth.resultTitle">Sealed · read-only preview</b>
+                <span data-i18n="auth.resultBody">Authorised locally for this preview only. It does not connect to a service and executes no action; in the product a real write still requires its own human approval every time.</span>
+              </div>
+            </div>
+            <div class="auth-meds">
+              <div class="meds" id="authMeds">
+                <button class="med on" type="button" data-med="situation">
+                  <svg viewBox="-100 -100 200 200" aria-hidden="true"></svg>
+                  <span class="n" data-i18n="auth.med.situation.name">Situation</span>
+                  <span class="d" data-i18n="auth.med.situation.desc">local watch</span>
+                </button>
+                <button class="med" type="button" data-med="memory">
+                  <svg viewBox="-100 -100 200 200" aria-hidden="true"></svg>
+                  <span class="n" data-i18n="auth.med.memory.name">Memory</span>
+                  <span class="d" data-i18n="auth.med.memory.desc">portable</span>
+                </button>
+                <button class="med" type="button" data-med="constitution">
+                  <svg viewBox="-100 -100 200 200" aria-hidden="true"></svg>
+                  <span class="n" data-i18n="auth.med.constitution.name">Constitution</span>
+                  <span class="d" data-i18n="auth.med.constitution.desc">binding</span>
+                </button>
+                <button class="med" type="button" data-med="authority">
+                  <svg viewBox="-100 -100 200 200" aria-hidden="true"></svg>
+                  <span class="n" data-i18n="auth.med.authority.name">Authority</span>
+                  <span class="d" data-i18n="auth.med.authority.desc">always yours</span>
+                </button>
+              </div>
+              <div class="readout" id="authReadout">
+                <span class="lbl" id="authReadoutLbl" data-i18n="auth.med.situation.name">Situation</span>
+                <span id="authReadoutBody" data-i18n="auth.med.situation.body">Everything I watch stays on this machine. Signals are gathered locally, compared against your baselines, and never shipped to a third party.</span>
+              </div>
+            </div>
+          </div>
+          <div class="auth-toast" id="authToast" role="status"></div>
+        </div>
       </div>
     </section>
 

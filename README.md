@@ -180,8 +180,8 @@ Every release is cut only after these run green on a clean tree:
 | Publish gate (deny-by-default manifest) | **READY** |
 | Real-machine E2E | profiles **18/18** · channels **8/8** · domestic channels **44/44** · pipeline **35/35** |
 
-Locale packs: `en` (default) + `zh`, **285 keys** each, parity lint in CI;
-the marketing site ships its own **121-key** bilingual pack.
+Locale packs: `en` (default) + `zh`, **314 keys** each, parity lint in CI;
+the marketing site ships its own **165-key** bilingual pack.
 
 ## Documentation
 

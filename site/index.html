@@ -9,7 +9,7 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="assets/icons/apple-touch-icon.png">
 <meta name="theme-color" content="#2892ff">
-<link rel="stylesheet" href="assets/style.css?v=20261024">
+<link rel="stylesheet" href="assets/style.css?v=20261025">
 </head>
 <body>
 
@@ -39,18 +39,10 @@
 <!-- ============================================ HERO -->
 <section class="hero" id="home">
   <canvas class="hero-drops" id="drops" aria-hidden="true"></canvas>
-  <div class="hero-glow" aria-hidden="true"></div>
   <div class="hero-inner">
-    <div class="hero-orb reveal">
-      <span class="orb-ring orb-ring-a" aria-hidden="true"></span>
-      <span class="orb-ring orb-ring-b" aria-hidden="true"></span>
-      <span class="orb-drop od-1" aria-hidden="true"></span>
-      <span class="orb-drop od-2" aria-hidden="true"></span>
-      <span class="orb-drop od-3" aria-hidden="true"></span>
-      <img src="assets/logo.jpg" alt="I'm AiDog logo" class="orb-img" data-i18n-alt="brand.logoAlt">
-    </div>
+    <div class="hero-copy">
     <p class="hero-kicker reveal" data-i18n="hero.kicker">PERSONAL · EMBODIED · LOCAL-FIRST</p>
-    <h1 class="hero-title reveal"><span data-i18n="hero.title1">I'm AiDog</span><span class="grad" data-i18n="hero.title2">grown for one, built for anyone</span></h1>
+    <h1 class="hero-title reveal"><span data-i18n="hero.title1">I'm AiDog</span><span class="hero-title-sub" data-i18n="hero.title2">grown for one, built for anyone</span></h1>
     <p class="hero-sub reveal" data-i18n="hero.sub">A personal embodied AI — a constitution for a personality, curated memory for a life, and a self-developed core that answers to you alone. Not a platform. Not an assistant farm. One companion, grown for one person, engineered so anyone can run it.</p>
     <div class="hero-badges reveal">
       <span class="badge badge-free"><span class="pulse-dot" aria-hidden="true"></span><span data-i18n="hero.badgeFree">PERMANENTLY FREE — forever, no exceptions</span></span>
@@ -60,6 +52,23 @@
     <div class="hero-cta reveal">
       <a class="btn btn-primary" href="#start" data-i18n="hero.ctaStart">Get Started</a>
       <a class="btn btn-ghost" href="https://github.com/aidog-im/aidog" target="_blank" rel="noopener" data-i18n="hero.ctaGithub">View on GitHub</a>
+    </div>
+    </div><!-- /hero-copy -->
+
+    <div class="plate-wrap reveal">
+      <svg class="halo" id="halo" viewBox="-160 -160 320 320" aria-hidden="true"></svg>
+      <div class="plate" id="plate">
+        <svg class="corner c1" viewBox="0 0 40 40" aria-hidden="true"><path d="M1 39V13C1 6 6 1 13 1h26" fill="none" stroke="currentColor"/><path d="M7 33c0-14 12-26 26-26" fill="none" stroke="currentColor"/><circle cx="13" cy="13" r="3" fill="none" stroke="currentColor"/></svg>
+        <svg class="corner c2" viewBox="0 0 40 40" aria-hidden="true"><path d="M1 39V13C1 6 6 1 13 1h26" fill="none" stroke="currentColor"/><path d="M7 33c0-14 12-26 26-26" fill="none" stroke="currentColor"/><circle cx="13" cy="13" r="3" fill="none" stroke="currentColor"/></svg>
+        <svg class="corner c3" viewBox="0 0 40 40" aria-hidden="true"><path d="M1 39V13C1 6 6 1 13 1h26" fill="none" stroke="currentColor"/><path d="M7 33c0-14 12-26 26-26" fill="none" stroke="currentColor"/><circle cx="13" cy="13" r="3" fill="none" stroke="currentColor"/></svg>
+        <svg class="corner c4" viewBox="0 0 40 40" aria-hidden="true"><path d="M1 39V13C1 6 6 1 13 1h26" fill="none" stroke="currentColor"/><path d="M7 33c0-14 12-26 26-26" fill="none" stroke="currentColor"/><circle cx="13" cy="13" r="3" fill="none" stroke="currentColor"/></svg>
+        <img src="assets/logo.jpg" alt="I'm AiDog logo" class="orb-img" width="1192" height="1167" data-i18n-alt="brand.logoAlt">
+        <div class="plate-cap"><span data-i18n="hero.fig">Fig. 01 — the body</span><span>1192 × 1167</span></div>
+      </div>
+      <span class="orb-drop od-1" aria-hidden="true"></span>
+      <span class="orb-drop od-2" aria-hidden="true"></span>
+      <span class="orb-drop od-3" aria-hidden="true"></span>
+      <div class="watching"><i class="led" aria-hidden="true"></i><span data-i18n="hero.watch">keeping watch</span></div>
     </div>
   </div>
   <div class="fact-strip" aria-label="verified facts">
@@ -71,6 +80,53 @@
       <span class="fact"><b>58/58</b> <span data-i18n="facts.memory">memory suite</span></span>
       <span class="fact"><b>0F/0W</b> <span data-i18n="facts.doctor">doctor check</span></span>
       <span class="fact"><b>en / zh</b> <span data-i18n="facts.i18n">locale packs</span></span>
+    </div>
+  </div>
+</section>
+
+<div class="engrave-rule" aria-hidden="true"><svg class="guilloche" id="band1" viewBox="0 0 1440 34" preserveAspectRatio="none"></svg></div>
+
+<!-- ============================================ THE WATCH (engraved spine) -->
+<section class="section" id="watch">
+  <div class="section-head watch-head">
+    <span class="watch-eyebrow" data-i18n="watch.eyebrow">The engraved watch</span>
+    <h2 data-i18n="watch.title">Four marks on one continuous line.</h2>
+    <p class="section-sub" data-i18n="watch.sub">Most assistants begin when you speak. AiDog begins by holding context — then noticing, weighing, preparing, and stopping where your authority starts.</p>
+  </div>
+
+  <div class="spine" id="spine">
+    <svg class="rail" id="rail" viewBox="0 0 150 900" preserveAspectRatio="none" aria-hidden="true"></svg>
+    <div class="beat beat-left">
+      <div class="beat-card">
+        <span class="beat-num" data-i18n="watch.b1n">01 / SENSE</span>
+        <h3 data-i18n="watch.b1t">Read the room</h3>
+        <p data-i18n="watch.b1b">Heartbeats, memory, releases, cost — the signals that belong to your world, gathered without you asking.</p>
+      </div>
+      <i class="node" aria-hidden="true"></i>
+    </div>
+    <div class="beat beat-right">
+      <div class="beat-card">
+        <span class="beat-num" data-i18n="watch.b2n">02 / COUNSEL</span>
+        <h3 data-i18n="watch.b2t">Know which changes matter</h3>
+        <p data-i18n="watch.b2b">Most drift is noise. The rare ones arrive with a reason, a severity, and a sentence you can act on.</p>
+      </div>
+      <i class="node" aria-hidden="true"></i>
+    </div>
+    <div class="beat beat-left">
+      <div class="beat-card">
+        <span class="beat-num" data-i18n="watch.b3n">03 / PROTOCOL</span>
+        <h3 data-i18n="watch.b3t">Prepare a reversible move</h3>
+        <p data-i18n="watch.b3b">A diff, a plan, a way back. Prepared in full, executed by no one until you say so.</p>
+      </div>
+      <i class="node" aria-hidden="true"></i>
+    </div>
+    <div class="beat beat-right">
+      <div class="beat-card">
+        <span class="beat-num" data-i18n="watch.b4n">04 / RECOVER</span>
+        <h3 data-i18n="watch.b4t">Stay yourself, anywhere</h3>
+        <p data-i18n="watch.b4b">Constitution, memory and skills travel with you. No single machine gets to hold your dog hostage.</p>
+      </div>
+      <i class="node" aria-hidden="true"></i>
     </div>
   </div>
 </section>
@@ -260,6 +316,28 @@
     </div>
   </div>
 
+  <div class="counsel">
+    <div class="counsel-intro">
+      <span class="counsel-eyebrow" data-i18n="counsel.eyebrow">A moment in the day</span>
+      <h3 class="counsel-title" data-i18n="counsel.title">Quiet until it isn't.</h3>
+      <p data-i18n="counsel.sub">A notification tells you something changed. A counsel tells you why it matters, what it would do, and where your say begins.</p>
+      <p class="counsel-note" data-i18n="counsel.note">Preview only · no live service · nothing sent</p>
+    </div>
+    <article class="letter">
+      <i class="letter-notch" aria-hidden="true"></i>
+      <div class="letter-head">
+        <span data-i18n="counsel.headLeft">Counsel · 09:14</span>
+        <span class="letter-flag" data-i18n="counsel.headRight">Needs your word</span>
+      </div>
+      <h4 class="letter-title" data-i18n="counsel.letterTitle">Sir, the picture has shifted slightly.</h4>
+      <p class="letter-body" data-i18n="counsel.letterBody">Two deployment checks no longer match yesterday's baseline. The last release completed cleanly and no outage signal is present, so I have not treated this as urgent — but it will matter before your next deployment. I have prepared a review of the diff and a way back. Nothing has been sent, changed, or scheduled.</p>
+      <div class="letter-sign">
+        <div><span class="sign-label" data-i18n="counsel.awaitLabel">Awaiting</span><span class="sign-name" data-i18n="counsel.awaitName">your authority</span></div>
+        <span class="sign-flag" data-i18n="counsel.noAction">No action taken</span>
+      </div>
+    </article>
+  </div>
+
   <div class="feature-grid reveal">
     <div class="feature"><h4 data-i18n="console.f1T">Five panels, one glance</h4><p data-i18n="console.f1B">Status, settings, usage, events and voice — a situational console, not a admin warehouse.</p></div>
     <div class="feature"><h4 data-i18n="console.f2T">Zero-dependency local server</h4><p data-i18n="console.f2B">Serves on 127.0.0.1 with plain standard library code; write operations require your local access token.</p></div>
@@ -351,6 +429,28 @@
       <p data-i18n="security.s6B">Permanently free — no paid tier, no in-app purchase, no usage fee, ever.</p>
     </div>
   </div>
+
+  <div class="cert">
+    <svg class="cert-wm" id="certWm" viewBox="-150 -150 300 300" aria-hidden="true"></svg>
+    <div class="cert-head">
+      <span class="cert-eyebrow" data-i18n="cert.eyebrow">Certificate of custody</span>
+      <h3 class="cert-title" data-i18n="cert.title">What it may never do to you.</h3>
+      <p class="cert-sub" data-i18n="cert.sub">Power is only useful when you can see why it moved, stop it, and take it with you. These are not settings — they are the terms of the relationship.</p>
+    </div>
+    <div class="cert-lines">
+      <div class="cline"><span class="cline-lab" data-i18n="cert.l1lab">Your credentials</span><i class="cline-dots" aria-hidden="true"></i><span class="cline-val" data-i18n="cert.l1val">never echoed, anywhere</span></div>
+      <div class="cline"><span class="cline-lab" data-i18n="cert.l2lab">Consequential writes</span><i class="cline-dots" aria-hidden="true"></i><span class="cline-val" data-i18n="cert.l2val">human approval required</span></div>
+      <div class="cline"><span class="cline-lab" data-i18n="cert.l3lab">Your memory & constitution</span><i class="cline-dots" aria-hidden="true"></i><span class="cline-val" data-i18n="cert.l3val">portable · recoverable</span></div>
+      <div class="cline"><span class="cline-lab" data-i18n="cert.l4lab">Your data</span><i class="cline-dots" aria-hidden="true"></i><span class="cline-val" data-i18n="cert.l4val">local-first, loopback only</span></div>
+    </div>
+    <div class="cert-final">
+      <svg class="cert-seal" id="certSeal" viewBox="-150 -150 300 300" aria-hidden="true"></svg>
+      <div>
+        <p class="cert-big" data-i18n="cert.free">Free, permanently.</p>
+        <p class="cert-body" data-i18n="cert.freeBody">No paid tier, no usage fee, no feature gate. One dog, one owner — not a platform that grows to need your money.</p>
+      </div>
+    </div>
+  </div>
 </section>
 
 <!-- ============================================ ARCHITECTURE -->
@@ -385,9 +485,12 @@
 
 <footer class="footer">
   <div class="footer-inner">
-    <div class="footer-brand">
-      <img src="assets/logo.jpg" alt="" width="26" height="26">
-      <span>© <span id="year">2026</span> I'm AiDog</span>
+    <div class="footer-top">
+      <p class="footer-big"><span data-i18n="footer.taglineA">Not a platform.</span><br><span data-i18n="footer.taglineB">A dog that knows you.</span></p>
+      <div class="footer-brand">
+        <img src="assets/logo.jpg" alt="" width="28" height="28">
+        <span>© <span id="year">2026</span> I'm AiDog</span>
+      </div>
     </div>
     <div class="footer-links">
       <span class="footer-free" data-i18n="footer.free">permanently free</span>
@@ -395,9 +498,13 @@
       <span class="footer-dim" data-i18n="footer.aidogim">aidog.im</span>
       <span class="footer-dim visits-wrap" id="visitsWrap" hidden><span data-i18n="footer.views">Page views:</span> <span id="visits"></span></span>
     </div>
+    <div class="footer-fine">
+      <span data-i18n="footer.fine">Grown for one · built for anyone</span>
+      <span>aidog.im</span>
+    </div>
   </div>
 </footer>
 
-<script src="assets/main.js?v=20261024"></script>
+<script src="assets/main.js?v=20261025"></script>
 </body>
 </html>

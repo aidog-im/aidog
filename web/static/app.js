@@ -1703,3 +1703,289 @@ setInterval(refreshUsage, 60000);
 setInterval(refreshEvolution, 60000);
 setInterval(refreshEvents, 10000);
 setInterval(refreshVersion, 300000);
+
+/* ============================================================= *
+ *  Draft E — Counsel authority card (appended; skin layer).     *
+ *  Hold-to-seal preview gesture + four guilloche medallions.    *
+ *  Defensive by contract: every path guards missing elements,   *
+ *  nothing throws, and nothing ever claims a live service or an *
+ *  executed action. All visible strings come from the locale    *
+ *  packs (auth.* keys). English only in this file per the repo  *
+ *  source-language lint. Existing logic above is untouched.     *
+ * ============================================================= */
+(function () {
+  "use strict";
+
+  var HOLD_MS = 1200;                      // Draft E: 1.2s hold to seal
+  var SVGNS = "http://www.w3.org/2000/svg";
+  var MEDS = ["situation", "memory", "constitution", "authority"];
+  var RING_R = 44, RING_LEN = 2 * Math.PI * RING_R;
+
+  var card = document.getElementById("authCard");
+  var btn = document.getElementById("authSeal");
+  if (!card || !btn) return;               // skin layer: absent card = no-op
+
+  var svg = document.getElementById("authSealSvg");
+  var label = document.getElementById("authSealLabel");
+  var sub = document.getElementById("authSealSub");
+  var hint = document.getElementById("authHint");
+  var result = document.getElementById("authResult");
+  var toastEl = document.getElementById("authToast");
+  var meds = document.getElementById("authMeds");
+  var roLbl = document.getElementById("authReadoutLbl");
+  var roBody = document.getElementById("authReadoutBody");
+
+  /* locale lookup: same precedence as t(), fail-soft to the English fallback */
+  function L(key, fb) {
+    try {
+      if (typeof dict !== "undefined" && dict && dict[key] !== undefined) {
+        return dict[key];
+      }
+    } catch (e) { /* dict unavailable: fall through */ }
+    return fb || key;
+  }
+  function set(el, key, fb) { if (el) el.textContent = L(key, fb); }
+
+  var state = {
+    holding: false,
+    sealed: false,
+    startT: 0,
+    raf: 0,
+    p: 0,
+    labelKey: "auth.holdLabel",
+    subKey: "auth.holdSub",
+    hintKey: "auth.hintIdle",
+    toastTimer: 0
+  };
+
+  /* ---------------------------------------------------------- guilloche --
+     Hypotrochoid rosette n,R,d -> SVG path (fill none, stroke currentColor,
+     non-scaling-stroke), the Draft E signature engraving. */
+  function ros(n, R, d) {
+    var r = R / (n + 1), g = R - r, pts = [], i, tt, x, y;
+    for (i = 0; i <= 1400; i++) {
+      tt = i / 1400 * Math.PI * 2;
+      x = g * Math.cos(tt) + d * Math.cos(n * tt);
+      y = g * Math.sin(tt) - d * Math.sin(n * tt);
+      pts.push(x.toFixed(2) + "," + y.toFixed(2));
+    }
+    return "M" + pts.join("L");
+  }
+  function addPath(parent, d, sw) {
+    if (!parent) return null;
+    var p = document.createElementNS(SVGNS, "path");
+    p.setAttribute("d", d);
+    p.setAttribute("fill", "none");
+    p.setAttribute("stroke", "currentColor");
+    p.setAttribute("stroke-width", String(sw || 0.7));
+    p.setAttribute("vector-effect", "non-scaling-stroke");
+    p.setAttribute("class", "auth-guil");
+    parent.appendChild(p);
+    return p;
+  }
+  function addCircle(parent, r, sw, stroke, attrs) {
+    if (!parent) return null;
+    var c = document.createElementNS(SVGNS, "circle");
+    c.setAttribute("r", String(r));
+    c.setAttribute("fill", "none");
+    c.setAttribute("stroke", stroke);
+    c.setAttribute("stroke-width", String(sw));
+    var k;
+    for (k in attrs) {
+      if (Object.prototype.hasOwnProperty.call(attrs, k)) c.setAttribute(k, attrs[k]);
+    }
+    parent.appendChild(c);
+    return c;
+  }
+
+  /* medallion rosettes: one lace pattern per posture (Draft E params) */
+  if (meds) {
+    var svgs = meds.querySelectorAll("svg");
+    for (var mi = 0; mi < svgs.length; mi++) {
+      (function (s, k) {
+        addPath(s, ros(15 - k, 88, 26 - k * 3), 0.8);
+        addPath(s, ros(9 + k, 56, 18), 0.7);
+        addCircle(s, 22, 1, "currentColor", { class: "auth-med-core" });
+      })(svgs[mi], mi);
+    }
+  }
+
+  /* seal art: engraved rosettes + base ring + coral hold-progress ring */
+  var prog = null;
+  if (svg) {
+    addPath(svg, ros(17, 100, 30), 0.7);
+    addPath(svg, ros(11, 66, 20), 0.7);
+    addCircle(svg, RING_R, 3, "currentColor", { opacity: ".18" });
+    prog = addCircle(svg, RING_R, 3, "#e98667", {
+      class: "auth-prog", opacity: "1",
+      "stroke-linecap": "round", transform: "rotate(-90)"
+    });
+    if (prog) {
+      prog.style.strokeDasharray = String(RING_LEN);
+      prog.style.strokeDashoffset = String(RING_LEN);
+    }
+  }
+
+  /* ------------------------------------------------------------- toast --- */
+  function showToast(key) {
+    if (!toastEl || !key) return;
+    toastEl.textContent = L(key, "");
+    toastEl.classList.add("show");
+    clearTimeout(state.toastTimer);
+    state.toastTimer = setTimeout(function () {
+      toastEl.classList.remove("show");
+    }, 2600);
+  }
+
+  /* ------------------------------------------------------------- state --- */
+  function render() {
+    set(label, state.labelKey, "Hold to seal");
+    set(sub, state.subKey, "1.2s - read-only preview");
+    set(hint, state.hintKey, "Press and hold - release early to cancel");
+  }
+
+  function frame(ts) {
+    if (!state.holding) return;
+    if (!state.startT) state.startT = ts;
+    var p = Math.min(1, (ts - state.startT) / HOLD_MS);
+    state.p = p;
+    if (prog) prog.style.strokeDashoffset = String(RING_LEN * (1 - p));
+    if (p < 1) state.raf = requestAnimationFrame(frame);
+    else finish();
+  }
+
+  function begin(e) {
+    if (state.sealed || state.holding) return;
+    if (e && e.button !== undefined && e.button !== 0) return;  // primary only
+    if (e && e.preventDefault) e.preventDefault();
+    state.holding = true;
+    state.startT = 0;
+    state.p = 0;
+    state.labelKey = "auth.sealingLabel";
+    state.hintKey = "auth.hintHolding";
+    btn.classList.add("holding");
+    render();
+    cancelAnimationFrame(state.raf);
+    state.raf = requestAnimationFrame(frame);
+  }
+
+  function cancel() {
+    if (!state.holding) return;
+    state.holding = false;
+    cancelAnimationFrame(state.raf);
+    btn.classList.remove("holding");
+    var moved = state.p > 0;
+    state.p = 0;
+    if (prog) prog.style.strokeDashoffset = String(RING_LEN);
+    state.startT = 0;
+    state.labelKey = "auth.holdLabel";
+    state.hintKey = moved ? "auth.hintCancelled" : "auth.hintIdle";
+    render();
+    if (moved) showToast("auth.toastCancelled");
+  }
+
+  function finish() {
+    state.holding = false;
+    state.sealed = true;
+    state.p = 1;
+    cancelAnimationFrame(state.raf);
+    btn.classList.remove("holding");
+    btn.classList.add("sealed");
+    if (prog) prog.style.strokeDashoffset = "0";
+    state.labelKey = "auth.sealedLabel";
+    state.subKey = "auth.sealedSub";
+    state.hintKey = "auth.hintSealed";
+    if (result) result.classList.add("show");
+    render();
+    showToast("auth.toastSealed");
+  }
+
+  btn.addEventListener("pointerdown", begin);
+  btn.addEventListener("pointerup", cancel);
+  btn.addEventListener("pointerleave", cancel);
+  btn.addEventListener("pointercancel", cancel);
+  window.addEventListener("pointerup", cancel);   // release outside = cancel
+  window.addEventListener("pointercancel", cancel);
+  btn.addEventListener("keydown", function (e) {
+    if (e.key !== " " && e.key !== "Enter" && e.key !== "Spacebar") return;
+    if (e.repeat) return;
+    e.preventDefault();
+    begin(e);
+  });
+  btn.addEventListener("keyup", function (e) {
+    if (e.key !== " " && e.key !== "Enter" && e.key !== "Spacebar") return;
+    e.preventDefault();
+    cancel();
+  });
+
+  /* ------------------------------------------------- medallion readout --- */
+  function setReadout(key) {
+    if (MEDS.indexOf(key) < 0) key = "situation";
+    var lk = "auth.med." + key + ".name";
+    var bk = "auth.med." + key + ".body";
+    if (roLbl) {
+      roLbl.setAttribute("data-i18n", lk);
+      set(roLbl, lk, "");
+    }
+    if (roBody) {
+      roBody.setAttribute("data-i18n", bk);
+      set(roBody, bk, "");
+    }
+  }
+
+  if (meds) {
+    meds.addEventListener("click", function (e) {
+      var target = e && e.target ? e.target : null;
+      var m = target && target.closest ? target.closest(".med") : null;
+      if (!m || !meds.contains(m)) return;
+      var all = meds.querySelectorAll(".med");
+      for (var i = 0; i < all.length; i++) all[i].classList.remove("on");
+      m.classList.add("on");
+      setReadout(m.getAttribute("data-med") || "situation");
+    });
+  }
+
+  /* -------------------------------------------------- language follow -----
+     loadLang() re-translates static data-i18n nodes; this re-renders the
+     state-dependent labels (hint / seal caption) afterwards, so a language
+     swap mid-preview never leaves stale English strings behind. */
+  function applyLang() {
+    if (!card) return;
+    render();
+    var active = meds ? meds.querySelector(".med.on") : null;
+    setReadout(active ? (active.getAttribute("data-med") || "situation")
+                      : "situation");
+  }
+
+  try {
+    var origLoadLang = window.loadLang;
+    if (typeof origLoadLang === "function" && !window.__authLangHooked) {
+      window.__authLangHooked = true;
+      window.loadLang = function () {
+        var out = origLoadLang.apply(this, arguments);
+        if (out && typeof out.then === "function") {
+          return out.then(function (v) {
+            try { applyLang(); } catch (e) { /* never break i18n */ }
+            return v;
+          });
+        }
+        try { applyLang(); } catch (e) { /* never break i18n */ }
+        return out;
+      };
+    }
+  } catch (e) { /* hooking is best-effort */ }
+
+  /* first paint: the initial loadLang() call ran before this block existed,
+     so wait for the pack to land, then render once (bounded, no polling leak) */
+  var waited = 0;
+  var iv = setInterval(function () {
+    var ready = false;
+    try { ready = !!(typeof dict !== "undefined" && dict && dict["auth.title"]); }
+    catch (e) { ready = false; }
+    if (ready || waited >= 8000) {
+      clearInterval(iv);
+      if (ready) applyLang();
+    }
+    waited += 120;
+  }, 120);
+}());
