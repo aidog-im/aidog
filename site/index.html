@@ -18,9 +18,12 @@
   <button class="burger" id="burger" aria-label="menu" aria-expanded="false"><span></span><span></span><span></span></button>
   <nav class="nav-links" id="navLinks">
     <a href="#home" class="nav-link active" data-i18n="nav.home">Home</a>
+    <a href="#start" class="nav-link" data-i18n="nav.start">Start</a>
     <a href="#skills" class="nav-link" data-i18n="nav.skills">Skills</a>
     <a href="#console" class="nav-link" data-i18n="nav.console">Console</a>
     <a href="#models" class="nav-link" data-i18n="nav.models">Models</a>
+    <a href="#security" class="nav-link" data-i18n="nav.security">Security</a>
+    <a href="#architecture" class="nav-link" data-i18n="nav.architecture">Architecture</a>
   </nav>
   <div class="nav-right">
     <button class="lang-btn" id="langBtn" aria-label="switch language"><span id="langLabel" data-i18n="i18n.toggle">ZH</span></button>
@@ -52,9 +55,8 @@
       <span class="badge badge-local" data-i18n="hero.badgeLocal">Runs on your machine · loopback by default</span>
     </div>
     <div class="hero-cta reveal">
-      <a class="btn btn-primary" href="https://github.com/aidog-im/aidog" target="_blank" rel="noopener" data-i18n="hero.ctaGithub">View on GitHub</a>
-      <button class="btn btn-ghost" disabled title="coming soon" data-i18n="hero.ctaDownload">Download — soon</button>
-      <button class="btn btn-ghost" disabled title="coming soon" data-i18n="hero.ctaDocs">Docs — soon</button>
+      <a class="btn btn-primary" href="#start" data-i18n="hero.ctaStart">Get Started</a>
+      <a class="btn btn-ghost" href="https://github.com/aidog-im/aidog" target="_blank" rel="noopener" data-i18n="hero.ctaGithub">View on GitHub</a>
     </div>
   </div>
   <div class="fact-strip" aria-label="verified facts">
@@ -70,10 +72,53 @@
   </div>
 </section>
 
+<!-- ============================================ GET STARTED -->
+<section class="section" id="start">
+  <div class="section-head reveal">
+    <span class="section-index">01</span>
+    <h2 data-i18n="start.title">Get Started</h2>
+    <p class="section-sub" data-i18n="start.sub">Three steps from a clone to a running local console: fetch the repository, run the one-command installer, then fill the slots in the guided wizard.</p>
+  </div>
+
+  <div class="steps reveal">
+    <div class="step">
+      <span class="step-num">1</span>
+      <h4 data-i18n="start.step1Title">Get the repository</h4>
+      <p data-i18n="start.step1Body">I'm AiDog ships from a private repository — clone access required.</p>
+      <div class="cmd">
+        <code>git clone &lt;product-repo-url&gt; aidog &amp;&amp; cd aidog</code>
+        <button class="copy-btn" type="button" data-i18n="start.copy" aria-label="copy command">Copy</button>
+      </div>
+    </div>
+    <div class="step-arrow" aria-hidden="true">▸</div>
+    <div class="step">
+      <span class="step-num">2</span>
+      <h4 data-i18n="start.step2Title">Run the installer</h4>
+      <p data-i18n="start.step2Body">One command: provision + boot + verify. The installer is idempotent, so re-running it is always safe.</p>
+      <div class="cmd">
+        <code>bash deploy/install.sh</code>
+        <button class="copy-btn" type="button" data-i18n="start.copy" aria-label="copy command">Copy</button>
+      </div>
+    </div>
+    <div class="step-arrow" aria-hidden="true">▸</div>
+    <div class="step">
+      <span class="step-num">3</span>
+      <h4 data-i18n="start.step3Title">Fill the slots</h4>
+      <p data-i18n="start.step3Body">The guided wizard prompts for every credential — hidden input on a terminal, values never echoed; output names slots and lengths only.</p>
+      <div class="cmd">
+        <code>aidog setup</code>
+        <button class="copy-btn" type="button" data-i18n="start.copy" aria-label="copy command">Copy</button>
+      </div>
+    </div>
+  </div>
+
+  <p class="start-note reveal" data-i18n="start.roadmap">Public download &amp; hosted docs land with the public release.</p>
+</section>
+
 <!-- ============================================ SKILLS -->
 <section class="section" id="skills">
   <div class="section-head reveal">
-    <span class="section-index">01</span>
+    <span class="section-index">02</span>
     <h2 data-i18n="skills.title">Skills</h2>
     <p class="section-sub" data-i18n="skills.sub">A small, curated capability layer. Skills are screened deterministically before they ever reach the model, and only trusted, reviewed entries are recommended — no open marketplace, no supply-chain surprises.</p>
   </div>
@@ -111,7 +156,7 @@
 <!-- ============================================ CONSOLE -->
 <section class="section" id="console">
   <div class="section-head reveal">
-    <span class="section-index">02</span>
+    <span class="section-index">03</span>
     <h2 data-i18n="console.title">Console</h2>
     <p class="section-sub" data-i18n="console.sub">Local Web Console Preview — see the panel you get after installing, before you download anything.</p>
   </div>
@@ -119,12 +164,14 @@
   <div class="mock-frame reveal">
     <div class="mock-tag"><span class="pulse-dot" aria-hidden="true"></span><span data-i18n="console.tag">STATIC PREVIEW — live values render locally on your machine after install</span></div>
 
-    <!-- static high-fidelity mockup of the local console -->
+    <!-- static high-fidelity mockup of the local console app shell -->
     <div class="mock" aria-label="console preview">
-      <div class="mock-head">
+      <div class="mock-topbar">
         <div class="mock-brand">
-          <img src="assets/logo.jpg" alt="" width="28" height="28">
-          <b>I'M AIDOG</b><span class="mock-sub" data-i18n="console.brandSub">situational console</span>
+          <img src="assets/logo.jpg" alt="" width="26" height="26">
+          <div class="mock-brand-text">
+            <b>I'M AIDOG</b><span class="mock-sub" data-i18n="console.brandSub">situational console</span>
+          </div>
         </div>
         <div class="mock-chips">
           <span class="chip" data-i18n="console.chipBoot">BOOT --:-- · UP --</span>
@@ -133,115 +180,77 @@
         <div class="mock-clock"><span class="chip-mock-lang">EN</span><span class="clock" id="mockClock">--:--:--</span></div>
       </div>
 
-      <div class="mock-tools">
-        <span class="tool">BJ --:--:--</span><span class="tool">UTC --:--</span><span class="tool">UP –</span>
-        <span class="tool" data-i18n="console.toolHb">HB –</span><span class="tool" data-i18n="console.toolToday">TODAY –</span>
-      </div>
+      <div class="mock-shell">
+        <aside class="mock-side">
+          <nav class="mock-nav" aria-label="console views">
+            <span class="mock-nav-item is-active"><span class="mock-nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="2.2" y="2.2" width="4.8" height="4.8" rx="1.2"/><rect x="9" y="2.2" width="4.8" height="4.8" rx="1.2"/><rect x="2.2" y="9" width="4.8" height="4.8" rx="1.2"/><rect x="9" y="9" width="4.8" height="4.8" rx="1.2"/></svg></span><span class="mock-nav-label" data-i18n="console.vOverview">Overview</span><span class="mock-nav-drop" aria-hidden="true"></span></span>
+            <span class="mock-nav-item"><span class="mock-nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13.5 9.4a2 2 0 0 1-2 2H7.3L3.6 14V4.4a2 2 0 0 1 2-2h5.9a2 2 0 0 1 2 2z"/><path d="M5.9 6.1h5.2M5.9 8.5h3.3"/></svg></span><span class="mock-nav-label" data-i18n="console.vChat">Chat</span><span class="mock-nav-drop" aria-hidden="true"></span></span>
+            <span class="mock-nav-item"><span class="mock-nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M8 1.9 9.7 6.3 14.1 8 9.7 9.7 8 14.1 6.3 9.7 1.9 8 6.3 6.3z"/></svg></span><span class="mock-nav-label" data-i18n="console.vSkills">Skills</span><span class="mock-nav-drop" aria-hidden="true"></span></span>
+            <span class="mock-nav-item"><span class="mock-nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13.3 6.7A5.5 5.5 0 0 0 3.6 6.1"/><path d="M2.7 9.3a5.5 5.5 0 0 0 9.7.6"/><path d="M3.3 2.9v3.3h3.3M12.7 13.1V9.8H9.4"/></svg></span><span class="mock-nav-label" data-i18n="console.vEvolution">Evolution</span><span class="mock-nav-drop" aria-hidden="true"></span></span>
+            <span class="mock-nav-item"><span class="mock-nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2 4.4h9M2 8h12M2 11.6h7"/></svg></span><span class="mock-nav-label" data-i18n="console.vStream">Stream</span><span class="mock-nav-drop" aria-hidden="true"></span></span>
+            <span class="mock-nav-item"><span class="mock-nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2.6 4.6h10.8M2.6 11.4h10.8"/><circle cx="6.2" cy="4.6" r="1.9"/><circle cx="10.2" cy="11.4" r="1.9"/></svg></span><span class="mock-nav-label" data-i18n="console.vSettings">Settings</span><span class="mock-nav-drop" aria-hidden="true"></span></span>
+          </nav>
+          <div class="mock-tools">
+            <span class="tool">BJ --:--:--</span><span class="tool">UTC --:--</span><span class="tool">UP –</span>
+            <span class="tool" data-i18n="console.toolHb">HB –</span><span class="tool" data-i18n="console.toolToday">TODAY –</span>
+          </div>
+        </aside>
 
-      <div class="mock-grid">
-        <!-- left rail -->
-        <div class="mock-col">
-          <div class="mcard">
-            <h3 data-i18n="console.secAdvisory">ADVISORY</h3>
-            <div class="voice-row">
-              <span class="voice-orb" aria-hidden="true"><span class="orb-core"></span></span>
-              <div class="voice-meta"><div class="voice-state" data-i18n="console.voiceLocked">VOICE LOCKED</div><div class="voice-sub" data-i18n="console.voiceLockSub">tap the orb to unlock voice</div></div>
+        <main class="mock-main">
+          <div class="mock-view-head">
+            <div class="mock-view-titles">
+              <h3 data-i18n="console.vOverview">Overview</h3>
+              <p data-i18n="console.ovSub">Services, usage and channel at a glance</p>
             </div>
-            <div class="ticker"><span class="ticker-dot"></span><span data-i18n="console.ticker">—</span></div>
           </div>
-          <div class="mcard">
-            <h3 data-i18n="console.secMemory">MEMORY CORE</h3>
-            <div class="bar-block"><label data-i18n="console.memCurated">Curated memory</label><div class="bar"><i style="width:0%"></i></div><span class="num">–</span></div>
-            <div class="bar-block"><label data-i18n="console.memUser">User profile</label><div class="bar bar-warm"><i style="width:0%"></i></div><span class="num">–</span></div>
-          </div>
-          <div class="mcard">
-            <h3 data-i18n="console.secSettings">CONSOLE</h3>
-            <div class="ctl-row"><label data-i18n="console.ctlSound">UI sound</label><span class="toggle"><i></i></span></div>
-            <div class="ctl-row"><label data-i18n="console.ctlAlert">Alert state</label><span class="fake-select">off ▾</span></div>
-            <div class="ctl-row"><label data-i18n="console.ctlRefresh">Refresh (s)</label><span class="fake-select">10 ▾</span></div>
-            <div class="ctl-row"><label data-i18n="console.ctlToken">Access token</label><span class="fake-input">••••••••</span></div>
-            <div class="ctl-actions"><span class="btn-mock primary" data-i18n="console.ctlSave">SAVE</span></div>
-          </div>
-        </div>
 
-        <!-- center ring -->
-        <div class="mock-col mock-center">
-          <svg class="ring" viewBox="0 0 420 420" role="img" aria-label="status ring preview">
-            <defs>
-              <filter id="ringGlow" x="-50%" y="-50%" width="200%" height="200%">
-                <feGaussianBlur stdDeviation="4" result="b"/>
-                <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
-              </filter>
-              <radialGradient id="coreGrad" cx="50%" cy="50%" r="50%">
-                <stop offset="0%" stop-color="#70e4fd" stop-opacity=".55"/>
-                <stop offset="60%" stop-color="#2892ff" stop-opacity=".14"/>
-                <stop offset="100%" stop-color="#2892ff" stop-opacity="0"/>
-              </radialGradient>
-              <linearGradient id="scanGrad" x1="0" y1="0" x2="1" y2="1">
-                <stop offset="0%" stop-color="#2892ff" stop-opacity=".8"/>
-                <stop offset="100%" stop-color="#2892ff" stop-opacity="0"/>
-              </linearGradient>
-            </defs>
-            <circle class="ring-track" cx="210" cy="210" r="168"/>
-            <circle class="ring-track ring-track-in" cx="210" cy="210" r="120"/>
-            <g class="ring-scan">
-              <path d="M210 210 L210 42 A168 168 0 0 1 294 66 Z" fill="url(#scanGrad)" opacity=".25"/>
-              <line x1="210" y1="210" x2="210" y2="34" class="scan-beam"/>
-            </g>
-            <g class="ring-ticks" id="ringTicks" aria-hidden="true"></g>
-            <circle class="ring-core" cx="210" cy="210" r="96" fill="url(#coreGrad)"/>
-            <circle class="ring-node" cx="210" cy="42" r="5"/>
-            <circle class="ring-node" cx="368" cy="210" r="5"/>
-            <circle class="ring-node" cx="210" cy="378" r="5"/>
-            <circle class="ring-node" cx="52" cy="210" r="5"/>
-            <text class="ring-state" x="210" y="204">PREVIEW</text>
-            <text class="ring-sub" x="210" y="234" data-i18n="console.ringSub">live state after install</text>
-          </svg>
-          <div class="panel-row">
-            <span class="panel">kernel</span><span class="panel">watchdog</span><span class="panel">model</span>
-            <span class="panel">telegram</span><span class="panel">console</span><span class="panel">system</span>
-          </div>
-        </div>
+          <div class="mock-ov">
+            <div class="mcard mc-span3">
+              <h3><span data-i18n="console.secServices">Services</span><span class="gal-count">– / 6</span></h3>
+              <div class="panel-row">
+                <span class="mini"><i class="m-dot" aria-hidden="true"></i><span class="m-name">kernel</span><span class="m-state">–</span></span>
+                <span class="mini"><i class="m-dot" aria-hidden="true"></i><span class="m-name">watchdog</span><span class="m-state">–</span></span>
+                <span class="mini"><i class="m-dot" aria-hidden="true"></i><span class="m-name">model</span><span class="m-state">–</span></span>
+                <span class="mini"><i class="m-dot" aria-hidden="true"></i><span class="m-name">telegram</span><span class="m-state">–</span></span>
+                <span class="mini"><i class="m-dot" aria-hidden="true"></i><span class="m-name">console</span><span class="m-state">–</span></span>
+                <span class="mini"><i class="m-dot" aria-hidden="true"></i><span class="m-name">system</span><span class="m-state">–</span></span>
+              </div>
+            </div>
 
-        <!-- right -->
-        <div class="mock-col">
-          <div class="mcard reactor">
-            <h3 data-i18n="console.secReactor">ARC REACTOR // USAGE</h3>
-            <svg class="reactor-svg" viewBox="0 0 220 220" aria-hidden="true">
-              <circle class="r-outer" cx="110" cy="110" r="96"/>
-              <circle class="r-tick" cx="110" cy="110" r="86"/>
-              <circle class="r-arcbg" cx="110" cy="110" r="74"/>
-              <circle class="r-arc" cx="110" cy="110" r="74" transform="rotate(-90 110 110)"/>
-              <circle class="r-mid" cx="110" cy="110" r="54"/>
-              <circle class="r-core" cx="110" cy="110" r="34"/>
-              <text class="r-num" x="110" y="106">–</text>
-              <text class="r-unit" x="110" y="128" data-i18n="console.reactorUnit">TODAY</text>
-            </svg>
-            <div class="stat-note" data-i18n="console.reactorNote">usage tallies locally — nothing is uploaded</div>
-          </div>
-          <div class="mcard">
-            <h3 data-i18n="console.secChannel">CHANNEL</h3>
-            <table class="kv">
-              <tr><td data-i18n="console.kvTelegram">telegram</td><td>–</td></tr>
-              <tr><td data-i18n="console.kvConsole">console</td><td>127.0.0.1</td></tr>
-              <tr><td data-i18n="console.kvModel">model</td><td>–</td></tr>
-            </table>
-          </div>
-        </div>
-      </div>
+            <div class="mcard mc-span2">
+              <h3 data-i18n="console.secUsage">Usage &amp; cost</h3>
+              <div class="mock-metric">
+                <span class="mock-metric-val">–</span>
+                <span class="mock-metric-unit">$ <span data-i18n="console.reactorUnit">TODAY</span></span>
+              </div>
+              <div class="stat-note" data-i18n="console.reactorNote">usage tallies locally — nothing is uploaded</div>
+            </div>
 
-      <div class="mcard gallery">
-        <h3><span data-i18n="console.secGallery">SKILL ARMORY</span><span class="gal-count">0</span></h3>
-        <div class="gal-empty" data-i18n="console.galEmpty">no skills mounted</div>
-      </div>
+            <div class="mcard mc-span1">
+              <h3 data-i18n="console.secMemory">MEMORY CORE</h3>
+              <div class="bar-block"><label data-i18n="console.memCurated">Curated memory</label><div class="bar"><i style="width:0%"></i></div><span class="num">–</span></div>
+              <div class="bar-block"><label data-i18n="console.memUser">User profile</label><div class="bar bar-warm"><i style="width:0%"></i></div><span class="num">–</span></div>
+            </div>
 
-      <div class="mcard stream">
-        <h3><span data-i18n="console.secStream">LIVE STREAM</span><span class="stream-caret"></span></h3>
-        <div class="stream-body">
-          <p><span class="ts">--:--:--</span> <span data-i18n="console.stream1">boot · console up (loopback)</span></p>
-          <p><span class="ts">--:--:--</span> <span data-i18n="console.stream2">locale loaded · en</span></p>
-          <p><span class="ts">--:--:--</span> <span data-i18n="console.stream3">waiting for local service…</span></p>
-        </div>
+            <div class="mcard mc-span2">
+              <h3 data-i18n="console.secChannel">CHANNEL</h3>
+              <table class="kv">
+                <tr><td data-i18n="console.kvTelegram">telegram</td><td>–</td></tr>
+                <tr><td data-i18n="console.kvConsole">console</td><td>127.0.0.1</td></tr>
+                <tr><td data-i18n="console.kvModel">model</td><td>–</td></tr>
+              </table>
+            </div>
+
+            <div class="mcard mc-span1">
+              <h3 data-i18n="console.secAdvisory">ADVISORY</h3>
+              <div class="voice-row">
+                <span class="voice-orb" aria-hidden="true"><span class="orb-core"></span></span>
+                <div class="voice-meta"><div class="voice-state" data-i18n="console.voiceLocked">VOICE LOCKED</div><div class="voice-sub" data-i18n="console.voiceLockSub">tap the orb to unlock voice</div></div>
+              </div>
+              <div class="ticker"><span class="ticker-dot"></span><span data-i18n="console.ticker">—</span></div>
+            </div>
+          </div>
+        </main>
       </div>
 
       <div class="mock-foot"><span data-i18n="console.foot">loopback · free forever</span><span>--:--:--</span></div>
@@ -258,7 +267,7 @@
 <!-- ============================================ MODELS -->
 <section class="section" id="models">
   <div class="section-head reveal">
-    <span class="section-index">03</span>
+    <span class="section-index">04</span>
     <h2 data-i18n="models.title">Models &amp; Transparency</h2>
     <p class="section-sub" data-i18n="models.sub">We will publish how this product actually runs — which models serve it and how much compute it consumes. No estimates, no marketing charts: only what the software itself reports.</p>
   </div>
@@ -297,6 +306,76 @@
       <p data-i18n="models.p3B">The chart above reads a public JSON endpoint from that database and renders aggregate model usage — published totals only, never per-user records.</p>
     </div>
   </div>
+</section>
+
+<!-- ============================================ SECURITY -->
+<section class="section" id="security">
+  <div class="section-head reveal">
+    <span class="section-index">05</span>
+    <h2 data-i18n="security.title">Security &amp; Trust</h2>
+    <p class="section-sub" data-i18n="security.sub">Local-first by construction — the quiet guarantees, stated plainly.</p>
+  </div>
+
+  <div class="trust-grid reveal">
+    <div class="trust-card">
+      <span class="trust-drop" aria-hidden="true"></span>
+      <h4 data-i18n="security.s1T">Loopback by default</h4>
+      <p data-i18n="security.s1B">Services listen on 127.0.0.1 only — reachable from your machine, not from your network.</p>
+    </div>
+    <div class="trust-card">
+      <span class="trust-drop" aria-hidden="true"></span>
+      <h4 data-i18n="security.s2T">Credentials stay local</h4>
+      <p data-i18n="security.s2B">Secrets live in one gitignored file (mode 0600). Output and logs report slot names and lengths — never values.</p>
+    </div>
+    <div class="trust-card">
+      <span class="trust-drop" aria-hidden="true"></span>
+      <h4 data-i18n="security.s3T">Writes need your token</h4>
+      <p data-i18n="security.s3B">Every console write operation requires your local access token.</p>
+    </div>
+    <div class="trust-card">
+      <span class="trust-drop" aria-hidden="true"></span>
+      <h4 data-i18n="security.s4T">Telemetry off by default</h4>
+      <p data-i18n="security.s4B">Usage tallies on your machine. Nothing leaves it unless you opt in.</p>
+    </div>
+    <div class="trust-card">
+      <span class="trust-drop" aria-hidden="true"></span>
+      <h4 data-i18n="security.s5T">en + zh interface, English source</h4>
+      <p data-i18n="security.s5B">The interface speaks English and Chinese; all source code is written in English.</p>
+    </div>
+    <div class="trust-card">
+      <span class="trust-drop" aria-hidden="true"></span>
+      <h4 data-i18n="security.s6T">Free forever</h4>
+      <p data-i18n="security.s6B">Permanently free — no paid tier, no in-app purchase, no usage fee, ever.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================ ARCHITECTURE -->
+<section class="section" id="architecture">
+  <div class="section-head reveal">
+    <span class="section-index">06</span>
+    <h2 data-i18n="arch.title">Architecture</h2>
+    <p class="section-sub" data-i18n="arch.sub">Three layers, strictly separated — so the core underneath can be swapped without losing who you are.</p>
+  </div>
+
+  <div class="arch-flow reveal">
+    <div class="arch-band">
+      <div class="arch-tag"><span class="arch-drop" aria-hidden="true"></span><h4 data-i18n="arch.kT">Kernel</h4></div>
+      <p data-i18n="arch.kB">Replaceable — a transitional kernel runs today while the self-developed core is under construction.</p>
+    </div>
+    <div class="arch-arrow" aria-hidden="true">▾</div>
+    <div class="arch-band">
+      <div class="arch-tag"><span class="arch-drop" aria-hidden="true"></span><h4 data-i18n="arch.bT">Body</h4></div>
+      <p data-i18n="arch.bB">Constitution · curated memory · skills · stance · persona — owned by this repo, independent of any kernel.</p>
+    </div>
+    <div class="arch-arrow" aria-hidden="true">▾</div>
+    <div class="arch-band">
+      <div class="arch-tag"><span class="arch-drop" aria-hidden="true"></span><h4 data-i18n="arch.cT">Business</h4></div>
+      <p data-i18n="arch.cB">Chain access and project adapters — pure assets with no behaviour of their own.</p>
+    </div>
+  </div>
+
+  <p class="arch-note reveal" data-i18n="arch.note">The self-developed core is under active development — we publish what the gates prove, nothing more.</p>
 </section>
 
 </main>

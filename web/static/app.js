@@ -1,5 +1,6 @@
-/* I'm AiDog console — HUD logic (status ring, reactor, advisory takeover,
-   typewriter stream, settings writes with access token, update banner).
+/* I'm AiDog console — app-shell logic (side-nav views + ?view= deep links,
+   service status cards, usage metrics, advisory takeover, typewriter stream,
+   settings writes with access token, update banner).
    All user-facing strings come from locale packs; upstream names: zero. */
 "use strict";
 
@@ -12,7 +13,6 @@ const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
 let dict = {};
 let settings = { refresh_sec: 10, sound: false, voice_volume: 80, alert_preview: "off" };
 let statusData = null, usageData = null;
-let ringBuilt = false;
 let bootDone = false, audioCtx = null;
 let voiceReady = false, voiceBusy = false, voiceEngine = null, voiceError = "";
 let voiceLastText = "", voiceLastAt = 0;
@@ -53,6 +53,7 @@ async function loadLang(lang) {
   renderStatus(); renderUsage(); renderVersion(); renderVoice();
   chatBadge(chatBusy);            // badge label follows the active language
   refreshEventTexts();
+  setView(currentView, false);    // re-resolve the view title in the new language
 }
 
 function applyStaticText() {
@@ -67,7 +68,7 @@ function applyStaticText() {
 const BOOT_LINES = [
   ["> aidog kernel ......... ", "ok"],
   ["> memory core .......... ", "ok"],
-  ["> status ring .......... ", "ok"],
+  ["> service status ....... ", "ok"],
   ["> advisory protocol ..... ", "ok"],
   ["> channel link ......... ", "warn"],
   ["> SYSTEM ONLINE", "ok"],
@@ -238,65 +239,19 @@ async function armVoice() {
   speak(t("voice.greet", "Voice channel online."));
 }
 
-/* ------------------------------------------------------------------ ring -- */
-const RING_R = 168, CX = 210, CY = 210;
-
-function buildRing() {
-  const nodes = document.getElementById("ringNodes");
-  const ticks = document.getElementById("ringTicks");
-  nodes.innerHTML = ""; ticks.innerHTML = "";
-  for (let k = 0; k < 24; k++) {
-    const a = (k / 24) * Math.PI * 2 - Math.PI / 2;
-    const r1 = k % 6 === 0 ? 156 : 162, r2 = 172;
-    const l = document.createElementNS("http://www.w3.org/2000/svg", "line");
-    l.setAttribute("x1", CX + r1 * Math.cos(a)); l.setAttribute("y1", CY + r1 * Math.sin(a));
-    l.setAttribute("x2", CX + r2 * Math.cos(a)); l.setAttribute("y2", CY + r2 * Math.sin(a));
-    l.setAttribute("class", "tickmark"); ticks.appendChild(l);
-  }
-  (statusData && statusData.panels ? statusData.panels : []).forEach((p, idx) => {
-    const a = (idx / 5) * Math.PI * 2 - Math.PI / 2;
-    const x = CX + RING_R * Math.cos(a), y = CY + RING_R * Math.sin(a);
-    const g = document.createElementNS("http://www.w3.org/2000/svg", "g");
-    g.setAttribute("class", "node-g"); g.dataset.id = p.id;
-    const ring = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-    ring.setAttribute("cx", x); ring.setAttribute("cy", y); ring.setAttribute("r", 13);
-    ring.setAttribute("class", "node-ring");
-    const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-    dot.setAttribute("cx", x); dot.setAttribute("cy", y); dot.setAttribute("r", 5);
-    dot.setAttribute("class", "node-dot");
-    const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
-    const lr = RING_R + 26;
-    // clamp horizontal drift so edge labels never clip the viewBox
-    label.setAttribute("x", Math.max(44, Math.min(376, CX + lr * Math.cos(a))));
-    label.setAttribute("y", CY + lr * Math.sin(a) + 4);
-    label.setAttribute("class", "node-label");
-    label.textContent = p.id.toUpperCase();
-    g.append(ring, dot, label); nodes.appendChild(g);
-  });
-}
-
 /* ---------------------------------------------------------------- status -- */
 function renderStatus() {
   if (!statusData) return;
   const panels = statusData.panels || [];
-  if (!ringBuilt && panels.length) { buildRing(); ringBuilt = true; }
   const adv = statusData.advisory || { level: "info", reasons: [] };
 
-  // ring node states
-  panels.forEach(p => {
-    const g = document.querySelector(`.node-g[data-id="${p.id}"]`);
-    if (!g) return;
-    g.classList.remove("up", "down", "unknown"); g.classList.add(p.state);
-    g.querySelector(".node-dot").classList.toggle("down", p.state === "down");
-    g.querySelector(".node-dot").classList.toggle("unknown", p.state === "unknown");
-  });
+  // service health summary — the retired ring's information, carried as text
   const up = panels.filter(p => p.state === "up").length;
-  document.getElementById("ringState").textContent =
-    up === panels.length ? t("ring.all", "ALL SYSTEMS NOMINAL")
-                         : t("ring.degraded", "SYSTEM DEGRADED");
-  document.getElementById("ringSub").textContent =
-    t("ring.sub", "{n}/5 ONLINE").replace("{n}", up) + " · " +
-    (statusData.version || "");
+  document.getElementById("svcSummary").textContent =
+    (up === panels.length ? t("svc.all", "All systems nominal")
+                          : t("svc.degraded", "System degraded")) +
+    " · " + t("svc.sub", "{n}/5 online").replace("{n}", up) +
+    " · " + (statusData.version || "");
 
   // advisory chip + ticker
   const chip = document.getElementById("advChip");
@@ -329,9 +284,10 @@ function renderStatus() {
     }
   }
 
-  // mini panels
+  // service cards (Overview)
   document.getElementById("panels").innerHTML = panels.map(p => `
     <div class="mini ${p.state}">
+      <span class="m-dot" aria-hidden="true"></span>
       <div class="m-name">${escapeHtml(t("panel." + p.id, p.id))}</div>
       <div class="m-state">${escapeHtml(t("state." + p.state, p.state.toUpperCase()))}</div>
       <div class="m-detail">${escapeHtml(p.detail || "")}</div>
@@ -412,7 +368,6 @@ document.addEventListener("click", e => {
   }
 });
 
-/* ---------------------------------------------------------------- reactor -- */
 /* --------------------------------------------------------------- usage -- */
 function dispInfo() {
   // cost is computed in source CNY; display converts per /api/usage `display`.
@@ -437,30 +392,21 @@ function renderUsage() {
   document.getElementById("usageLive").hidden = !usageData.available;
   const today = usageData.today, ref = usageData.reference;
   const price = usageData.pricing || {};
-  const arc = document.getElementById("rArc");
-  const C = 465; // 2πr, r=74
   const d = dispInfo();
-  const unitEl = document.getElementById("rCostUnit");
+  const unitEl = document.getElementById("costUnit");
   const setUnit = () => {
     unitEl.textContent = (d.code === "CNY" ? t("usage.unitCny", "CNY TODAY")
                                            : t("usage.unit", "{c} TODAY").replace("{c}", d.code));
   };
   if (!today) {
-    document.getElementById("rCost").textContent = "—";
+    document.getElementById("costVal").textContent = "—";
     setUnit();
-    arc.style.strokeDashoffset = C;
     document.getElementById("usageStats").innerHTML = "";
     document.getElementById("usageNote").textContent = t("usage.off", "usage source unavailable");
     return;
   }
-  document.getElementById("rCost").textContent = fmtCost(today.cost);
+  document.getElementById("costVal").textContent = fmtCost(today.cost);
   setUnit();
-  let charge = 0;
-  if (ref && ref.avg_cost > 0) charge = Math.min(1.35, today.cost / ref.avg_cost);
-  const shown = Math.min(1, charge);
-  arc.style.strokeDashoffset = String(C * (1 - shown));
-  arc.classList.toggle("hot", charge > 0.85 && charge <= 1.1);
-  arc.classList.toggle("over", charge > 1.1);
   const st = (k, v) => `<div><div class="k">${escapeHtml(t(k[0], k[1]))}</div><div class="v">${escapeHtml(v)}</div></div>`;
   document.getElementById("usageStats").innerHTML =
     st(["usage.req", "REQUESTS"], String(today.requests)) +
@@ -718,7 +664,7 @@ async function chatSend() {
   const text = input.value.trim();
   if (!text || chatBusy) return;
   const token = localStorage.getItem(TOKEN_KEY) || "";
-  if (!token) { chatNote("err", t("chat.needToken", "access token required")); return; }
+  if (!token) { chatNote("err", t("chat.needToken", "access token required (set it in Settings)")); return; }
   chatNote("", "");
   input.value = "";
   chatBusy = true;
@@ -798,7 +744,7 @@ async function chatSend() {
 
 async function chatClear() {
   const token = localStorage.getItem(TOKEN_KEY) || "";
-  if (!token) { chatNote("err", t("chat.needToken", "access token required")); return; }
+  if (!token) { chatNote("err", t("chat.needToken", "access token required (set it in Settings)")); return; }
   try {
     const res = await fetch("/api/chat", {
       method: "POST",
@@ -1009,11 +955,54 @@ function reasonHtml(r) {
 }
 function reasonLi(r) { return `<li>&gt; ${reasonHtml(r)}</li>`; }
 
+/* ---------------------------------------------------------------- views -- */
+/* All six views live in the same document; the inactive ones are hidden with
+   CSS, so every poller keeps writing into real DOM and ids stay stable.
+   ?view=<name> deep-links the active view (default: overview). */
+const VIEWS = ["overview", "chat", "skills", "evolution", "stream", "settings"];
+const QS_VIEW = (params.get("view") || "").toLowerCase();
+let currentView = VIEWS.includes(QS_VIEW) ? QS_VIEW : "overview";
+
+function setView(name, fromUser) {
+  if (!VIEWS.includes(name)) name = "overview";
+  currentView = name;
+  document.querySelectorAll(".view").forEach(v =>
+    v.classList.toggle("is-active", v.dataset.view === name));
+  document.querySelectorAll(".nav-item").forEach(b => {
+    const on = b.dataset.view === name;
+    b.classList.toggle("is-active", on);
+    if (on) b.setAttribute("aria-current", "page");
+    else b.removeAttribute("aria-current");
+  });
+  const head = document.querySelector("#view-" + name + " .view-head h2");
+  if (head) document.title = "I'm AiDog — " + head.textContent;
+  if (fromUser) {
+    const p = new URLSearchParams(location.search);
+    p.set("view", name);
+    history.replaceState(null, "", location.pathname + "?" + p.toString());
+    window.scrollTo(0, 0);
+  }
+}
+
+/* --------------------------------------------------------- topbar height -- */
+/* the sticky rail starts right under the sticky topbar: measure it once and
+   on every resize so wrapped chips never overlap the nav */
+const topbarEl = document.querySelector(".topbar");
+function syncTopbarHeight() {
+  if (!topbarEl) return;
+  document.documentElement.style.setProperty("--topbar-h", topbarEl.offsetHeight + "px");
+}
+window.addEventListener("resize", syncTopbarHeight);
+syncTopbarHeight();
+
 /* ------------------------------------------------------------------ wire -- */
 document.getElementById("langBtn").addEventListener("click", () => {
   const next = document.documentElement.lang === "en" ? "zh" : "en";
   localStorage.setItem(LANG_KEY, next);
   loadLang(next);
+});
+document.querySelectorAll(".nav-item").forEach(btn => {
+  btn.addEventListener("click", () => setView(btn.dataset.view, true));
 });
 document.getElementById("soundToggle").addEventListener("click", e => {
   const b = e.currentTarget;
@@ -1053,6 +1042,7 @@ document.getElementById("alertSelect").addEventListener("change", e => {
 
 const startLang = QS_LANG || localStorage.getItem(LANG_KEY) || "en";
 runBoot();
+setView(currentView, false);      // deep link applied before the first paint
 loadLang(startLang);
 loadSettings().then(() => { scheduleRefresh(); renderVoice(); });
 refreshStatus(); refreshUsage(); refreshEvents(); refreshVersion(); refreshSkills();

@@ -179,24 +179,58 @@
     });
   }
 
-  /* --------------------------------------------- mock ring ticks ---- */
-  var ticks = document.getElementById("ringTicks");
-  if (ticks) {
-    var ns = "http://www.w3.org/2000/svg", frag = document.createDocumentFragment();
-    for (var a = 0; a < 360; a += 6) {
-      var rad = (a - 90) * Math.PI / 180;
-      var r1 = 176, r2 = (a % 30 === 0) ? 164 : 171;
-      var ln = document.createElementNS(ns, "line");
-      ln.setAttribute("x1", (210 + Math.cos(rad) * r1).toFixed(1));
-      ln.setAttribute("y1", (210 + Math.sin(rad) * r1).toFixed(1));
-      ln.setAttribute("x2", (210 + Math.cos(rad) * r2).toFixed(1));
-      ln.setAttribute("y2", (210 + Math.sin(rad) * r2).toFixed(1));
-      ln.setAttribute("stroke", (a % 30 === 0) ? "rgba(40,146,255,.75)" : "rgba(165,183,202,.6)");
-      ln.setAttribute("stroke-width", "1");
-      frag.appendChild(ln);
-    }
-    ticks.appendChild(frag);
+  /* --------------------------------------------- copy buttons ----- */
+  /* Copy the command out of its dark inset block. navigator.clipboard needs
+     a secure context; when it is missing or refuses (plain http, denied
+     permission), fall back to a hidden textarea + execCommand — and if that
+     fails too, fail silently: a copy button must never throw. Success copy
+     comes from the locale pack (start.copied), language-aware. */
+  function dictVal(key) {
+    var d = dicts[lang];
+    if (d && Object.prototype.hasOwnProperty.call(d, key)) return d[key];
+    return null;
   }
+  function legacyCopy(text) {
+    try {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.top = "-1000px";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      return !!ok;
+    } catch (e) { return false; }
+  }
+  function flashCopied(btn) {
+    btn.textContent = dictVal("start.copied") || "Copied";
+    btn.classList.add("copied");
+    clearTimeout(btn._copyTimer);
+    btn._copyTimer = setTimeout(function () {
+      btn.textContent = dictVal(btn.getAttribute("data-i18n")) || "Copy";
+      btn.classList.remove("copied");
+    }, 1800);
+  }
+  document.querySelectorAll(".copy-btn").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var host = btn.closest(".cmd");
+      var code = host ? host.querySelector("code") : null;
+      var text = code ? code.textContent : "";
+      if (!text) return;
+      var done = function (ok) { if (ok) flashCopied(btn); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(
+          function () { done(true); },
+          function () { done(legacyCopy(text)); }
+        );
+      } else {
+        done(legacyCopy(text));
+      }
+    });
+  });
 
   /* ------------------------------------------- mock clock + year ---- */
   var mockClock = document.getElementById("mockClock");

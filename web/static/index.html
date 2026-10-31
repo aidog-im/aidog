@@ -31,13 +31,16 @@
   </div>
 </div>
 
-<div class="hud">
-  <header class="hud-head">
+<!-- app shell: slim topbar + fixed side nav + main view area (six views) -->
+<div class="shell">
+  <header class="topbar">
     <div class="brand">
       <img class="brand-logo" id="brandLogo" src="/static/aidog-logo.jpg"
            alt="I'm AiDog" width="32" height="32" data-i18n-alt="app.logoAlt">
-      <h1 id="title">I'M AIDOG</h1>
-      <span class="sub" id="subtitle">situational console</span>
+      <div class="brand-text">
+        <h1 id="title">I'M AIDOG</h1>
+        <span class="sub" id="subtitle">situational console</span>
+      </div>
     </div>
     <div class="head-status">
       <span class="chip" id="uptimeChip">BOOT --:-- · UP --</span>
@@ -49,14 +52,6 @@
     </div>
   </header>
 
-  <div class="tool-strip" id="toolStrip">
-    <span class="tool" id="toolBj" title="Beijing time">BJ --:--:--</span>
-    <span class="tool" id="toolUtc">UTC --:--</span>
-    <span class="tool" id="toolUp">UP –</span>
-    <span class="tool" id="toolHb" data-i18n-t="tool.hbTip">HB –</span>
-    <span class="tool" id="toolToday" data-i18n-t="tool.todayTip" data-i18n="tool.todayE">TODAY –</span>
-  </div>
-
   <div class="update-banner" id="updateBanner" hidden>
     <span class="upd-dot"></span>
     <span id="updateText">update available</span>
@@ -64,226 +59,313 @@
     <button class="btn-x" id="updateDismiss" aria-label="dismiss">×</button>
   </div>
 
-  <main class="grid">
-    <!-- LEFT RAIL: advisory ticker · memory core · console settings -->
-    <section class="col col-left">
-      <div class="card">
-        <h2 data-i18n="sec.advisory">ADVISORY</h2>
-        <div class="voice-row">
-          <button class="voice-orb locked" id="voiceOrb" data-i18n-t="voice.tip"
-                  title="tap to arm voice" aria-pressed="false">
-            <span class="orb-core"></span>
-          </button>
-          <div class="voice-meta">
-            <div class="voice-state" id="voiceState">VOICE LOCKED</div>
-            <div class="voice-sub" id="voiceSub">—</div>
+  <aside class="sidebar">
+    <nav class="nav" aria-label="Console views">
+      <button class="nav-item is-active" type="button" data-view="overview" aria-current="page">
+        <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"
+          stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2.2" y="2.2" width="4.8" height="4.8" rx="1.2"/>
+          <rect x="9" y="2.2" width="4.8" height="4.8" rx="1.2"/>
+          <rect x="2.2" y="9" width="4.8" height="4.8" rx="1.2"/>
+          <rect x="9" y="9" width="4.8" height="4.8" rx="1.2"/></svg></span>
+        <span class="nav-label" data-i18n="view.overview.title">Overview</span>
+        <span class="nav-drop" aria-hidden="true"></span>
+      </button>
+      <button class="nav-item" type="button" data-view="chat">
+        <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"
+          stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M13.5 9.4a2 2 0 0 1-2 2H7.3L3.6 14V4.4a2 2 0 0 1 2-2h5.9a2 2 0 0 1 2 2z"/>
+          <path d="M5.9 6.1h5.2M5.9 8.5h3.3"/></svg></span>
+        <span class="nav-label" data-i18n="view.chat.title">Chat</span>
+        <span class="nav-drop" aria-hidden="true"></span>
+      </button>
+      <button class="nav-item" type="button" data-view="skills">
+        <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"
+          stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M8 1.9 9.7 6.3 14.1 8 9.7 9.7 8 14.1 6.3 9.7 1.9 8 6.3 6.3z"/></svg></span>
+        <span class="nav-label" data-i18n="view.skills.title">Skills</span>
+        <span class="nav-drop" aria-hidden="true"></span>
+      </button>
+      <button class="nav-item" type="button" data-view="evolution">
+        <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"
+          stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M13.3 6.7A5.5 5.5 0 0 0 3.6 6.1"/>
+          <path d="M2.7 9.3a5.5 5.5 0 0 0 9.7.6"/>
+          <path d="M3.3 2.9v3.3h3.3M12.7 13.1V9.8H9.4"/></svg></span>
+        <span class="nav-label" data-i18n="view.evolution.title">Evolution</span>
+        <span class="nav-drop" aria-hidden="true"></span>
+      </button>
+      <button class="nav-item" type="button" data-view="stream">
+        <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"
+          stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M2 4.4h9M2 8h12M2 11.6h7"/></svg></span>
+        <span class="nav-label" data-i18n="view.stream.title">Stream</span>
+        <span class="nav-drop" aria-hidden="true"></span>
+      </button>
+      <button class="nav-item" type="button" data-view="settings">
+        <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"
+          stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M2.6 4.6h10.8M2.6 11.4h10.8"/>
+          <circle cx="6.2" cy="4.6" r="1.9"/>
+          <circle cx="10.2" cy="11.4" r="1.9"/></svg></span>
+        <span class="nav-label" data-i18n="view.settings.title">Settings</span>
+        <span class="nav-drop" aria-hidden="true"></span>
+      </button>
+    </nav>
+
+    <div class="tool-strip" id="toolStrip">
+      <span class="tool" id="toolBj" title="Beijing time">BJ --:--:--</span>
+      <span class="tool" id="toolUtc">UTC --:--</span>
+      <span class="tool" id="toolUp">UP –</span>
+      <span class="tool" id="toolHb" data-i18n-t="tool.hbTip">HB –</span>
+      <span class="tool" id="toolToday" data-i18n-t="tool.todayTip" data-i18n="tool.todayE">TODAY –</span>
+    </div>
+  </aside>
+
+  <main class="main">
+    <!-- OVERVIEW: service cards + usage + memory + channel + advisory -->
+    <section class="view is-active" id="view-overview" data-view="overview">
+      <div class="view-head">
+        <div class="view-titles">
+          <h2 data-i18n="view.overview.title">Overview</h2>
+          <p class="view-sub" data-i18n="view.overview.sub">Services, usage and channel at a glance</p>
+        </div>
+      </div>
+      <div class="ov-grid">
+        <div class="card span-3">
+          <h2><span data-i18n="sec.services">Services</span>
+              <span class="svc-summary" id="svcSummary">–</span></h2>
+          <div class="panel-row" id="panels"></div>
+        </div>
+
+        <div class="card span-2">
+          <h2><span data-i18n="sec.usage">Usage &amp; cost</span>
+              <span class="live-dot" id="usageLive" hidden></span></h2>
+          <div class="metric">
+            <div class="metric-val" id="costVal">–</div>
+            <div class="metric-unit" id="costUnit">$ TODAY</div>
+          </div>
+          <div class="stat-grid" id="usageStats"></div>
+          <div class="stat-note" id="usageNote"></div>
+        </div>
+
+        <div class="card span-1">
+          <h2 data-i18n="sec.memory">MEMORY CORE</h2>
+          <div class="bar-block">
+            <label data-i18n="memory.curated">Curated memory</label>
+            <div class="bar"><div class="bar-fill" id="memBar"></div></div>
+            <span class="num" id="memNum">–</span>
+          </div>
+          <div class="bar-block">
+            <label data-i18n="memory.user">User profile</label>
+            <div class="bar bar-violet"><div class="bar-fill" id="userBar"></div></div>
+            <span class="num" id="userNum">–</span>
           </div>
         </div>
-        <div class="ticker" id="ticker">
-          <span class="ticker-dot"></span><span id="tickerText">—</span>
-        </div>
-        <div class="reason-list" id="reasonList"></div>
-      </div>
 
-      <div class="card">
-        <h2 data-i18n="sec.memory">MEMORY CORE</h2>
-        <div class="bar-block">
-          <label data-i18n="memory.curated">Curated memory</label>
-          <div class="bar"><div class="bar-fill" id="memBar"></div></div>
-          <span class="num" id="memNum">–</span>
+        <div class="card span-2">
+          <h2 data-i18n="sec.channel">CHANNEL</h2>
+          <table class="kv" id="cfgTable"></table>
         </div>
-        <div class="bar-block">
-          <label data-i18n="memory.user">User profile</label>
-          <div class="bar bar-violet"><div class="bar-fill" id="userBar"></div></div>
-          <span class="num" id="userNum">–</span>
-        </div>
-      </div>
 
-      <div class="card">
-        <h2 data-i18n="sec.console">CONSOLE</h2>
-        <div class="ctl-row">
-          <label data-i18n="ctl.sound">UI sound</label>
-          <button class="toggle" id="soundToggle" aria-pressed="false"><span></span></button>
-        </div>
-        <div class="ctl-row">
-          <label data-i18n="ctl.volume">Voice volume</label>
-          <input type="range" id="voiceVol" min="0" max="100" step="5" value="80"
-                 data-i18n-t="voice.volTip" title="spoken announcements volume">
-        </div>
-        <div class="ctl-row">
-          <label data-i18n="ctl.alert">Alert state</label>
-          <select id="alertSelect">
-            <option value="off" data-i18n="common.off">off</option>
-            <option value="warn" data-i18n="adv.warn">warn</option>
-            <option value="urgent" data-i18n="adv.urgent">urgent</option>
-          </select>
-        </div>
-        <div class="ctl-row">
-          <label data-i18n="ctl.refresh">Refresh (s)</label>
-          <select id="refreshSelect">
-            <option>5</option><option>10</option><option>30</option><option>60</option>
-          </select>
-        </div>
-        <div class="ctl-row">
-          <label data-i18n="ctl.currency">Currency</label>
-          <select id="curSelect">
-            <option>USD</option><option>CNY</option><option>EUR</option>
-            <option>GBP</option><option>JPY</option>
-          </select>
-        </div>
-        <div class="ctl-row">
-          <label data-i18n="ctl.fx">FX rate (0 = auto)</label>
-          <input type="number" id="fxInput" min="0" max="100000" step="0.01" value="0">
-        </div>
-        <div class="ctl-row">
-          <label data-i18n="ctl.mycModel">Kernel model</label>
-          <input type="text" id="mycModel" maxlength="100" placeholder="mimo-v2.6-flash"
-                 data-i18n-ph="ctl.mycModelPh" autocomplete="off">
-        </div>
-        <div class="ctl-row">
-          <label data-i18n="ctl.mycUrl">Kernel endpoint</label>
-          <input type="text" id="mycUrl" maxlength="256" placeholder="http://127.0.0.1:3460/v1"
-                 data-i18n-ph="ctl.mycUrlPh" autocomplete="off">
-        </div>
-        <div class="ctl-row token-row">
-          <label data-i18n="ctl.token">Access token</label>
-          <input type="password" id="tokenInput" autocomplete="off"
-                 data-i18n-ph="ctl.tokenPh" placeholder="WEB_TOKEN to unlock writes">
-        </div>
-        <div class="ctl-actions">
-          <button class="btn primary" id="saveBtn" data-i18n="ctl.save">SAVE</button>
-          <span class="save-state" id="saveState"></span>
+        <div class="card span-1">
+          <h2 data-i18n="sec.advisory">ADVISORY</h2>
+          <div class="voice-row">
+            <button class="voice-orb locked" id="voiceOrb" data-i18n-t="voice.tip"
+                    title="tap to arm voice" aria-pressed="false">
+              <span class="orb-core"></span>
+            </button>
+            <div class="voice-meta">
+              <div class="voice-state" id="voiceState">VOICE LOCKED</div>
+              <div class="voice-sub" id="voiceSub">—</div>
+            </div>
+          </div>
+          <div class="ticker" id="ticker">
+            <span class="ticker-dot"></span><span id="tickerText">—</span>
+          </div>
+          <div class="reason-list" id="reasonList"></div>
         </div>
       </div>
     </section>
 
-    <!-- CENTER: status ring (5 nodes) -->
-    <section class="col col-center">
-      <div class="ring-wrap">
-        <svg id="ring" viewBox="0 0 420 420" role="img" aria-label="system status ring">
-          <defs>
-            <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
-              <feGaussianBlur stdDeviation="4" result="b"/>
-              <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
-            </filter>
-            <radialGradient id="coreGrad" cx="50%" cy="50%" r="50%">
-              <stop offset="0%" stop-color="#70e4fd" stop-opacity=".6"/>
-              <stop offset="60%" stop-color="#2892ff" stop-opacity=".14"/>
-              <stop offset="100%" stop-color="#2892ff" stop-opacity="0"/>
-            </radialGradient>
-          </defs>
-          <circle class="ring-track" cx="210" cy="210" r="168"/>
-          <circle class="ring-track ring-track-in" cx="210" cy="210" r="120"/>
-          <g class="ring-scan" id="ringScan">
-            <path d="M210 210 L210 42 A168 168 0 0 1 294 66 Z" fill="url(#scanGrad)" opacity=".25"/>
-            <line x1="210" y1="210" x2="210" y2="34" class="scan-beam"/>
-          </g>
-          <defs>
-            <linearGradient id="scanGrad" x1="0" y1="0" x2="1" y2="1">
-              <stop offset="0%" stop-color="#2892ff" stop-opacity=".8"/>
-              <stop offset="100%" stop-color="#2892ff" stop-opacity="0"/>
-            </linearGradient>
-          </defs>
-          <g id="ringTicks"></g>
-          <circle class="ring-core" cx="210" cy="210" r="96" fill="url(#coreGrad)"/>
-          <g id="ringNodes"></g>
-          <text class="ring-state" id="ringState" x="210" y="204">—</text>
-          <text class="ring-sub" id="ringSub" x="210" y="232">—</text>
-        </svg>
-      </div>
-      <div class="panel-row" id="panels"></div>
-    </section>
-
-    <!-- RIGHT: arc reactor (cost energy) + channel -->
-    <section class="col col-right">
-      <div class="card reactor-card">
-        <h2><span data-i18n="sec.reactor">ARC REACTOR // COST</span>
-            <span class="live-dot" id="usageLive" hidden></span></h2>
-        <div class="reactor-wrap">
-          <svg id="reactor" viewBox="0 0 220 220" role="img" aria-label="cost reactor">
-            <circle class="r-outer" cx="110" cy="110" r="96"/>
-            <circle class="r-tick" cx="110" cy="110" r="86"/>
-            <circle class="r-arcbg" cx="110" cy="110" r="74"/>
-            <circle class="r-arc" id="rArc" cx="110" cy="110" r="74"
-                    transform="rotate(-90 110 110)"/>
-            <circle class="r-mid" cx="110" cy="110" r="54"/>
-            <circle class="r-core" id="rCore" cx="110" cy="110" r="34"/>
-            <text class="r-num" id="rCost" x="110" y="106">–</text>
-            <text class="r-unit" id="rCostUnit" x="110" y="126">$ TODAY</text>
-          </svg>
+    <!-- CHAT: one streamed agent turn over the same loop/session contract as
+         the TG channel (SSE preview, authoritative done text) -->
+    <section class="view" id="view-chat" data-view="chat">
+      <div class="view-head">
+        <div class="view-titles">
+          <h2 data-i18n="view.chat.title">Chat</h2>
+          <p class="view-sub" data-i18n="view.chat.sub">One streamed turn over the console session</p>
         </div>
-        <div class="stat-grid" id="usageStats"></div>
-        <div class="stat-note" id="usageNote"></div>
       </div>
+      <section class="card chat">
+        <h2><span data-i18n="sec.chat">CHAT</span>
+            <span class="chat-badge" id="chatBadge" data-i18n="chat.idle">idle</span></h2>
+        <div class="chat-log" id="chatLog">
+          <div class="chat-empty" id="chatEmpty" data-i18n="chat.empty">no messages yet</div>
+        </div>
+        <div class="chat-form">
+          <input id="chatInput" class="chat-input" maxlength="4000" autocomplete="off"
+                 data-i18n-ph="chat.ph" placeholder="ask the assistant…">
+          <button class="btn primary" id="chatSend" data-i18n="chat.send">SEND</button>
+          <button class="btn" id="chatClear" data-i18n="chat.clear">CLEAR</button>
+          <span class="chat-msg" id="chatMsg" role="status"></span>
+        </div>
+        <div class="chat-meta" id="chatMeta"></div>
+      </section>
+    </section>
 
-      <div class="card">
-        <h2 data-i18n="sec.channel">CHANNEL</h2>
-        <table class="kv" id="cfgTable"></table>
+    <!-- SKILLS: skill armory (real SKILL.md records) -->
+    <section class="view" id="view-skills" data-view="skills">
+      <div class="view-head">
+        <div class="view-titles">
+          <h2 data-i18n="view.skills.title">Skills</h2>
+          <p class="view-sub" data-i18n="view.skills.sub">Mounted skill records — body and external</p>
+        </div>
+      </div>
+      <section class="card gallery">
+        <h2><span data-i18n="sec.gallery">SKILL ARMORY</span><span class="gal-count" id="galCount"></span></h2>
+        <div class="gal-grid" id="galGrid"></div>
+      </section>
+    </section>
+
+    <!-- EVOLUTION: institutional loop (learn -> reflect -> log; the Human
+         conclusion in every reflect draft belongs to the owner) -->
+    <section class="view" id="view-evolution" data-view="evolution">
+      <div class="view-head">
+        <div class="view-titles">
+          <h2 data-i18n="view.evolution.title">Evolution</h2>
+          <p class="view-sub" data-i18n="view.evolution.sub">Learn, reflect, review the loop</p>
+        </div>
+      </div>
+      <section class="card evolution">
+        <h2><span data-i18n="sec.evolution">EVOLUTION</span><span class="evo-badge" id="evoBadge">–</span></h2>
+        <div class="evo-cols">
+          <div class="evo-left">
+            <div class="evo-status" id="evoStatus">–</div>
+            <ul class="evo-log" id="evoLog"></ul>
+          </div>
+          <div class="evo-form">
+            <select id="evoKind" class="evo-input" aria-label="learn kind">
+              <option value="skill" data-i18n="evo.kind.skill">skill</option>
+              <option value="memory" data-i18n="evo.kind.memory">memory</option>
+            </select>
+            <input id="evoName" class="evo-input" maxlength="64" data-i18n-ph="evo.namePh" placeholder="skill slug (a-z0-9._-)">
+            <input id="evoDesc" class="evo-input" maxlength="200" data-i18n-ph="evo.descPh" placeholder="one-line description">
+            <textarea id="evoBody" class="evo-input evo-body" rows="3" data-i18n-ph="evo.bodyPh" placeholder="skill body or lesson text"></textarea>
+            <div class="evo-actions">
+              <button id="evoLearnBtn" class="btn primary" data-i18n="evo.learn">LEARN</button>
+              <select id="evoPeriod" class="evo-input" aria-label="reflect period">
+                <option value="daily" data-i18n="evo.period.daily">daily</option>
+                <option value="weekly" data-i18n="evo.period.weekly">weekly</option>
+                <option value="monthly" data-i18n="evo.period.monthly">monthly</option>
+              </select>
+              <button id="evoReflectBtn" class="btn" data-i18n="evo.reflect">REFLECT</button>
+              <span id="evoMsg" class="evo-msg" role="status"></span>
+            </div>
+          </div>
+        </div>
+      </section>
+    </section>
+
+    <!-- STREAM: typewriter event log (sanctioned full-width panel) -->
+    <section class="view" id="view-stream" data-view="stream">
+      <div class="view-head">
+        <div class="view-titles">
+          <h2 data-i18n="view.stream.title">Stream</h2>
+          <p class="view-sub" data-i18n="view.stream.sub">Live event log from every service</p>
+        </div>
+      </div>
+      <section class="card stream">
+        <h2><span data-i18n="sec.stream">LIVE STREAM</span><span class="stream-caret" id="streamCaret"></span></h2>
+        <div class="stream-body" id="stream"></div>
+      </section>
+    </section>
+
+    <!-- SETTINGS: grouped form (console / usage / model / access) -->
+    <section class="view" id="view-settings" data-view="settings">
+      <div class="view-head">
+        <div class="view-titles">
+          <h2 data-i18n="view.settings.title">Settings</h2>
+          <p class="view-sub" data-i18n="view.settings.sub">Console, usage, model and access</p>
+        </div>
+      </div>
+      <div class="set-grid">
+        <div class="card">
+          <h2 data-i18n="sec.console">CONSOLE</h2>
+          <div class="ctl-row">
+            <label data-i18n="ctl.sound">UI sound</label>
+            <button class="toggle" id="soundToggle" aria-pressed="false"><span></span></button>
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="ctl.volume">Voice volume</label>
+            <input type="range" id="voiceVol" min="0" max="100" step="5" value="80"
+                   data-i18n-t="voice.volTip" title="spoken announcements volume">
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="ctl.alert">Alert state</label>
+            <select id="alertSelect">
+              <option value="off" data-i18n="common.off">off</option>
+              <option value="warn" data-i18n="adv.warn">warn</option>
+              <option value="urgent" data-i18n="adv.urgent">urgent</option>
+            </select>
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="ctl.refresh">Refresh (s)</label>
+            <select id="refreshSelect">
+              <option>5</option><option>10</option><option>30</option><option>60</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2 data-i18n="sec.usage">Usage &amp; cost</h2>
+          <div class="ctl-row">
+            <label data-i18n="ctl.currency">Currency</label>
+            <select id="curSelect">
+              <option>USD</option><option>CNY</option><option>EUR</option>
+              <option>GBP</option><option>JPY</option>
+            </select>
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="ctl.fx">FX rate (0 = auto)</label>
+            <input type="number" id="fxInput" min="0" max="100000" step="0.01" value="0">
+          </div>
+        </div>
+
+        <div class="card">
+          <h2 data-i18n="set.group.model">Model</h2>
+          <div class="ctl-row">
+            <label data-i18n="ctl.mycModel">Kernel model</label>
+            <input type="text" id="mycModel" maxlength="100" placeholder="mimo-v2.6-flash"
+                   data-i18n-ph="ctl.mycModelPh" autocomplete="off">
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="ctl.mycUrl">Kernel endpoint</label>
+            <input type="text" id="mycUrl" maxlength="256" placeholder="http://127.0.0.1:3460/v1"
+                   data-i18n-ph="ctl.mycUrlPh" autocomplete="off">
+          </div>
+        </div>
+
+        <div class="card">
+          <h2 data-i18n="set.group.access">Access</h2>
+          <div class="ctl-row token-row">
+            <label data-i18n="ctl.token">Access token</label>
+            <input type="password" id="tokenInput" autocomplete="off"
+                   data-i18n-ph="ctl.tokenPh" placeholder="WEB_TOKEN to unlock writes">
+          </div>
+          <div class="ctl-actions">
+            <button class="btn primary" id="saveBtn" data-i18n="ctl.save">SAVE</button>
+            <span class="save-state" id="saveState"></span>
+          </div>
+        </div>
       </div>
     </section>
+
+    <footer>
+      <span id="footnote">loopback · free forever</span>
+      <span id="ts">–</span>
+    </footer>
   </main>
-
-  <!-- console chat: one streamed agent turn over the same loop/session
-       contract as the TG channel (SSE preview, authoritative done text) -->
-  <section class="card chat">
-    <h2><span data-i18n="sec.chat">CHAT</span>
-        <span class="chat-badge" id="chatBadge" data-i18n="chat.idle">idle</span></h2>
-    <div class="chat-log" id="chatLog">
-      <div class="chat-empty" id="chatEmpty" data-i18n="chat.empty">no messages yet</div>
-    </div>
-    <div class="chat-form">
-      <input id="chatInput" class="chat-input" maxlength="4000" autocomplete="off"
-             data-i18n-ph="chat.ph" placeholder="ask the assistant…">
-      <button class="btn primary" id="chatSend" data-i18n="chat.send">SEND</button>
-      <button class="btn" id="chatClear" data-i18n="chat.clear">CLEAR</button>
-      <span class="chat-msg" id="chatMsg" role="status"></span>
-    </div>
-    <div class="chat-meta" id="chatMeta"></div>
-  </section>
-
-  <!-- skill armory (armor-gallery analog: real SKILL.md records) -->
-  <section class="card gallery">
-    <h2><span data-i18n="sec.gallery">SKILL ARMORY</span><span class="gal-count" id="galCount"></span></h2>
-    <div class="gal-grid" id="galGrid"></div>
-  </section>
-
-  <!-- evolution: institutional loop (learn -> reflect -> log; the Human
-       conclusion in every reflect draft belongs to the owner) -->
-  <section class="card evolution">
-    <h2><span data-i18n="sec.evolution">EVOLUTION</span><span class="evo-badge" id="evoBadge">–</span></h2>
-    <div class="evo-status" id="evoStatus">–</div>
-    <ul class="evo-log" id="evoLog"></ul>
-    <div class="evo-form">
-      <select id="evoKind" class="evo-input" aria-label="learn kind">
-        <option value="skill" data-i18n="evo.kind.skill">skill</option>
-        <option value="memory" data-i18n="evo.kind.memory">memory</option>
-      </select>
-      <input id="evoName" class="evo-input" maxlength="64" data-i18n-ph="evo.namePh" placeholder="skill slug (a-z0-9._-)">
-      <input id="evoDesc" class="evo-input" maxlength="200" data-i18n-ph="evo.descPh" placeholder="one-line description">
-      <textarea id="evoBody" class="evo-input evo-body" rows="3" data-i18n-ph="evo.bodyPh" placeholder="skill body or lesson text"></textarea>
-      <div class="evo-actions">
-        <button id="evoLearnBtn" class="btn primary" data-i18n="evo.learn">LEARN</button>
-        <select id="evoPeriod" class="evo-input" aria-label="reflect period">
-          <option value="daily" data-i18n="evo.period.daily">daily</option>
-          <option value="weekly" data-i18n="evo.period.weekly">weekly</option>
-          <option value="monthly" data-i18n="evo.period.monthly">monthly</option>
-        </select>
-        <button id="evoReflectBtn" class="btn" data-i18n="evo.reflect">REFLECT</button>
-        <span id="evoMsg" class="evo-msg" role="status"></span>
-      </div>
-    </div>
-  </section>
-
-  <!-- BOTTOM: typewriter event stream -->
-  <section class="card stream">
-    <h2><span data-i18n="sec.stream">LIVE STREAM</span><span class="stream-caret" id="streamCaret"></span></h2>
-    <div class="stream-body" id="stream"></div>
-  </section>
-
-  <footer>
-    <span id="footnote">loopback · free forever</span>
-    <span id="ts">–</span>
-  </footer>
 </div>
 
 <script src="/static/app.js"></script>
