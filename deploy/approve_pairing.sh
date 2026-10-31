@@ -3,7 +3,7 @@
 # no longer starts this (pairing -> configure allowlist in secrets.env
 # AIDOG_TG_ALLOWED_USERS).
 # Approve the newest pending DM-pairing request for the aidog gateway.
-# Workflow (Owner's file-drop pattern): he DMs the bot, drops the bot's reply
+# Workflow (the owner's file-drop pattern): he DMs the bot, drops the bot's reply
 # into a file (optional evidence), we approve the latest pending request.
 # Usage: bash approve_pairing.sh [evidence_file]
 # i18n: English comments per repo policy; output keeps IDs only, no secrets.

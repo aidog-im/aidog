@@ -39,7 +39,7 @@ upstream update            # 8-stage: snapshot → fetch → syntax gate (auto-r
 - [ ] `upstream -p aidog config get skills.external_dirs` still points to our skills dir
 - [ ] `upstream -p aidog skills list` shows the 6 external skills enabled
 - [ ] `upstream config get telemetry.shared_metrics` still `enabled: false / send: false`
-- [ ] `git -C imaidog status` unchanged (we never write upstream source)
+- [ ] `git status` (from the product repo root) unchanged — we never write upstream source
 - [ ] Overlay re-load if upstream schema changed: diff `SOUL.md` placeholders
 - [ ] Smoke: `upstream -p aidog -z "ping" ...` quick reply (see `tests/ab_protocol.md`)
 

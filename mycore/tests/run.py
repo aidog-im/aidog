@@ -178,7 +178,7 @@ def test_registry_and_tools() -> None:
         check("tools: bash empty -> ERROR", r.startswith("ERROR:"), r[:60])
 
         # skill_route integration (offline, vendored lib)
-        r = reg.dispatch("skill_route", {"query": "发推语气检查"})
+        r = reg.dispatch("skill_route", {"query": "post tone check"})
         check("tools: skill_route answers", isinstance(r, str) and len(r) > 0, r[:80])
         # outside-roots skill dir resolution uses default roots — just must not raise
 
@@ -755,12 +755,12 @@ def test_watchdog() -> None:
         wdh.check_once()
         wdh.check_once()   # same day: must not repeat
         check("wd: heartbeat fires once per day",
-              sum(1 for a in hb_alerts if "[心跳]" in a) == 1, str(hb_alerts))
+              sum(1 for a in hb_alerts if "[HEARTBEAT]" in a) == 1, str(hb_alerts))
         clock_hb2 = dt.datetime(2026, 10, 19, 1, 0, tzinfo=dt.timezone.utc).timestamp()
         wdh._now = lambda: clock_hb2
         wdh.check_once()
         check("wd: heartbeat next day fires",
-              sum(1 for a in hb_alerts if "[心跳]" in a) == 2)
+              sum(1 for a in hb_alerts if "[HEARTBEAT]" in a) == 2)
 
         # --- no chat id -> log-only notify never crashes ---
         wdn = Watchdog(cfg, tdp / "state_n.json", tg=None, log=lambda l: None,

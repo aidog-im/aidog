@@ -84,7 +84,7 @@ restart_gw() {
   tmux new -d -s aidog_gw "$PROXY_ENV $AIDOG_KERNEL_CMD --force > $GWLOG 2>&1"
 }
 
-notify "🛰️ [watchdog] 看门狗已上岗 · 每 60s 巡检 · 心跳每日 09:00（北京时间）"
+notify "🛰️ [watchdog] watchdog on duty · 60s patrol · daily heartbeat 09:00 (Beijing)"
 last_hb_day=""
 prev="unknown"
 last_retry=0
@@ -94,14 +94,14 @@ while true; do
 
   if [ "$cur" = down ]; then
     if [ "$prev" = up ]; then
-      notify "🔴 [watchdog] gateway 崩溃（$(date '+%H:%M:%S')），自动拉起中…"
+      notify "🔴 [watchdog] gateway down ($(date '+%H:%M:%S')) — restarting…"
       restart_gw
       sleep 8
       if gw_alive; then
-        notify "🟢 [watchdog] 已恢复运行（tmux aidog_gw）"
+        notify "🟢 [watchdog] back up (tmux aidog_gw)"
         cur=up
       else
-        notify "⚠️ [watchdog] 重启失败！需人工介入：tail $GWLOG"
+        notify "⚠️ [watchdog] restart FAILED — manual intervention needed: tail $GWLOG"
         last_retry=$(date +%s)
       fi
     elif [ "$prev" = unknown ]; then
@@ -113,23 +113,23 @@ while true; do
       # never stay silent (boot blind spot observed 2026-10-17).
       now=$(date +%s)
       if [ $((now - last_retry)) -ge 300 ]; then
-        notify "⚠️ [watchdog] gateway 持续离线，再次拉起…"
+        notify "⚠️ [watchdog] gateway still offline — restarting again…"
         restart_gw
         sleep 8
         if gw_alive; then
-          notify "🟢 [watchdog] 已恢复运行（tmux aidog_gw）"
+          notify "🟢 [watchdog] back up (tmux aidog_gw)"
           cur=up
         fi
         last_retry=$(date +%s)
       fi
     fi
   elif [ "$cur" = up ] && [ "$prev" = down ]; then
-    notify "🟢 [watchdog] gateway 已回到在线状态"
+    notify "🟢 [watchdog] gateway back online"
   fi
 
   hhmm=$(date +%H%M); day=$(date +%F)
   if [ "$hhmm" -ge 0900 ] && [ "$hhmm" -lt 0905 ] && [ "$last_hb_day" != "$day" ]; then
-    notify "🟢 [心跳] aidog 具身系统 · $day $(date '+%H:%M') · gateway=$cur"
+    notify "🟢 [HEARTBEAT] aidog embodied system · $day $(date '+%H:%M') · gateway=$cur"
     last_hb_day="$day"
   fi
 

@@ -35,7 +35,7 @@ async function loadLang(lang) {
   } catch (e) { dict = {}; }
   document.documentElement.lang = lang;
   const btn = document.getElementById("langBtn");
-  if (btn) btn.textContent = lang === "en" ? "中文" : "English";
+  if (btn) btn.textContent = t("ctl.langBtn", lang === "en" ? "ZH" : "EN");
   document.querySelectorAll("[data-i18n]").forEach(el => {
     el.textContent = t(el.dataset.i18n, el.textContent);
   });

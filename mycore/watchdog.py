@@ -275,7 +275,7 @@ class Watchdog:
         if hhmm >= target and self._last_heartbeat_day != day:
             self._last_heartbeat_day = day
             summary = " ".join(f"{k}={v}" for k, v in results.items())
-            self.notify(f"🟢 [心跳] mycore watchdog · {day} {hhmm} · {summary}")
+            self.notify(f"🟢 [HEARTBEAT] mycore watchdog · {day} {hhmm} · {summary}")
             self._save_state()
 
     def loop(self, max_cycles: int | None = None) -> None:

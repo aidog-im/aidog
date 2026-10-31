@@ -45,7 +45,7 @@ def make_fixture(root: Path) -> Path:
     (a / "SKILL.md").write_text(
         "---\n"
         "name: tone-audit\n"
-        "description: 发推语气检查 and tone lint for public posts\n"
+        "description: 发推语气检查 and tone lint for public posts\n"  # i18n-allow: zh routing input
         "---\n\n# tone-audit\nbody\n", encoding="utf-8")
     b = root / "mail-box"
     b.mkdir(parents=True)
@@ -64,7 +64,7 @@ def main() -> int:
     # --- exit code contract ---
     with tempfile.TemporaryDirectory() as td:
         fx = make_fixture(Path(td))
-        rc, out = run(["--dirs", str(fx), "发推语气检查"])
+        rc, out = run(["--dirs", str(fx), "发推语气检查"])  # i18n-allow: zh routing input
         check("hit query -> exit 0", rc == 0, f"rc={rc}")
         check("hit query -> TOP1 tone-audit", "tone-audit" in out.splitlines()[1] if out else False,
               out[:120])
@@ -77,13 +77,13 @@ def main() -> int:
         check("empty input -> exit 2", rc == 2, f"rc={rc}")
 
         # --- json contract + determinism ---
-        rc, out1 = run(["--json", "--dirs", str(fx), "发推语气检查"])
-        rc2, out2 = run(["--json", "--dirs", str(fx), "发推语气检查"])
+        rc, out1 = run(["--json", "--dirs", str(fx), "发推语气检查"])  # i18n-allow: zh routing input
+        rc2, out2 = run(["--json", "--dirs", str(fx), "发推语气检查"])  # i18n-allow: zh routing input
         ok_json = False
         try:
             doc = json.loads(out1)
             ok_json = (isinstance(doc.get("hits"), list) and "top1_required" in doc
-                       and "roots" in doc and doc.get("query") == "发推语气检查")
+                       and "roots" in doc and doc.get("query") == "发推语气检查")  # i18n-allow: zh routing input
             ok_json = ok_json and all("reason" in h for h in doc["hits"])
         except ValueError:
             doc = {}

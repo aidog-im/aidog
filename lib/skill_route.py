@@ -106,7 +106,7 @@ def tokenize(text: str) -> tuple[set[str], set[str]]:
     """-> (ascii_stems, cjk_bigrams)"""
     ascii_words = {stem(w) for w in re.findall(r"[A-Za-z][A-Za-z0-9_]+", text)} - STOP_ASCII
     bigrams: set[str] = set()
-    for run in re.findall(r"[一-鿿]+", text):
+    for run in re.findall(r"[\u4e00-\u9fff]+", text):
         if len(run) == 1:
             bigrams.add(run)
         else:
@@ -115,7 +115,7 @@ def tokenize(text: str) -> tuple[set[str], set[str]]:
 
 
 def cjk_runs(text: str) -> list[str]:
-    return re.findall(r"[一-鿿]{2,}", text)
+    return re.findall(r"[\u4e00-\u9fff]{2,}", text)
 
 
 def local_config_dirs() -> list[str]:

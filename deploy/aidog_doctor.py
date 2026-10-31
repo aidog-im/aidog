@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""aidog doctor — deterministic health check for the 具身系统 (I'm AiDog) transition stack.
+"""aidog doctor — deterministic health check for the embodied system (I'm AiDog) transition stack.
 
 Product ancestor of the future `aidog doctor` CLI. Every check encodes a P1 lesson
 (env glue, overlay-only discipline, memory budgets, gateway/watchdog liveness).

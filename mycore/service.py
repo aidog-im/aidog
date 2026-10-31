@@ -22,6 +22,8 @@ consumed or claimed):
 State directory (default <repo>/data/mycore_service, env AIDOG_MC_STATE):
 
     mycore_service.pid        single-instance lock (pid liveness, best effort)
+    lang.json                 persisted reply language ({"lang": "zh"}); absent
+                              or invalid -> default pack (en), fail-soft
     service.log               append log, size-rotate ~1MB keep 1; chat ids
                               redacted to id:<last4>; never token/secret/
                               machine-path values
@@ -39,6 +41,9 @@ allowlist gate — unauthenticated /commands are ignored like any message):
             per-chat override (allowed ids: web/settings.json mycore.models
             when present, else only the currently configured id)
     /status session turn count, current model, service uptime
+    /lang   show the reply language; /lang <code> switches it service-wide and
+            persists to <state>/lang.json (packs discovered in
+            overlay/locales/, default en)
 
 Modes:
     --once    fetch at most ONE getUpdates batch (short poll), handle at most
@@ -55,7 +60,8 @@ Credentials: the poll token comes from MYCORE_TG_TOKEN at call time through
 TgClient.polling_token() (README contract 2 — never logged, never echoed).
 Observation scrubbing: chat replies never carry stack traces, absolute
 machine paths, or engine names — failures map to short honest lines.
-English code/comments per repo i18n policy.
+English code/comments per repo i18n policy; every user-visible string comes
+from the locale packs (overlay/locales/, loader lib/i18n.py, default en).
 """
 from __future__ import annotations
 
@@ -79,6 +85,14 @@ from .tools import build_registry
 
 REPO = Path(__file__).resolve().parent.parent
 
+# Locale loader: stdlib-only sibling module under lib/. The repo root is put
+# at the FRONT of sys.path (never merely appended) so this vendored copy
+# always wins — same convention as the tools.py router import.
+if str(REPO) in sys.path:
+    sys.path.remove(str(REPO))
+sys.path.insert(0, str(REPO))
+from lib import i18n  # noqa: E402  (overlay/locales/* = single source of truth)
+
 ALLOW_ENV = "AIDOG_TG_ALLOWED_USERS"   # comma-separated TG user ids (fail-closed)
 STATE_ENV = "AIDOG_MC_STATE"           # state dir override
 PIDFILE_NAME = "mycore_service.pid"
@@ -86,25 +100,23 @@ LOG_NAME = "service.log"
 SESSIONS_DIR = "sessions"
 ARCHIVE_DIR = "archive"
 MODEL_EXT = ".model"
+LANG_FILE_NAME = "lang.json"        # persisted reply language (service-wide)
 
 LOG_MAX_BYTES = 1_000_000              # size-rotate threshold, keep 1 backup
 DENY_WARN_THROTTLE = 60.0              # seconds between WARN lines per chat
 MAX_POLL_ERRORS = 20                   # bounded backoff, then give up (tg.py parity)
 DEFAULT_POLL_TIMEOUT = 30              # long-poll seconds (0 in --once mode)
 
-# Honest one-line replies. Fixed constants: no engine names, no paths, no
-# exception internals ever reach the chat (observation-scrubbing rule).
-NO_OUTPUT_LINE = "(no output — see logs)"
-MODEL_ERR_LINE = "(model error — the turn stopped; see service logs)"
-INTERNAL_ERR_LINE = "(internal error — the turn stopped; see service logs)"
-
-HELP_TEXT = (
-    "Commands:\n"
-    "/help — show this help\n"
-    "/reset — archive this chat's session and start fresh\n"
-    "/model [id] — show or set the model for this chat\n"
-    "/status — session turns, current model, service uptime"
-)
+# Honest one-line replies. The English constants stay importable (tests and
+# tooling compare against them); live replies resolve the SAME keys through
+# the locale packs (default en), so a language switch never weakens the
+# honesty rule: no engine names, no paths, no exception internals in chat.
+NO_OUTPUT_LINE = i18n.get(i18n.DEFAULT_LANG, "err.no_output",
+                          "(no output — see logs)")
+MODEL_ERR_LINE = i18n.get(i18n.DEFAULT_LANG, "err.model",
+                          "(model error — the turn stopped; see service logs)")
+INTERNAL_ERR_LINE = i18n.get(i18n.DEFAULT_LANG, "err.internal",
+                             "(internal error — the turn stopped; see service logs)")
 
 # Absolute machine paths are stripped from dry-run stdout previews only
 # (operational convenience; the chat itself never receives raw tool output).
@@ -316,6 +328,7 @@ class ChatService:
         self._stop = False
         self._deny_stamp: dict[str, float] = {}
         self.log = ServiceLog(self.state / LOG_NAME, now=now)
+        self.lang = self._load_lang()
         # HARD token gate (tg.py): dedicated MYCORE_TG_TOKEN required here too.
         self.tg = TgClient(token=TgClient.polling_token(),
                            token_env=POLL_BOT_ENV, transport=transport)
@@ -339,6 +352,34 @@ class ChatService:
                 signal.signal(sig, _handle)
             except (ValueError, OSError):       # non-main thread (tests)
                 pass
+
+    # ------------------------------------------------------------- locale ---
+    def _load_lang(self) -> str:
+        """Persisted reply language (<state>/lang.json) -> pack code.
+
+        Fail-soft by design: absent/garbage/unknown code falls back to the
+        default pack (en) and never blocks startup; a rejected persisted
+        value is logged once as LANG_FALLBACK (no secret/path detail).
+        """
+        code = ""
+        try:
+            raw = json.loads((self.state / LANG_FILE_NAME).read_text(
+                encoding="utf-8"))
+            code = (str(raw.get("lang", "")).strip().lower()
+                    if isinstance(raw, dict) else "")
+        except (OSError, ValueError):
+            code = ""
+        if not code:
+            return i18n.DEFAULT_LANG
+        if not i18n.has_lang(code):
+            self.log.write("LANG_FALLBACK", f"value={code[:16]}",
+                           f"using={i18n.DEFAULT_LANG}")
+            return i18n.DEFAULT_LANG
+        return code
+
+    def _t(self, key: str, **kw) -> str:
+        """Localized user-visible string for the service-wide language."""
+        return i18n.fmt(self.lang, key, **kw)
 
     # -------------------------------------------------------------- loop ----
     def run(self, once: bool = False) -> int:
@@ -430,7 +471,7 @@ class ChatService:
         except Exception as e:  # noqa: BLE001 — one bad update must not kill the loop
             self.log.write("UPDATE_ERR", f"chat={redact_chat(cid)}",
                            f"err={type(e).__name__}")
-            reply = INTERNAL_ERR_LINE
+            reply = self._t("err.internal")
         if reply:
             self._send(cid, reply)
 
@@ -534,32 +575,62 @@ class ChatService:
         self.log.write("CMD", f"chat={redact_chat(chat_id)}", f"cmd={name}")
 
         if name == "help":
-            return HELP_TEXT
+            return (self._t("cmd.help.title") + "\n"
+                    + self._t("cmd.help.body"))
         if name == "reset":
             rotated = self._archive_session(chat_id)
-            return ("session reset — previous session archived" if rotated
-                    else "session reset — no session to archive")
+            return (self._t("cmd.reset.archived") if rotated
+                    else self._t("cmd.reset.empty"))
         if name == "model":
             cfg = self._model_for_chat(chat_id)
             if not arg:
-                return f"model: {cfg.model} @ {endpoint_host(cfg.base_url)}"
+                return self._t("cmd.model.show", model=cfg.model,
+                               host=endpoint_host(cfg.base_url))
             if arg not in self._allowed_models():
-                return f"unknown model id — allowed: {', '.join(self._allowed_models())}"
+                return self._t("cmd.model.unknown",
+                               ids=", ".join(self._allowed_models()))
             try:
                 self._write_override(chat_id, arg)
             except OSError:
                 self.log.write("MODEL_SET_ERR", f"chat={redact_chat(chat_id)}",
                                "err=write_failed")
-                return "(could not save the model choice — see logs)"
+                return self._t("cmd.model.save_err")
             self.log.write("MODEL_SET", f"chat={redact_chat(chat_id)}",
                            f"model={arg}")
-            return f"model set: {arg} (this chat)"
+            return self._t("cmd.model.set", model=arg)
         if name == "status":
             turns = len(Session(self._session_path(chat_id)).load())
             cfg = self._model_for_chat(chat_id)
             up = fmt_uptime(self._now() - self._started)
-            return f"turns={turns} model={cfg.model} uptime={up}"
-        return "unknown command — send /help for the list"
+            return self._t("cmd.status.line", turns=turns, model=cfg.model,
+                           uptime=up)
+        if name == "lang":
+            return self._lang_command(chat_id, arg)
+        return self._t("cmd.unknown")
+
+    def _lang_command(self, chat_id: int, arg: str) -> str:
+        """`/lang` (show) and `/lang <code>` (switch, persisted service-wide).
+
+        Only discovered packs are switchable — an unknown code changes
+        nothing and answers with the honest available list (fail-closed).
+        """
+        codes = ", ".join(i18n.languages())
+        if not arg:
+            return self._t("cmd.lang.show", lang=self.lang, codes=codes)
+        code = arg.strip().lower()
+        if not i18n.has_lang(code):
+            return self._t("cmd.lang.bad", codes=codes)
+        self.lang = code
+        try:
+            (self.state / LANG_FILE_NAME).write_text(
+                json.dumps({"lang": code}) + "\n", encoding="utf-8")
+        except OSError:
+            self.log.write("LANG_SET_ERR", f"chat={redact_chat(chat_id)}",
+                           "err=write_failed")
+            return self._t("cmd.lang.save_err")
+        self.log.write("LANG_SET", f"chat={redact_chat(chat_id)}",
+                       f"lang={code}")
+        return self._t("cmd.lang.set", lang=code)
 
     # ------------------------------------------------------------ turn ------
     def _pipeline(self, chat_id: int, text: str) -> str:
@@ -600,7 +671,7 @@ class ChatService:
         except Exception as e:  # noqa: BLE001 — run_turn never raises; belt anyway
             self.log.write("TURN_CRASH", f"chat={redact_chat(chat_id)}",
                            f"err={type(e).__name__}")
-            return INTERNAL_ERR_LINE
+            return self._t("err.internal")
 
         # Persist only this turn's new messages (identity-based: compaction
         # rewrites list slots, so an index slice would misalign). System lines
@@ -617,15 +688,14 @@ class ChatService:
                        f"stop={res.stop}", f"iters={res.iterations}",
                        f"tools={res.tool_calls}")
         if res.stop == "final":
-            return res.text.strip() or NO_OUTPUT_LINE
+            return res.text.strip() or self._t("err.no_output")
         if res.stop == "max_iters":
-            return (f"(stopped after {res.iterations} tool iterations "
-                    f"without a final answer)")
+            return self._t("err.max_iters", n=res.iterations)
         # model_error: detail goes to the log only — the chat gets one honest
         # line with no engine name, exception internals, or paths.
         self.log.write("MODEL_ERR", f"chat={redact_chat(chat_id)}",
                        f"detail={res.text[:160]}")
-        return MODEL_ERR_LINE
+        return self._t("err.model")
 
 
 # ------------------------------------------------------------------ CLI -----

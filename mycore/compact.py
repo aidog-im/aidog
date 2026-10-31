@@ -1,4 +1,4 @@
-"""mycore.compact — simple context compaction (design §14.3: 简版压缩).
+"""mycore.compact — simple context compaction (design section 14.3: simplified fold).
 
 Budgeted folding of old turns: when the accumulated message payload exceeds
 `budget_chars`, the oldest non-system turns are collapsed into a single

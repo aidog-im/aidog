@@ -22,7 +22,8 @@ Routes:
   GET  /api/voice               -> voice engine capability (edge-tts presence)
   POST /api/say                 -> synthesize speech -> audio/mpeg (cached,
                                    rate-limited, sanitized, JSON-only origin-guarded)
-  GET  /static/i18n/<lang>.json -> locale packs (en default, zh switchable)
+  GET  /static/i18n/<lang>.json -> locale packs served from the SSOT
+                                   overlay/locales/ (en default, zh switchable)
 """
 from __future__ import annotations
 
@@ -48,6 +49,14 @@ from pathlib import Path
 WEB_DIR = Path(__file__).resolve().parent
 REPO = WEB_DIR.parent
 STATIC = WEB_DIR / "static"
+
+# Locale packs: single source of truth = overlay/locales/*.json, discovered by
+# the stdlib-only loader. The repo root goes to the FRONT of sys.path so this
+# vendored copy always wins.
+if str(REPO) in sys.path:
+    sys.path.remove(str(REPO))
+sys.path.insert(0, str(REPO))
+from lib import i18n  # noqa: E402
 HOST, PORT = "127.0.0.1", int(os.environ.get("AIDOG_WEB_PORT", "8790"))
 try:
     VERSION = (REPO / "VERSION").read_text(encoding="utf-8").strip()  # single source of truth
@@ -132,7 +141,9 @@ ALLOWED_TOP = ("language", "refresh_sec", "sound", "voice_volume",
 USAGE_KEYS = ("metrics_url", "pricing_config", "log_dir")
 MYCORE_KEYS = ("base_url", "model")
 MYCORE_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$")
-LANGS = ("en", "zh")
+# Supported UI languages = the discovered locale packs (overlay/locales/*);
+# fallback keeps validation sane if the packs are ever unreadable.
+LANGS = tuple(i18n.languages()) or ("en", "zh")
 ALERT_PREVIEWS = ("off", "warn", "urgent")
 CURRENCY_SYM = {"USD": "$", "CNY": "¥", "EUR": "€", "GBP": "£", "JPY": "¥"}
 CURRENCIES = tuple(CURRENCY_SYM)
@@ -1300,6 +1311,17 @@ class Handler(BaseHTTPRequestHandler):
     def _json(self, obj, code: int = 200) -> None:
         self._send(code, json.dumps(obj, ensure_ascii=False).encode(), "application/json; charset=utf-8")
 
+    def _locale_pack(self, name: str) -> None:
+        """GET /static/i18n/<lang>.json — packs come from overlay/locales/
+        (single source of truth), NOT from a static-file copy: the request is
+        resolved through the loader's discovered language set, so an unknown
+        or malformed code is a 404 (fail-closed) and no path ever escapes
+        into the filesystem."""
+        code = name[:-5] if name.endswith(".json") else ""
+        if not code or not i18n.has_lang(code):
+            return self._json({"error": "not found"}, 404)
+        return self._json(i18n.pack(code))
+
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
         if path in ("/", "/index.html"):
@@ -1322,6 +1344,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(collect_skills())
         if path == "/api/voice":
             return self._json(collect_voice())
+        if path.startswith("/static/i18n/"):
+            return self._locale_pack(path[len("/static/i18n/"):])
         if path.startswith("/static/"):
             rel = path[len("/static/"):]
             target = (STATIC / rel).resolve()

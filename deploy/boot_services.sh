@@ -59,7 +59,9 @@ inject_proxy() {
   tmux set-environment -g no_proxy "$NO_PROXY_VAL"
 }
 
-WD_PATTERN='bash .*imaidog/deploy/watchdog.sh'
+# Dir-agnostic on purpose: must match both `bash deploy/watchdog.sh` (relative
+# launch) and any absolute repo path — never hard-code the repo directory name.
+WD_PATTERN='bash .*/deploy/watchdog.sh'
 
 srv_pid() { tmux display-message -p '#{pid}' 2>/dev/null; }
 
@@ -197,7 +199,7 @@ case "${1:-start}" in
       session_exists "$s" && { tmux kill-session -t "$s"; log "$s: stopped"; }
     done
     # watchdog/gateway may linger outside tmux; only kill our own patterns
-    pkill -f 'bash .*imaidog/deploy/watchdog.sh' 2>/dev/null && log "watchdog process: stopped"
+    pkill -f "$WD_PATTERN" 2>/dev/null && log "watchdog process: stopped"
     # DANGER: GW_PATTERN is empty in the post-swap phase and `pkill -f ''`
     # would match (and kill) EVERYTHING incl. this shell — guard on non-empty.
     if [ -n "$GW_PATTERN" ]; then
