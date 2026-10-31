@@ -3256,7 +3256,7 @@ def test_channels() -> None:
 
         # --- factory + Inbound contract ---------------------------------
         loaded = channels.load_channels(repo, settings, transport=FakeTransport())
-        check("channels: load_channels returns 4 routes",
+        check(f"channels: load_channels returns {len(channels.CHANNELS)} routes",
               tuple(loaded) == channels.CHANNELS
               and all(isinstance(v, channels.Channel) for v in loaded.values()))
         ib = channels.Inbound(route="discord", sender="u1", target="C1", text="hi")
@@ -3552,8 +3552,9 @@ def test_channels() -> None:
 
         # --- status() structure ---------------------------------------------
         st = channels.status(settings, repo)
-        check("channels status: 4 rows with exact keys",
-              len(st) == 4 and [r["name"] for r in st] == list(channels.CHANNELS)
+        check(f"channels status: {len(channels.CHANNELS)} rows with exact keys",
+              len(st) == len(channels.CHANNELS)
+              and [r["name"] for r in st] == list(channels.CHANNELS)
               and all(set(r) == {"name", "enabled", "configured", "note",
                                  "inbound"} for r in st))
         by_name = {r["name"]: r for r in st}
@@ -3580,7 +3581,8 @@ def test_channels() -> None:
         os.environ["CHANNEL_SLACK_TOKEN"] = tok_s
         st4 = channels.status({}, repo)
         check("channels status: empty settings tolerated",
-              len(st4) == 4 and all(r["note"] == "disabled" for r in st4))
+              len(st4) == len(channels.CHANNELS)
+              and all(r["note"] == "disabled" for r in st4))
 
         # --- state root precedence ------------------------------------------
         check("channels: state_root honors settings state_dir",
@@ -3858,6 +3860,627 @@ def test_channels_service() -> None:
                 os.environ[key] = val
 
 
+def test_channels_domestic() -> None:
+    """D car domestic routes (dingtalk/feishu/wechat): request shapes, HMAC
+    sign, token caches with retry-once, cursor unit defense, byte-safe
+    truncation, zero secret echo, scheduler --origin parsing — all offline
+    (fake transports, temp dirs, fake credentials, no network)."""
+    import base64
+    import contextlib
+    import hashlib
+    import hmac
+    import io
+    import time
+    import urllib.parse
+    from mycore import channels
+    from mycore import scheduler as sch
+
+    ding_url = "https://oapi.dingtalk.com/robot/send?access_token=ding-ROBOT-tok77"
+    ding_secret = "dingtalk-SIGN-secret88"
+    feishu_id = "cli_aodog_dom_001"
+    feishu_secret = "feishu-APP-secret99"
+    wechat_id = "wxTEST1122334455"
+    wechat_secret = "wechat-APP-secret66"
+    wh_secret = "whsec-DOM-secret44"
+    slot_vals = {
+        "CHANNEL_DINGTALK_WEBHOOK": ding_url,
+        "CHANNEL_DINGTALK_SECRET": ding_secret,
+        "CHANNEL_FEISHU_APP_ID": feishu_id,
+        "CHANNEL_FEISHU_APP_SECRET": feishu_secret,
+        "CHANNEL_WECHAT_APPID": wechat_id,
+        "CHANNEL_WECHAT_APP_SECRET": wechat_secret,
+        "CHANNEL_WEBHOOK_SECRET": wh_secret,
+    }
+    saved = {k: os.environ.get(k) for k in list(slot_vals) + ["AIDOG_MC_STATE"]}
+    repo = Path(tempfile.mkdtemp(prefix="dom_repo_"))
+    state = Path(tempfile.mkdtemp(prefix="dom_state_"))
+    channels._TOKEN_CACHE.clear()
+
+    class FakeTransport:
+        """Records calls (url, payload, headers); replays scripted replies
+        (str = response text, Exception = raised verbatim)."""
+
+        def __init__(self, replies=()):
+            self.calls = []
+            self.replies = list(replies)
+
+        def __call__(self, url, payload, headers, timeout):
+            self.calls.append({"url": url, "payload": payload,
+                               "headers": dict(headers), "timeout": timeout})
+            if not self.replies:
+                raise AssertionError("scripted transport reply missing")
+            item = self.replies.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+    def tok(token: str) -> str:
+        return json.dumps({"code": 0, "tenant_access_token": token,
+                           "expire": 7200})
+
+    def page(items) -> str:
+        return json.dumps({"code": 0,
+                           "data": {"items": items, "has_more": False}})
+
+    def msg(mid, t, text, sender="ou_sender1", kind="text"):
+        return {"message_id": mid, "msg_type": kind, "create_time": str(t),
+                "sender": {"id": sender},
+                "body": {"content": json.dumps({"text": text})}}
+
+    try:
+        for key, val in slot_vals.items():
+            os.environ[key] = val
+        settings = {"state_dir": str(state), "channels": {
+            "dingtalk": {"enabled": True, "allow": []},
+            "feishu": {"enabled": True, "allow": [],
+                       "chat_ids": ["oc_ms_main"]},
+            "wechat": {"enabled": True, "allow": []},
+        }}
+        dom = ("dingtalk", "feishu", "wechat")
+        all_vals = list(slot_vals.values())
+
+        # --- contract: CHANNELS order + factory + outbound-only poll -------
+        check("dom channels: CHANNELS appends the three domestic routes",
+              channels.CHANNELS == ("discord", "slack", "email", "webhook",
+                                    "dingtalk", "feishu", "wechat"))
+        loaded = channels.load_channels(repo, settings,
+                                        transport=FakeTransport())
+        check("dom channels: factory builds every CHANNELS route",
+              tuple(loaded) == channels.CHANNELS
+              and all(isinstance(v, channels.Channel)
+                      for v in loaded.values())
+              and all(loaded[n].enabled for n in dom))
+        tr_d0 = FakeTransport()
+        d0 = channels.DingTalkChannel(repo=repo,
+                                      cfg=settings["channels"]["dingtalk"],
+                                      state=state, transport=tr_d0)
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            got = d0.poll()
+        check("dom dingtalk: inbound=False poll silent, zero transport calls",
+              got == [] and tr_d0.calls == []
+              and "CHANNEL_POLL_FAIL" not in buf.getvalue())
+        tr_w0 = FakeTransport()
+        w0 = channels.WeChatChannel(repo=repo,
+                                    cfg=settings["channels"]["wechat"],
+                                    state=state, transport=tr_w0)
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            got = w0.poll()
+        check("dom wechat: inbound=False poll silent, zero transport calls",
+              got == [] and tr_w0.calls == []
+              and "CHANNEL_POLL_FAIL" not in buf.getvalue())
+        tr_wh = FakeTransport()
+        wh = channels.WebhookChannel(repo=repo,
+                                     cfg={"enabled": True,
+                                          "url": "http://127.0.0.1:9/hook"},
+                                     state=state, transport=tr_wh)
+        check("dom channels: webhook route unchanged (inbound=True, empty poll)",
+              channels.WebhookChannel.inbound is True and wh.poll() == []
+              and tr_wh.calls == [])
+
+        # --- dingtalk: send shape + optional HMAC sign ---------------------
+        tr = FakeTransport([json.dumps({"errcode": 0, "errmsg": "ok"})])
+        d = channels.load_channels(repo, settings, transport=tr)["dingtalk"]
+        ok = d.send("label-a", "hello dingtalk")
+        call = tr.calls[0]
+        check("dom dingtalk: send posts to slot URL + signed query params",
+              ok is True
+              and call["url"].split("&timestamp=")[0] == ding_url
+              and "&sign=" in call["url"]
+              and call["headers"].get("Content-Type") == "application/json")
+        check("dom dingtalk: payload is msgtype/text/content shape",
+              json.loads(call["payload"]) ==
+              {"msgtype": "text", "text": {"content": "hello dingtalk"}})
+        qs = dict(kv.split("=", 1)
+                  for kv in call["url"].split("?", 1)[1].split("&"))
+        digest = hmac.new(ding_secret.encode("utf-8"),
+                          f"{qs['timestamp']}\n{ding_secret}".encode("utf-8"),
+                          hashlib.sha256).digest()
+        expect = urllib.parse.quote_plus(
+            base64.b64encode(digest).decode("ascii"))
+        check("dom dingtalk: sign recomputes as HMAC-SHA256 from captured ts",
+              qs["timestamp"].isdigit() and qs["sign"] == expect)
+        os.environ.pop("CHANNEL_DINGTALK_SECRET", None)
+        tr_u = FakeTransport([json.dumps({"errcode": 0})])
+        d_u = channels.load_channels(repo, settings, transport=tr_u)["dingtalk"]
+        ok_c, reason = d_u.configured()
+        ok_u = d_u.send("label-a", "no sign")
+        check("dom dingtalk: secret slot optional, configured stays True",
+              ok_c is True and reason == "" and ok_u is True
+              and tr_u.calls[0]["url"] == ding_url)
+        os.environ["CHANNEL_DINGTALK_SECRET"] = ding_secret
+        tr_e = FakeTransport([json.dumps({"errcode": 310000,
+                                          "errmsg": "sign not match"})])
+        d_e = channels.load_channels(repo, settings, transport=tr_e)["dingtalk"]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            ok = d_e.send("label-a", "x")
+        log = buf.getvalue()
+        check("dom dingtalk: HTTP 200 with errcode!=0 fails, never raises",
+              ok is False and "CHANNEL_SEND_FAIL" in log
+              and "310000" in log and "sign not match" in log)
+        tr_t = FakeTransport([json.dumps({"errcode": 0})])
+        d_t = channels.load_channels(repo, settings, transport=tr_t)["dingtalk"]
+        d_t.send("label-a", "x" * 20050)
+        sent = json.loads(tr_t.calls[0]["payload"])["text"]["content"]
+        check("dom dingtalk: text capped at 20000 chars with style marker",
+              len(sent) <= 20000 and sent.endswith("…[truncated]"))
+        os.environ.pop("CHANNEL_DINGTALK_WEBHOOK", None)
+        ok_c, reason = channels.load_channels(
+            repo, settings, transport=FakeTransport())["dingtalk"].configured()
+        check("dom dingtalk: configured False names the webhook slot only",
+              ok_c is False
+              and reason == "missing CHANNEL_DINGTALK_WEBHOOK slot"
+              and ding_url not in reason and "access_token" not in reason)
+        os.environ["CHANNEL_DINGTALK_WEBHOOK"] = ding_url
+        off_dom = {"state_dir": str(state),
+                   "channels": {"dingtalk": {"enabled": False, "allow": []}}}
+        tr_off = FakeTransport()
+        d_off = channels.load_channels(repo, off_dom,
+                                       transport=tr_off)["dingtalk"]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            ok = d_off.send("label-a", "x")
+        check("dom dingtalk: disabled route send False, zero transport calls",
+              ok is False and tr_off.calls == [])
+
+        # --- feishu: configured reasons ------------------------------------
+        f_cfg = settings["channels"]["feishu"]
+        os.environ.pop("CHANNEL_FEISHU_APP_ID", None)
+        ok_c, reason = channels.FeishuChannel(repo=repo, cfg=f_cfg,
+                                              state=state).configured()
+        check("dom feishu: configured False names the app id slot",
+              ok_c is False and reason == "missing CHANNEL_FEISHU_APP_ID slot")
+        os.environ["CHANNEL_FEISHU_APP_ID"] = feishu_id
+        os.environ.pop("CHANNEL_FEISHU_APP_SECRET", None)
+        ok_c, reason = channels.FeishuChannel(repo=repo, cfg=f_cfg,
+                                              state=state).configured()
+        check("dom feishu: configured False names the app secret slot",
+              ok_c is False
+              and reason == "missing CHANNEL_FEISHU_APP_SECRET slot"
+              and feishu_secret not in reason)
+        os.environ["CHANNEL_FEISHU_APP_SECRET"] = feishu_secret
+        ok_c, reason = channels.FeishuChannel(repo=repo, cfg=f_cfg,
+                                              state=state).configured()
+        check("dom feishu: both slots present -> configured True",
+              ok_c is True and reason == "")
+
+        # --- feishu: token -> send shapes + cache reuse --------------------
+        channels._TOKEN_CACHE.clear()
+        tr_f = FakeTransport([tok("ftok-111"),
+                              json.dumps({"code": 0,
+                                          "data": {"message_id": "om1"}}),
+                              json.dumps({"code": 0,
+                                          "data": {"message_id": "om2"}})])
+        f = channels.load_channels(repo, settings, transport=tr_f)["feishu"]
+        ok1 = f.send("oc_chat9", "one")
+        ok2 = f.send("oc_chat9", "two")
+        check("dom feishu: token endpoint posts app_id+app_secret",
+              tr_f.calls[0]["url"] ==
+              "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+              and json.loads(tr_f.calls[0]["payload"]) ==
+              {"app_id": feishu_id, "app_secret": feishu_secret})
+        send_body = json.loads(tr_f.calls[1]["payload"])
+        check("dom feishu: send url + Bearer + receive_id/content body",
+              ok1 is True and ok2 is True
+              and tr_f.calls[1]["url"] ==
+              "https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id"
+              and tr_f.calls[1]["headers"].get("Authorization")
+              == "Bearer ftok-111"
+              and send_body["receive_id"] == "oc_chat9"
+              and send_body["msg_type"] == "text"
+              and json.loads(send_body["content"]) == {"text": "one"})
+        check("dom feishu: tenant token cached across sends (no refetch)",
+              len(tr_f.calls) == 3
+              and tr_f.calls[2]["headers"].get("Authorization")
+              == "Bearer ftok-111")
+
+        # --- feishu: failure codes + retry-once ----------------------------
+        channels._TOKEN_CACHE.clear()
+        tr_fs = FakeTransport([tok("ftok-a"),
+                               json.dumps({"code": 230001,
+                                           "msg": "chat not found"})])
+        f2 = channels.load_channels(repo, settings, transport=tr_fs)["feishu"]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            ok = f2.send("oc_chat9", "x")
+        check("dom feishu: non-zero send code -> honest False, no raise",
+              ok is False and "CHANNEL_SEND_FAIL" in buf.getvalue()
+              and "230001" in buf.getvalue())
+        channels._TOKEN_CACHE.clear()
+        tr_fr = FakeTransport([tok("ftok-a"), json.dumps({"code": 99991663}),
+                               tok("ftok-b"), json.dumps({"code": 0})])
+        f3 = channels.load_channels(repo, settings, transport=tr_fr)["feishu"]
+        ok = f3.send("oc_chat9", "x")
+        check("dom feishu: token-invalid refetches token and retries ONCE",
+              ok is True and len(tr_fr.calls) == 4
+              and tr_fr.calls[3]["headers"].get("Authorization")
+              == "Bearer ftok-b"
+              and channels._TOKEN_CACHE[feishu_id][0] == "ftok-b")
+        channels._TOKEN_CACHE.clear()
+        tr_ft = FakeTransport([tok("ftok-a"), json.dumps({"code": 99991664}),
+                               tok("ftok-b"), json.dumps({"code": 99991664})])
+        f4 = channels.load_channels(repo, settings, transport=tr_ft)["feishu"]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            ok = f4.send("oc_chat9", "x")
+        log = buf.getvalue()
+        check("dom feishu: token-invalid fails after ONE retry (no loop)",
+              ok is False and len(tr_ft.calls) == 4
+              and "99991664" in log and "CHANNEL_SEND_FAIL" in log)
+        channels._TOKEN_CACHE.clear()
+        tr_fq = FakeTransport([tok("ftok-a"), json.dumps({"code": 99991400})])
+        f5 = channels.load_channels(repo, settings, transport=tr_fq)["feishu"]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            ok = f5.send("oc_chat9", "x")
+        check("dom feishu: quota code fails without a token refetch",
+              ok is False and len(tr_fq.calls) == 2
+              and "99991400" in buf.getvalue())
+
+        # --- feishu: poll cursor (ms variant, dedup, ids rule) -------------
+        channels._TOKEN_CACHE.clear()
+        m1 = msg("fm1", 1730000000123, "alpha")
+        m2 = msg("fm2", 1730000000456, "beta")
+        m3 = msg("fm3", 1730000000789, "gamma")
+        m4 = msg("fm4", 1730000000789, "delta")
+        m5 = msg("fm5", 1730000000456, "late five")
+        tr_p = FakeTransport([tok("ftok-p"), page([m1, m2]),
+                              page([m2, m5, m3, m4]),
+                              page([m2, m5, m3, m4])])
+        f_p = channels.load_channels(repo, settings, transport=tr_p)["feishu"]
+        first = f_p.poll()
+        check("dom feishu: fresh poll parses ms create_time into Inbound",
+              [i.text for i in first] == ["alpha", "beta"]
+              and first[0].route == "feishu"
+              and first[0].sender == "ou_sender1"
+              and first[0].target == "oc_ms_main"
+              and first[0].key == "feishu:ou_sender1")
+        check("dom feishu: fresh poll URL (single page, no start_time)",
+              "container_id_type=chat" in tr_p.calls[1]["url"]
+              and "container_id=oc_ms_main" in tr_p.calls[1]["url"]
+              and "sort_type=ByCreateTimeAsc" in tr_p.calls[1]["url"]
+              and "page_size=50" in tr_p.calls[1]["url"]
+              and "start_time=" not in tr_p.calls[1]["url"]
+              and tr_p.calls[1]["headers"].get("Authorization")
+              == "Bearer ftok-p")
+        cursor_doc = json.loads(
+            (state / "channels" / "feishu.cursor").read_text(encoding="utf-8"))
+        check("dom feishu: cursor keeps RAW create_time + boundary ids",
+              cursor_doc == {"oc_ms_main": {"t": 1730000000456,
+                                            "ids": ["fm2"]}},
+              str(cursor_doc))
+        second = f_p.poll()
+        check("dom feishu: second poll converts ms cursor -> seconds start_time",
+              "start_time=1730000000" in tr_p.calls[2]["url"]
+              and len(tr_p.calls) == 3)   # cached token: one call this poll
+        check("dom feishu: boundary id deduped, new ids accepted at same t",
+              [i.text for i in second] == ["late five", "gamma", "delta"],
+              str([i.text for i in second]))
+        third = f_p.poll()
+        check("dom feishu: third poll fully deduped by t+ids cursor",
+              third == [] and len(tr_p.calls) == 4
+              and "start_time=1730000000" in tr_p.calls[3]["url"])
+
+        # --- feishu: seconds-unit variant (defensive unit support) ---------
+        channels._TOKEN_CACHE.clear()
+        s1 = msg("fs1", 1730000100, "sec one", sender="ou_sender2")
+        tr_s = FakeTransport([tok("ftok-s"), page([s1]), page([s1])])
+        f_s = channels.FeishuChannel(repo=repo, state=state, transport=tr_s,
+                                     cfg={"enabled": True,
+                                          "chat_ids": ["oc_sec"]})
+        first = f_s.poll()
+        second = f_s.poll()
+        check("dom feishu: seconds-unit create_time accepted, start_time raw",
+              [i.text for i in first] == ["sec one"]
+              and second == [] and len(tr_s.calls) == 3
+              and "start_time=1730000100" in tr_s.calls[2]["url"])
+        tr_e2 = FakeTransport()
+        f_e = channels.FeishuChannel(repo=repo, state=state, transport=tr_e2,
+                                     cfg={"enabled": True, "chat_ids": []})
+        check("dom feishu: empty chat_ids -> poll [] with zero transport calls",
+              f_e.poll() == [] and tr_e2.calls == [])
+        channels._TOKEN_CACHE.clear()
+        rich = msg("fn1", 1730000000900, "rich title", sender="ou_sender3",
+                   kind="post")
+        plain = msg("fn2", 1730000000950, "only text", sender="ou_sender3")
+        tr_n = FakeTransport([tok("ftok-n"), page([rich, plain])])
+        f_n = channels.FeishuChannel(repo=repo, state=state, transport=tr_n,
+                                     cfg={"enabled": True,
+                                          "chat_ids": ["oc_notext"]})
+        got = f_n.poll()
+        check("dom feishu: non-text message types skipped, text delivered",
+              [i.text for i in got] == ["only text"])
+
+        # --- feishu: poll retry-once + quota + sanitization ----------------
+        channels._TOKEN_CACHE.clear()
+        ok_msg = msg("fr1", 1730000000500, "retry ok")
+        tr_pr = FakeTransport([tok("ftok-r1"), json.dumps({"code": 99991668}),
+                               tok("ftok-r2"), page([ok_msg])])
+        f_r = channels.FeishuChannel(repo=repo, state=state, transport=tr_pr,
+                                     cfg={"enabled": True,
+                                          "chat_ids": ["oc_retry"]})
+        got = f_r.poll()
+        check("dom feishu: poll refetches token once on token-invalid code",
+              [i.text for i in got] == ["retry ok"]
+              and len(tr_pr.calls) == 4
+              and tr_pr.calls[3]["headers"].get("Authorization")
+              == "Bearer ftok-r2")
+        channels._TOKEN_CACHE.clear()
+        tr_pq = FakeTransport([tok("ftok-q"), json.dumps({"code": 99991403})])
+        f_q = channels.FeishuChannel(repo=repo, state=state, transport=tr_pq,
+                                     cfg={"enabled": True,
+                                          "chat_ids": ["oc_quota"]})
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            got = f_q.poll()
+        check("dom feishu: poll quota code -> [] + honest log, no refetch",
+              got == [] and len(tr_pq.calls) == 2
+              and "99991403" in buf.getvalue())
+        channels._TOKEN_CACHE.clear()
+        tr_bad = FakeTransport([RuntimeError(f"boom {feishu_secret}")])
+        f_bad = channels.load_channels(repo, settings,
+                                       transport=tr_bad)["feishu"]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            ok = f_bad.send("oc_chat9", "x")
+        check("dom feishu: transport exception sanitized, secret never echoed",
+              ok is False and "CHANNEL_SEND_FAIL" in buf.getvalue()
+              and feishu_secret not in buf.getvalue())
+
+        # --- wechat: token -> send shapes + cache --------------------------
+        channels._TOKEN_CACHE.clear()
+        tr_w = FakeTransport([
+            json.dumps({"access_token": "wtok-1", "expires_in": 7200}),
+            json.dumps({"errcode": 0, "errmsg": "ok"}),
+            json.dumps({"errcode": 0, "errmsg": "ok"})])
+        w = channels.load_channels(repo, settings, transport=tr_w)["wechat"]
+        w.send("openid-1", "hi wechat")
+        w.send("openid-1", "again")
+        tok_call = tr_w.calls[0]
+        check("dom wechat: token GET shape (grant_type + appid + secret)",
+              tok_call["payload"] is None
+              and tok_call["url"].startswith(
+                  "https://api.weixin.qq.com/cgi-bin/token?")
+              and "grant_type=client_credential" in tok_call["url"]
+              and f"appid={wechat_id}" in tok_call["url"]
+              and "secret=" in tok_call["url"])
+        check("dom wechat: send posts touser text with token in query",
+              len(tr_w.calls) == 3
+              and "cgi-bin/message/custom/send?access_token=wtok-1"
+              in tr_w.calls[1]["url"]
+              and json.loads(tr_w.calls[1]["payload"]) ==
+              {"touser": "openid-1", "msgtype": "text",
+               "text": {"content": "hi wechat"}})
+        check("dom wechat: token cached across sends (one GET, two POSTs)",
+              sum(1 for c in tr_w.calls if "cgi-bin/token?" in c["url"]) == 1
+              and tr_w.calls[2]["headers"].get("Content-Type")
+              == "application/json")
+        channels._TOKEN_CACHE.clear()
+        tr_wt = FakeTransport([
+            json.dumps({"access_token": "wtok-2", "expires_in": 7200}),
+            json.dumps({"errcode": 0, "errmsg": "ok"})])
+        w_t = channels.load_channels(repo, settings, transport=tr_wt)["wechat"]
+        w_t.send("openid-1", "\u4e2d" * 1000)
+        content = json.loads(tr_wt.calls[1]["payload"])["text"]["content"]
+        check("dom wechat: text truncated to 1024 BYTES utf-8 safe + marker",
+              len(content.encode("utf-8")) <= 1024
+              and content.endswith("…[truncated]") and len(content) < 1000)
+        channels._TOKEN_CACHE.clear()
+        channels._TOKEN_CACHE[wechat_id] = ("stale-token", time.time() + 60)
+        tr_wr = FakeTransport([
+            json.dumps({"access_token": "wtok-3", "expires_in": 7200}),
+            json.dumps({"errcode": 0, "errmsg": "ok"})])
+        w_r = channels.load_channels(repo, settings, transport=tr_wr)["wechat"]
+        w_r.send("openid-1", "refresh me")
+        check("dom wechat: token inside 120s refresh lead -> refetched",
+              len(tr_wr.calls) == 2
+              and "cgi-bin/token?" in tr_wr.calls[0]["url"]
+              and "access_token=wtok-3" in tr_wr.calls[1]["url"]
+              and "stale-token" not in tr_wr.calls[1]["url"])
+
+        # --- wechat: errcode handling, retry-once, zero errmsg echo --------
+        channels._TOKEN_CACHE.clear()
+        tr_w45 = FakeTransport([
+            json.dumps({"access_token": "wtok-4", "expires_in": 7200}),
+            json.dumps({"errcode": 45015, "errmsg": "over 48h"})])
+        w45 = channels.load_channels(repo, settings,
+                                     transport=tr_w45)["wechat"]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            ok = w45.send("openid-1", "x")
+        log = buf.getvalue()
+        check("dom wechat: errcode 45015 honest fail (48h window), no retry",
+              ok is False and len(tr_w45.calls) == 2
+              and "45015" in log and "CHANNEL_SEND_FAIL" in log)
+        channels._TOKEN_CACHE.clear()
+        tr_wrt = FakeTransport([
+            json.dumps({"access_token": "wtok-5", "expires_in": 7200}),
+            json.dumps({"errcode": 40001}),
+            json.dumps({"access_token": "wtok-6", "expires_in": 7200}),
+            json.dumps({"errcode": 0, "errmsg": "ok"})])
+        w_rt = channels.load_channels(repo, settings,
+                                      transport=tr_wrt)["wechat"]
+        ok = w_rt.send("openid-1", "x")
+        check("dom wechat: token-invalid errcode refetches and retries ONCE",
+              ok is True and len(tr_wrt.calls) == 4
+              and "access_token=wtok-6" in tr_wrt.calls[3]["url"])
+        channels._TOKEN_CACHE.clear()
+        tr_wtt = FakeTransport([
+            json.dumps({"access_token": "wtok-7", "expires_in": 7200}),
+            json.dumps({"errcode": 42001}),
+            json.dumps({"access_token": "wtok-8", "expires_in": 7200}),
+            json.dumps({"errcode": 42001})])
+        w_tt = channels.load_channels(repo, settings,
+                                      transport=tr_wtt)["wechat"]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            ok = w_tt.send("openid-1", "x")
+        check("dom wechat: token-invalid fails after ONE retry (no loop)",
+              ok is False and len(tr_wtt.calls) == 4
+              and "42001" in buf.getvalue())
+        channels._TOKEN_CACHE.clear()
+        tr_wl = FakeTransport([
+            json.dumps({"access_token": "wtok-9", "expires_in": 7200}),
+            json.dumps({"errcode": 50002,
+                        "errmsg": f"bad openid {wechat_secret}"})])
+        w_l = channels.load_channels(repo, settings, transport=tr_wl)["wechat"]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            ok = w_l.send("openid-1", "x")
+        log = buf.getvalue()
+        check("dom wechat: errmsg never surfaces (secret-hinting hint dropped)",
+              ok is False and "50002" in log
+              and wechat_secret not in log and "bad openid" not in log)
+        channels._TOKEN_CACHE.clear()
+        tr_wg = FakeTransport([
+            json.dumps({"errcode": 40125,
+                        "errmsg": f"invalid appsecret {wechat_secret}"})])
+        w_g = channels.load_channels(repo, settings, transport=tr_wg)["wechat"]
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            ok = w_g.send("openid-1", "x")
+        log = buf.getvalue()
+        check("dom wechat: token errmsg dropped, errcode only, zero echo",
+              ok is False and "40125" in log
+              and wechat_secret not in log and "invalid appsecret" not in log)
+
+        # --- wechat: configured reasons ------------------------------------
+        os.environ.pop("CHANNEL_WECHAT_APPID", None)
+        ok_c, reason = channels.WeChatChannel(
+            repo=repo, cfg=settings["channels"]["wechat"],
+            state=state).configured()
+        check("dom wechat: configured False names the appid slot",
+              ok_c is False and reason == "missing CHANNEL_WECHAT_APPID slot")
+        os.environ["CHANNEL_WECHAT_APPID"] = wechat_id
+        os.environ.pop("CHANNEL_WECHAT_APP_SECRET", None)
+        ok_c, reason = channels.WeChatChannel(
+            repo=repo, cfg=settings["channels"]["wechat"],
+            state=state).configured()
+        check("dom wechat: configured False names the app secret slot",
+              ok_c is False
+              and reason == "missing CHANNEL_WECHAT_APP_SECRET slot"
+              and wechat_secret not in reason)
+        os.environ["CHANNEL_WECHAT_APP_SECRET"] = wechat_secret
+        ok_c, reason = channels.WeChatChannel(
+            repo=repo, cfg=settings["channels"]["wechat"],
+            state=state).configured()
+        check("dom wechat: both slots present -> configured True",
+              ok_c is True and reason == "")
+
+        # --- status rows + zero leak ---------------------------------------
+        st = channels.status(settings, repo)
+        by = {r["name"]: r for r in st}
+        check("dom status: domestic rows enabled+configured, inbound flags",
+              len(st) == len(channels.CHANNELS)
+              and by["dingtalk"]["note"] == ""
+              and by["dingtalk"]["inbound"] is False
+              and by["feishu"]["note"] == ""
+              and by["feishu"]["inbound"] is True
+              and by["wechat"]["note"] == ""
+              and by["wechat"]["inbound"] is False)
+        check("dom status: zero secret echo across the full row dump",
+              all(v not in json.dumps(st) for v in all_vals))
+        os.environ.pop("CHANNEL_FEISHU_APP_ID", None)
+        st2 = channels.status(settings, repo)
+        note = {r["name"]: r for r in st2}["feishu"]["note"]
+        check("dom status: missing-slot note names the slot, never the value",
+              note == "missing CHANNEL_FEISHU_APP_ID slot"
+              and all(v not in json.dumps(st2) for v in all_vals))
+        os.environ["CHANNEL_FEISHU_APP_ID"] = feishu_id
+        reps = " ".join(repr(channels.load_channels(
+            repo, settings, transport=FakeTransport())[n]) for n in dom)
+        check("dom channels: adapter reprs never carry a credential",
+              all(v not in reps for v in all_vals))
+        cursor_files = sorted((state / "channels").glob("*.cursor"))
+        cursor_blob = " ".join(p.read_text(encoding="utf-8")
+                               for p in cursor_files)
+        check("dom channels: cursor files never carry tokens (no key on disk)",
+              bool(cursor_files)
+              and all(v not in cursor_blob for v in all_vals)
+              and "tok" not in cursor_blob and "wtok" not in cursor_blob)
+
+        # --- scheduler --origin: int chat id | route:target | refusal ------
+        with tempfile.TemporaryDirectory() as td:
+            saved_state = os.environ.get("AIDOG_MC_STATE")
+            os.environ["AIDOG_MC_STATE"] = td
+            try:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    rc = sch.main(["--add", "daily 09:30", "--text",
+                                   "cli int origin", "--origin", "424242"])
+                jobs = sch.load_jobs(Path(td) / sch.STATE_FILE_NAME)
+                check("dom cron cli: numeric --origin stored as int chat id",
+                      rc == 0 and len(jobs) == 1
+                      and jobs[0]["origin"] == 424242, f"rc={rc}")
+                with contextlib.redirect_stdout(io.StringIO()):
+                    rc = sch.main(["--add", "daily 09:40", "--text",
+                                   "cli route origin",
+                                   "--origin", "feishu:oc_route9"])
+                jobs = sch.load_jobs(Path(td) / sch.STATE_FILE_NAME)
+                check("dom cron cli: route:target --origin kept as a string",
+                      rc == 0 and len(jobs) == 2
+                      and jobs[1]["origin"] == "feishu:oc_route9",
+                      f"rc={rc}")
+                err = io.StringIO()
+                try:
+                    with contextlib.redirect_stdout(io.StringIO()), \
+                            contextlib.redirect_stderr(err):
+                        rc = sch.main(["--add", "daily 09:45", "--text",
+                                       "bad origin", "--origin", "BadForm"])
+                except SystemExit as e:
+                    rc = e.code
+                check("dom cron cli: bad --origin exits 2 with honest text",
+                      rc == 2 and "origin" in err.getvalue()
+                      and "route:target" in err.getvalue()
+                      and "Traceback" not in err.getvalue(), f"rc={rc}")
+                err = io.StringIO()
+                try:
+                    with contextlib.redirect_stdout(io.StringIO()), \
+                            contextlib.redirect_stderr(err):
+                        rc = sch.main(["--add", "daily 09:50", "--text",
+                                       "bad route", "--origin", "9chat:room"])
+                except SystemExit as e:
+                    rc = e.code
+                check("dom cron cli: route part must start with a letter",
+                      rc == 2 and "Traceback" not in err.getvalue(),
+                      f"rc={rc}")
+            finally:
+                if saved_state is None:
+                    os.environ.pop("AIDOG_MC_STATE", None)
+                else:
+                    os.environ["AIDOG_MC_STATE"] = saved_state
+    finally:
+        channels._TOKEN_CACHE.clear()
+        for key, val in saved.items():
+            if val is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = val
+        shutil.rmtree(repo, True)
+        shutil.rmtree(state, True)
+
+
 def main() -> int:
     test_model()
     test_registry_and_tools()
@@ -3885,6 +4508,7 @@ def main() -> int:
     test_mcp()
     test_channels()
     test_channels_service()
+    test_channels_domestic()
     print(f"\n{len(PASS)} pass · {len(FAIL)} fail")
     if FAIL:
         print("failed: " + ", ".join(FAIL))

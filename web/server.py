@@ -33,6 +33,9 @@ Routes:
   POST /api/channels/webhook    -> Bearer CHANNEL_WEBHOOK_SECRET; {text,
                                    sender?} -> one in-process turn ->
                                    {ok, reply} (no SSE, own session)
+  POST /api/channels/send       -> Bearer WEB_TOKEN; {route, target, text}
+                                   -> {ok} (200) | {error, details} (400) |
+                                   {ok:false, error} (409/502/503)
   GET  /api/chat/history        -> current console session (read, loopback)
   GET  /api/voice               -> voice engine capability (edge-tts presence)
   POST /api/say                 -> synthesize speech -> audio/mpeg (cached,
@@ -170,6 +173,9 @@ DEFAULT_SETTINGS: dict = {
                   "smtp_host": "", "smtp_port": 587, "smtp_ssl": False,
                   "imap_host": "", "imap_port": 993},
         "webhook": {"enabled": False, "url": ""},
+        "dingtalk": {"enabled": False},
+        "feishu": {"enabled": False, "allow": [], "chat_ids": []},
+        "wechat": {"enabled": False},
     },
 }
 ALLOWED_TOP = ("language", "refresh_sec", "sound", "voice_volume",
@@ -186,13 +192,17 @@ CURRENCY_SYM = {"USD": "$", "CNY": "¥", "EUR": "€", "GBP": "£", "JPY": "¥"}
 CURRENCIES = tuple(CURRENCY_SYM)
 # Channel adapter config partition (car C): per-channel allow-lists and the
 # field schema validated by validate_settings_patch (all-or-nothing).
-CHANNEL_KEYS = ("discord", "slack", "email", "webhook")
+CHANNEL_KEYS = ("discord", "slack", "email", "webhook",
+                "dingtalk", "feishu", "wechat")
 _CHANNEL_SCHEMA = {
     "discord": ("enabled", "allow", "channel_ids"),
     "slack": ("enabled", "allow", "channel_ids"),
     "email": ("enabled", "allow", "to", "from", "smtp_host", "smtp_port",
               "smtp_ssl", "imap_host", "imap_port"),
     "webhook": ("enabled", "url"),
+    "dingtalk": ("enabled",),
+    "feishu": ("enabled", "allow", "chat_ids"),
+    "wechat": ("enabled",),
 }
 
 # ---------------------------------------------------------------- helpers ----
@@ -644,7 +654,7 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                             errors.append(f"channels.{name}.{key} must be a boolean")
                             continue
                         clean_sub[key] = val
-                    elif key in ("allow", "channel_ids"):
+                    elif key in ("allow", "channel_ids", "chat_ids"):
                         # sender/channel allow-lists: fail-closed when empty;
                         # entries are single-line id strings, never secrets.
                         if not isinstance(val, list):
@@ -1571,6 +1581,27 @@ def collect_channels() -> dict:
     return {"channels": rows}
 
 
+# Local fallback route table for POST /api/channels/send validation, used only
+# when mycore.channels is not importable (documented route order; the module's
+# CHANNELS tuple is authoritative whenever it loads).
+_SEND_ROUTES_FALLBACK = ("discord", "slack", "email", "webhook",
+                         "dingtalk", "feishu", "wechat")
+
+
+def channel_routes() -> tuple[str, ...]:
+    """Known channel routes — mycore.channels.CHANNELS when importable,
+    else the local fallback so validation still fails closed with an honest
+    list of names."""
+    try:
+        from mycore import channels as _channels
+        routes = tuple(_channels.CHANNELS)
+        if routes:
+            return routes
+    except Exception:  # noqa: BLE001 — fallback keeps validation honest
+        pass
+    return _SEND_ROUTES_FALLBACK
+
+
 # ----------------------------------------------------------------- server ----
 
 MIME = {
@@ -1663,6 +1694,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_chat()
         if path == "/api/channels/webhook":
             return self._handle_channel_webhook()
+        if path == "/api/channels/send":
+            return self._handle_channel_send()
         return self._json({"error": "not found"}, 404)
 
     # ------------------------------------------------------ evolution legs ---
@@ -1954,6 +1987,80 @@ class Handler(BaseHTTPRequestHandler):
             sys.stderr.write("webhook turn stopped reason=model_error\n")
             return self._json({"error": "turn failed"}, 500)
         return self._json({"ok": True, "reply": res.text})
+
+    def _handle_channel_send(self) -> None:
+        """POST /api/channels/send — outbound console trigger: Bearer WEB_TOKEN
+        (same gate and 503/401 contract as the settings write), then
+        {route, target, text}. Validation answers 400 with details; a disabled
+        route or a missing credential slot answers 409 with a reason that
+        names the slot/setting key only (never a value); a failed delivery
+        answers 502 — the adapter logged the detail server-side, so internals
+        never reach the caller."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        details: list[str] = []
+        known = channel_routes()
+        route = doc.get("route")
+        if route is None:
+            details.append("route is required")
+        elif not isinstance(route, str):
+            details.append("route must be a string")
+        elif route not in known:
+            details.append("route must be one of: " + ",".join(known))
+        target = doc.get("target")
+        if not isinstance(target, str):
+            details.append("target must be a string")
+        else:
+            if any(ord(c) < 32 or ord(c) == 127 for c in target):
+                details.append("target must not contain control characters")
+            if not target.strip():
+                details.append("target is required")
+            elif len(target) > 256:
+                details.append("target must be at most 256 chars")
+        text = doc.get("text")
+        if not isinstance(text, str):
+            details.append("text must be a string")
+        elif not text.strip():
+            details.append("text is required")
+        elif len(text) > CHAT_MAX_CHARS:
+            details.append(f"text too long (max {CHAT_MAX_CHARS} chars)")
+        if details:
+            return self._json({"error": "validation failed",
+                               "details": details}, 400)
+        try:
+            from mycore import channels as _channels
+            chans = _channels.load_channels(REPO, load_settings())
+            chan = chans.get(route)
+            if chan is None:
+                raise KeyError(route)
+        except Exception as e:  # noqa: BLE001 — honest degradation, no internals
+            sys.stderr.write(f"channels send unavailable err={type(e).__name__}\n")
+            return self._json({"ok": False,
+                               "error": "channel module unavailable"}, 503)
+        if not chan.enabled:
+            return self._json({"ok": False,
+                               "error": "route disabled in settings"}, 409)
+        try:
+            ok, reason = chan.configured()
+        except Exception as e:  # noqa: BLE001 — status must not take the console down
+            sys.stderr.write(f"channels send config check failed err={type(e).__name__}\n")
+            return self._json({"ok": False,
+                               "error": "channel config check unavailable"}, 503)
+        if not ok:
+            # reason names a slot/settings key only — never a value
+            return self._json({"ok": False,
+                               "error": reason or "route not configured"}, 409)
+        try:
+            sent = chan.send(target.strip(), text.strip())
+        except Exception as e:  # noqa: BLE001 — contract says send never raises
+            sys.stderr.write(f"channels send failed err={type(e).__name__}\n")
+            sent = False
+        if not sent:
+            return self._json({"ok": False, "error": "delivery failed"}, 502)
+        return self._json({"ok": True})
 
     def _handle_say(self) -> None:
         """Speech synthesis. No bearer required (loopback console feature),

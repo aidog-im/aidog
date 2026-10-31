@@ -481,6 +481,86 @@ def main() -> int:
         check("POST settings channels bad port -> 400", s == 400,
               f"got {s} {str(body)[:160]}")
 
+    # --- car D: outbound send gate + domestic route partition. Every write
+    # below stays inside this snapshot block so settings.json is restored
+    # byte-for-byte afterwards. ---
+    if token:
+        s, body = post("/api/channels/send",
+                       {"route": "discord", "target": "t", "text": "ping"},
+                       "wrong-token")
+        check("POST /api/channels/send wrong bearer -> 401", s == 401,
+              f"got {s} {str(body)[:140]}")
+        check("POST /api/channels/send 401 never echoes the token",
+              isinstance(body, dict) and token not in json.dumps(body),
+              str(body)[:140])
+        s, body = post("/api/channels/send",
+                       {"target": "t", "text": "ping"}, token)
+        check("POST /api/channels/send missing route -> 400",
+              s == 400 and isinstance(body, dict)
+              and isinstance(body.get("details"), list),
+              f"got {s} {str(body)[:140]}")
+        s, body = post("/api/channels/send",
+                       {"route": "nope", "target": "t", "text": "ping"},
+                       token)
+        check("POST /api/channels/send unknown route -> 400", s == 400,
+              f"got {s} {str(body)[:140]}")
+        s, body = post("/api/channels/send",
+                       {"route": "discord", "target": "t", "text": "   "},
+                       token)
+        check("POST /api/channels/send empty text -> 400", s == 400,
+              f"got {s} {str(body)[:140]}")
+        s, body = post("/api/channels/send",
+                       {"route": "discord", "target": "t", "text": "ping"},
+                       token)
+        check("POST /api/channels/send disabled route -> 409 + reason",
+              s == 409 and isinstance(body, dict) and body.get("ok") is False
+              and "disabled" in str(body.get("error", "")),
+              f"got {s} {str(body)[:140]}")
+        # Enable discord with no CHANNEL_DISCORD_TOKEN slot on this machine:
+        # the 409 reason must name the slot, never any value.
+        s_en, _b_en = post("/api/settings",
+                           {"channels": {"discord": {"enabled": True}}},
+                           token)
+        disc_m = re.search(r"(?m)^CHANNEL_DISCORD_TOKEN=(\S+)$",
+                           SECRETS.read_text()) if SECRETS.exists() else None
+        s, body = post("/api/channels/send",
+                       {"route": "discord", "target": "t", "text": "ping"},
+                       token)
+        if disc_m is None:
+            check("POST /api/channels/send missing slot -> 409 names slot",
+                  s_en == 200 and s == 409 and isinstance(body, dict)
+                  and body.get("ok") is False
+                  and "CHANNEL_DISCORD_TOKEN" in str(body.get("error", ""))
+                  and "ping" not in json.dumps(body),
+                  f"enable={s_en} got {s} {str(body)[:140]}")
+        else:
+            check("POST /api/channels/send slot present -> not 409-config",
+                  s_en == 200 and s in (200, 502),
+                  f"enable={s_en} got {s} {str(body)[:140]}")
+
+        # --- car D settings partition: domestic routes validate identically
+        # to the car C routes (legal merge round-trips, bad shape refused) ---
+        s, body = post("/api/settings",
+                       {"channels": {"feishu": {"enabled": False,
+                                                 "allow": ["ou_1"],
+                                                 "chat_ids": ["oc_1"]}}},
+                       token)
+        fsh = (body.get("settings", {}).get("channels", {}).get("feishu", {})
+               if isinstance(body, dict) else {})
+        check("POST settings channels.feishu legal merge -> 200 + round-trip",
+              s == 200 and isinstance(body, dict) and body.get("ok") is True
+              and fsh == {"enabled": False, "allow": ["ou_1"],
+                          "chat_ids": ["oc_1"]},
+              f"got {s} {str(body)[:160]}")
+        s, body = post("/api/settings",
+                       {"channels": {"wechat": {"enabled": "yes"}}}, token)
+        check("POST settings channels.wechat bad type -> 400", s == 400,
+              f"got {s} {str(body)[:160]}")
+        s, body = post("/api/settings",
+                       {"channels": {"feishu": {"nope": 1}}}, token)
+        check("POST settings channels.feishu unknown subkey -> 400", s == 400,
+              f"got {s} {str(body)[:160]}")
+
     # --- webhook inbound gate: the test never configures a real secret.
     # Missing slot = honest 503 naming the slot; a present slot must refuse
     # a wrong/absent bearer with 401 and leak nothing either way. ---

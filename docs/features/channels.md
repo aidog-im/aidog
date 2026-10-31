@@ -1,6 +1,7 @@
 # Feature spec — Multi-route channels (task 2 / Phase C)
 
-Status: **implemented** (2026-10-22, v0.5.25). Adds a second and further
+Status: **implemented** (2026-10-22, v0.5.25; domestic routes added in
+v0.5.26 — see `channels_domestic.md`). Adds a second and further
 messaging family beside the live Telegram route: a route framework with four
 adapters — **Discord, Slack, Email, Webhook** — each with an outbound send
 path and an inbound path, wired into the mycore service loop and the web
@@ -139,6 +140,10 @@ credentials** and is not claimed anywhere in the product surface.
   rejected all-or-nothing).
 
 ## 7. Tests
+
+(Phase C counts at v0.5.25; the D car added
+`test_channels_domestic` and +10 smoke checks — current totals in
+`channels_domestic.md` §6.)
 
 - `mycore.tests.run::test_channels` — 50 checks (four-route send shapes,
   Authorization header vs. zero-leak assertions, cursor incrementality,

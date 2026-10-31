@@ -1,6 +1,8 @@
-"""mycore.channels — full-duplex messaging channels (C car, spec: c-channels).
+"""mycore.channels — full-duplex messaging channels (C car spec: c-channels;
+D car spec: imaidog-d-channels adds the three domestic routes).
 
-Four routes, outbound send + inbound poll, stdlib-only (no third-party deps):
+Seven routes (CHANNELS, append order = status() row order), outbound send +
+inbound poll, stdlib-only (no third-party deps):
 
     discord   POST /api/v10/channels/{id}/messages
               poll: GET  /api/v10/channels/{id}/messages?after=<cursor> (REST
@@ -15,6 +17,19 @@ Four routes, outbound send + inbound poll, stdlib-only (no third-party deps):
     webhook   outbound POST JSON {text, route, target} to channels.webhook.url;
               inbound arrives through the console HTTP endpoint (web server),
               therefore poll() is always empty for this route.
+    dingtalk  POST the full custom-robot URL from CHANNEL_DINGTALK_WEBHOOK
+              (optional HMAC-SHA256 sign via CHANNEL_DINGTALK_SECRET); the
+              URL picks the group, `target` is a label. Outbound only
+              (inbound=False): inbound needs an enterprise app + stream.
+    feishu    POST im/v1/messages with a tenant_access_token (self-built app,
+              same identity in and out); poll: single-page im/v1/messages
+              history per channels.feishu.chat_ids entry (cursor = raw
+              create_time + boundary message ids; ms/s unit defensive).
+    wechat    POST cgi-bin/message/custom/send with a cached access_token
+              (module-level _TOKEN_CACHE; errmsg is NEVER surfaced — WeChat
+              hints can echo appsecret fragments). Outbound only
+              (inbound=False): inbound needs a verified service account
+              plus a public callback endpoint.
 
 Transport is injectable — the same callable pattern as mycore.tg — so the
 offline test suite exercises every request shape with zero network and zero
@@ -38,7 +53,9 @@ English comments per repo i18n policy.
 """
 from __future__ import annotations
 
+import base64
 import email
+import hashlib
 import hmac
 import imaplib
 import json
@@ -46,6 +63,7 @@ import os
 import re
 import smtplib
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -56,7 +74,8 @@ from email.utils import parseaddr
 from pathlib import Path
 from typing import Callable
 
-CHANNELS = ("discord", "slack", "email", "webhook")
+CHANNELS = ("discord", "slack", "email", "webhook",
+            "dingtalk", "feishu", "wechat")
 
 DISCORD_API = "https://discord.com/api/v10"
 SLACK_API = "https://slack.com/api"
@@ -66,6 +85,19 @@ DISCORD_CONTENT_CAP = 2000    # Discord message text limit
 REQUEST_TIMEOUT = 30.0        # seconds per HTTP call
 STATE_ENV = "AIDOG_MC_STATE"  # mirrors mycore.service.STATE_ENV
 EMAIL_SUBJECT = "AiDog"
+DINGTALK_TEXT_CAP = 20000      # DingTalk text message cap (chars)
+WECHAT_TEXT_CAP = 1024         # WeChat customer-service cap (BYTES, utf-8 safe)
+FEISHU_API = os.environ.get("AIDOG_FEISHU_API") or "https://open.feishu.cn/open-apis"
+WECHAT_API = os.environ.get("AIDOG_WECHAT_API") or "https://api.weixin.qq.com"
+# Base URLs are env-overridable as an E2E test seam (the offline suite and
+# production never set AIDOG_FEISHU_API / AIDOG_WECHAT_API; tmp/e2e_* points
+# them at a local sink to verify the real wire shapes without credentials).
+TOKEN_REFRESH_LEAD = 120       # refresh a cached token this many secs early
+FEISHU_MS_ABOVE = 10 ** 11     # create_time above this is ms, not seconds
+FEISHU_TOKEN_INVALID = (99991663, 99991664, 99991665, 99991668)
+FEISHU_QUOTA_CODES = (99991400, 99991403)
+WECHAT_TOKEN_CODES = (40001, 40014, 42001)
+WECHAT_WINDOW_CODE = 45015     # outside the 48h customer-session window
 
 # secrets.env slots (names may be reported; values never).
 SLOT_DISCORD_TOKEN = "CHANNEL_DISCORD_TOKEN"
@@ -75,6 +107,18 @@ SLOT_SMTP_PASS = "CHANNEL_SMTP_PASS"
 SLOT_IMAP_USER = "CHANNEL_IMAP_USER"
 SLOT_IMAP_PASS = "CHANNEL_IMAP_PASS"
 SLOT_WEBHOOK_SECRET = "CHANNEL_WEBHOOK_SECRET"
+SLOT_DINGTALK_WEBHOOK = "CHANNEL_DINGTALK_WEBHOOK"
+SLOT_DINGTALK_SECRET = "CHANNEL_DINGTALK_SECRET"
+SLOT_FEISHU_APP_ID = "CHANNEL_FEISHU_APP_ID"
+SLOT_FEISHU_APP_SECRET = "CHANNEL_FEISHU_APP_SECRET"
+SLOT_WECHAT_APPID = "CHANNEL_WECHAT_APPID"
+SLOT_WECHAT_APP_SECRET = "CHANNEL_WECHAT_APP_SECRET"
+
+# Process-wide token cache (feishu tenant token / wechat access_token).
+# Adapter instances may be rebuilt per poll, so only a MODULE-level dict
+# keeps the cache alive across instances. Key = app_id/appid, value =
+# (token, expiry epoch). Credentials never reach disk or logs.
+_TOKEN_CACHE: dict[str, tuple[str, float]] = {}
 
 __all__ = ["CHANNELS", "Inbound", "ChannelError", "Channel", "Transport",
            "load_channels", "status", "check_webhook_auth"]
@@ -189,6 +233,27 @@ def _ts_key(ts: str):
         return int(head), int(frac) if frac else 0
     except ValueError:
         return -1, -1
+
+
+def _int_or_none(value) -> int | None:
+    """String/int timestamp -> int, None when unparsable (never raises)."""
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _truncate_bytes(text: str, cap: int) -> str:
+    """UTF-8-safe truncation to `cap` BYTES including the style marker —
+    never splits a multi-byte character (WeChat 1024-byte text limit)."""
+    mark = " …[truncated]"
+    raw = text.encode("utf-8")
+    if len(raw) <= cap:
+        return text
+    keep = cap - len(mark.encode("utf-8"))
+    if keep <= 0:
+        return mark.encode("utf-8")[:cap].decode("utf-8", "ignore")
+    return raw[:keep].decode("utf-8", "ignore") + mark
 
 
 def check_webhook_auth(authorization, secret: str) -> bool:
@@ -309,9 +374,12 @@ class Channel:
             return False
 
     def poll(self) -> list[Inbound]:
-        """Single incremental inbound fetch. Never raises: disabled or
-        unconfigured routes stay silent; transport/protocol failures log one
-        sanitized line and return []."""
+        """Single incremental inbound fetch. Never raises: outbound-only
+        routes (inbound=False) return [] before any gate or transport call;
+        disabled or unconfigured routes stay silent; transport/protocol
+        failures log one sanitized line and return []."""
+        if not self.inbound:
+            return []
         if not self.enabled:
             return []
         ok, _ = self.configured()
@@ -598,6 +666,332 @@ class WebhookChannel(Channel):
         return []            # delivered by the console endpoint (web server)
 
 
+# ---------------------------------------------------- domestic routes (D) ---
+class _FeishuTokenRejected(Exception):
+    """Internal signal (never surfaces raw): the API refused the cached
+    tenant token with a token-invalid code. Carries the numeric code only;
+    the retry boundary converts it to an honest ChannelError."""
+
+    def __init__(self, code) -> None:
+        super().__init__(str(code))
+        self.code = code
+
+
+def _feishu_text(item: dict) -> str:
+    """Extract the text of a feishu message: body.content for msg_type=text
+    is itself a JSON string {"text": ...}; other message types carry no
+    text for this route ("")."""
+    if str(item.get("msg_type") or "") != "text":
+        return ""
+    body = item.get("body") if isinstance(item.get("body"), dict) else {}
+    content = body.get("content")
+    if not isinstance(content, str) or not content:
+        return ""
+    try:
+        doc = json.loads(content)
+    except ValueError:
+        return ""
+    text = doc.get("text") if isinstance(doc, dict) else None
+    return str(text) if text else ""
+
+
+class DingTalkChannel(Channel):
+    """DingTalk custom robot (group webhook): POST to the full URL stored in
+    the slot (the URL picks the group — `target` is a label only), optional
+    HMAC-SHA256 sign. Outbound only: an inbound leg needs an enterprise app
+    plus a WebSocket stream or a public callback endpoint. An HTTP 200 body
+    is still checked for errcode (non-zero = honest failure)."""
+
+    name = "dingtalk"
+    inbound = False
+
+    def configured(self) -> tuple[bool, str]:
+        if not self._secret(SLOT_DINGTALK_WEBHOOK):
+            return False, f"missing {SLOT_DINGTALK_WEBHOOK} slot"
+        return True, ""
+
+    def _send(self, target: str, text: str) -> None:
+        # `target` is a label only — the webhook URL decides the group.
+        url = self._secret(SLOT_DINGTALK_WEBHOOK)
+        if len(text) > DINGTALK_TEXT_CAP:
+            mark = " …[truncated]"
+            text = text[:DINGTALK_TEXT_CAP - len(mark)] + mark
+        secret = self._secret(SLOT_DINGTALK_SECRET)
+        if secret:                       # optional robot sign (spec: D car)
+            ts = str(round(time.time() * 1000))     # millisecond timestamp
+            digest = hmac.new(secret.encode("utf-8"),
+                              f"{ts}\n{secret}".encode("utf-8"),
+                              hashlib.sha256).digest()
+            sign = urllib.parse.quote_plus(
+                base64.b64encode(digest).decode("ascii"))
+            sep = "&" if "?" in url else "?"
+            url = f"{url}{sep}timestamp={ts}&sign={sign}"
+        payload = json.dumps({"msgtype": "text",
+                              "text": {"content": text}}).encode("utf-8")
+        doc = _json(self._request("dingtalk.send", url, payload,
+                                  {"Content-Type": "application/json"}),
+                    "dingtalk.send")
+        if not isinstance(doc, dict):
+            raise ChannelError("dingtalk.send: response is not a JSON object")
+        code = doc.get("errcode", 0)
+        if code:
+            # errmsg may surface (platform text, no credential echo) — 80 cap
+            errmsg = str(doc.get("errmsg") or "")[:80]
+            raise ChannelError(f"dingtalk.send: errcode={code} {errmsg}")
+
+    def _poll(self) -> list[Inbound]:
+        return []            # inbound needs an enterprise app (inbound=False)
+
+
+class FeishuChannel(Channel):
+    """Feishu (Lark) self-built app route: tenant_access_token auth, im/v1
+    text messages out, single-page chat-history polling in (same identity
+    in and out — a second bot would split reply attribution). target =
+    chat_id; allow-listing of sender open_ids is the service layer's job."""
+
+    name = "feishu"
+
+    def configured(self) -> tuple[bool, str]:
+        if not self._secret(SLOT_FEISHU_APP_ID):
+            return False, f"missing {SLOT_FEISHU_APP_ID} slot"
+        if not self._secret(SLOT_FEISHU_APP_SECRET):
+            return False, f"missing {SLOT_FEISHU_APP_SECRET} slot"
+        return True, ""
+
+    def _tenant_token(self) -> str:
+        """Cached tenant_access_token (module-level _TOKEN_CACHE, refreshed
+        TOKEN_REFRESH_LEAD seconds before expiry)."""
+        app_id = self._secret(SLOT_FEISHU_APP_ID)
+        app_secret = self._secret(SLOT_FEISHU_APP_SECRET)
+        now = time.time()
+        hit = _TOKEN_CACHE.get(app_id)
+        if isinstance(hit, tuple) and len(hit) == 2:
+            try:
+                if float(hit[1]) - TOKEN_REFRESH_LEAD > now:
+                    return str(hit[0])
+            except (TypeError, ValueError):
+                pass                         # corrupt cache entry -> refetch
+        doc = _json(self._request(
+            "feishu.token",
+            f"{FEISHU_API}/auth/v3/tenant_access_token/internal",
+            json.dumps({"app_id": app_id,
+                        "app_secret": app_secret}).encode("utf-8"),
+            {"Content-Type": "application/json"}), "feishu.token")
+        if not isinstance(doc, dict):
+            raise ChannelError("feishu.token: response is not a JSON object")
+        code = doc.get("code")
+        token = str(doc.get("tenant_access_token") or "")   # field: expire
+        if code != 0 or not token:
+            raise ChannelError(f"feishu.token: code={str(code)[:40]}")
+        try:
+            expires = int(doc.get("expire") or 7200)
+        except (TypeError, ValueError):
+            expires = 7200
+        _TOKEN_CACHE[app_id] = (token, now + expires)
+        return token
+
+    def _with_token(self, method: str, op):
+        """Run op(token); on a token-invalid code drop the cache, refetch and
+        retry EXACTLY once, then fail honestly (no loops)."""
+        for attempt in (0, 1):
+            token = self._tenant_token()
+            try:
+                return op(token)
+            except _FeishuTokenRejected as e:
+                _TOKEN_CACHE.pop(self._secret(SLOT_FEISHU_APP_ID), None)
+                if attempt:
+                    raise ChannelError(
+                        f"{method}: tenant token rejected "
+                        f"(code={e.code})") from None
+        raise ChannelError(f"{method}: tenant token retry exhausted")
+
+    @staticmethod
+    def _check_code(method: str, doc) -> dict:
+        """Protocol gate for send/poll bodies: non-zero code -> honest
+        ChannelError, token-invalid codes -> the retryable internal signal."""
+        if not isinstance(doc, dict):
+            raise ChannelError(f"{method}: response is not a JSON object")
+        code = doc.get("code")
+        if code in FEISHU_TOKEN_INVALID:
+            raise _FeishuTokenRejected(code)
+        if code in FEISHU_QUOTA_CODES:
+            raise ChannelError(
+                f"{method}: code={code} rate limited or quota exceeded")
+        if code != 0:
+            raise ChannelError(f"{method}: code={str(code)[:40]}")
+        return doc
+
+    def _send(self, target: str, text: str) -> None:
+        payload = json.dumps({"receive_id": target, "msg_type": "text",
+                              "content": json.dumps({"text": text})}) \
+            .encode("utf-8")
+        url = f"{FEISHU_API}/im/v1/messages?receive_id_type=chat_id"
+
+        def op(token: str):
+            doc = _json(self._request(
+                "feishu.send", url, payload,
+                {"Authorization": f"Bearer {token}",
+                 "Content-Type": "application/json"}), "feishu.send")
+            return self._check_code("feishu.send", doc)
+
+        self._with_token("feishu.send", op)
+
+    def _poll(self) -> list[Inbound]:
+        chat_ids = _id_list(self.cfg.get("chat_ids"))
+        if not chat_ids:
+            return []
+        cursor = self._load_cursor({})
+        if not isinstance(cursor, dict):
+            cursor = {}
+        out: list[tuple[tuple, Inbound]] = []
+        for cid in chat_ids:
+            state = cursor.get(cid) if isinstance(cursor.get(cid), dict) else {}
+            t_val = _int_or_none(state.get("t"))
+            ids = {str(x) for x in state.get("ids", [])} \
+                if isinstance(state.get("ids"), list) else set()
+            # start_time is SECONDS (defensive ms->s conversion of the raw
+            # cursor value); fresh polls omit it (current batch, discord-like)
+            url = (f"{FEISHU_API}/im/v1/messages?container_id_type=chat"
+                   f"&container_id={urllib.parse.quote(cid, safe='')}")
+            if t_val is not None:
+                url += f"&start_time={t_val // 1000 if t_val > FEISHU_MS_ABOVE else t_val}"
+            url += "&sort_type=ByCreateTimeAsc&page_size=50"
+
+            def op(token: str, url: str = url):
+                doc = _json(self._request("feishu.poll", url, None,
+                                          {"Authorization": f"Bearer {token}"}),
+                            "feishu.poll")
+                return self._check_code("feishu.poll", doc)
+
+            doc = self._with_token("feishu.poll", op)
+            data = doc.get("data")
+            items = data.get("items") if isinstance(data, dict) else None
+            if items is None:
+                items = []
+            if not isinstance(items, list):
+                raise ChannelError("feishu.poll: items is not a list")
+            rows: list[tuple[int, str, str, str]] = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                mid = str(item.get("message_id") or "")
+                raw = _int_or_none(item.get("create_time"))
+                if raw is None or not mid:
+                    continue        # unparsable id/timestamp is never delivered
+                sender_doc = item.get("sender") \
+                    if isinstance(item.get("sender"), dict) else {}
+                sender = str(sender_doc.get("id") or "")
+                rows.append((raw, mid, sender, _feishu_text(item)))
+            if not rows:
+                continue
+            max_raw = max(r[0] for r in rows)
+            if t_val is not None and max_raw < t_val:
+                max_raw = t_val                 # the cursor never regresses
+            at_boundary = {m for r, m, _, _ in rows if r == max_raw}
+            if t_val is None or max_raw > t_val:
+                new_ids = at_boundary
+            else:
+                new_ids = ids | at_boundary     # same-ms arrivals extend ids
+            if max_raw != t_val or new_ids != ids:
+                cursor[cid] = {"t": max_raw, "ids": sorted(new_ids)}
+            for raw, mid, sender, text in rows:
+                # acceptance: raw > t, or raw == t with an id not yet seen
+                if t_val is not None and not (
+                        raw > t_val or (raw == t_val and mid not in ids)):
+                    continue                    # already delivered / older
+                if not sender or not text:
+                    continue                    # no sender or not a text message
+                out.append(((raw, mid),
+                            Inbound(route=self.name, sender=sender,
+                                    target=cid, text=text)))
+        if cursor != self._load_cursor({}):
+            self._save_cursor(cursor)
+        out.sort(key=lambda pair: pair[0])
+        return [inbound for _, inbound in out]
+
+
+class WeChatChannel(Channel):
+    """WeChat Official Account customer-service route: access_token auth
+    (module-level _TOKEN_CACHE, keyed by appid) + text messages to an
+    openid. Outbound only: inbound needs a verified service account and a
+    public callback endpoint (structurally blocked for now). errmsg is NEVER
+    surfaced — WeChat error hints can echo appsecret fragments, so only the
+    numeric errcode reaches logs and errors."""
+
+    name = "wechat"
+    inbound = False
+
+    def configured(self) -> tuple[bool, str]:
+        if not self._secret(SLOT_WECHAT_APPID):
+            return False, f"missing {SLOT_WECHAT_APPID} slot"
+        if not self._secret(SLOT_WECHAT_APP_SECRET):
+            return False, f"missing {SLOT_WECHAT_APP_SECRET} slot"
+        return True, ""
+
+    def _access_token(self) -> str:
+        """Cached access_token (module-level _TOKEN_CACHE keyed by appid,
+        refreshed TOKEN_REFRESH_LEAD seconds before expires_in)."""
+        appid = self._secret(SLOT_WECHAT_APPID)
+        secret = self._secret(SLOT_WECHAT_APP_SECRET)
+        now = time.time()
+        hit = _TOKEN_CACHE.get(appid)
+        if isinstance(hit, tuple) and len(hit) == 2:
+            try:
+                if float(hit[1]) - TOKEN_REFRESH_LEAD > now:
+                    return str(hit[0])
+            except (TypeError, ValueError):
+                pass                         # corrupt cache entry -> refetch
+        url = (f"{WECHAT_API}/cgi-bin/token?grant_type=client_credential"
+               f"&appid={urllib.parse.quote(appid, safe='')}"
+               f"&secret={urllib.parse.quote(secret, safe='')}")
+        doc = _json(self._request("wechat.token", url, None), "wechat.token")
+        if not isinstance(doc, dict):
+            raise ChannelError("wechat.token: response is not a JSON object")
+        code = doc.get("errcode", 0)
+        token = str(doc.get("access_token") or "")
+        if code:
+            # errmsg dropped on purpose — WeChat hints can echo the appsecret
+            raise ChannelError(f"wechat.token: errcode={str(code)[:40]}")
+        if not token:
+            raise ChannelError("wechat.token: response has no access_token")
+        try:
+            expires = int(doc.get("expires_in") or 7200)
+        except (TypeError, ValueError):
+            expires = 7200
+        _TOKEN_CACHE[appid] = (token, now + expires)
+        return token
+
+    def _send(self, target: str, text: str) -> None:
+        appid = self._secret(SLOT_WECHAT_APPID)
+        body = _truncate_bytes(text, WECHAT_TEXT_CAP)   # 1024 BYTES, utf-8 safe
+        payload = json.dumps({"touser": target, "msgtype": "text",
+                              "text": {"content": body}}).encode("utf-8")
+        for attempt in (0, 1):
+            token = self._access_token()
+            url = (f"{WECHAT_API}/cgi-bin/message/custom/send"
+                   f"?access_token={urllib.parse.quote(token, safe='')}")
+            doc = _json(self._request("wechat.send", url, payload,
+                                      {"Content-Type": "application/json"}),
+                        "wechat.send")
+            if not isinstance(doc, dict):
+                raise ChannelError("wechat.send: response is not a JSON object")
+            code = doc.get("errcode", 0)
+            if not code:
+                return
+            if code in WECHAT_TOKEN_CODES and attempt == 0:
+                _TOKEN_CACHE.pop(appid, None)   # stale token -> refetch ONCE
+                continue
+            if code == WECHAT_WINDOW_CODE:
+                raise ChannelError(
+                    "wechat.send: errcode=45015 outside the 48h "
+                    "customer-service session window")
+            # errmsg never surfaces — WeChat hints can echo appsecret pieces
+            raise ChannelError(f"wechat.send: errcode={str(code)[:40]}")
+
+    def _poll(self) -> list[Inbound]:
+        return []            # inbound needs a verified service account
+
+
 # ------------------------------------------------------------ email utils ---
 def _default_smtp(host: str, port: int, ssl_on: bool, timeout: float):
     cls = smtplib.SMTP_SSL if ssl_on else smtplib.SMTP
@@ -672,17 +1066,18 @@ def _parse_email(raw: bytes) -> Inbound | None:
 
 # -------------------------------------------------------------- factory -----
 def load_channels(repo, settings, transport=None) -> dict[str, Channel]:
-    """Build all four route adapters. `settings` is the web/settings.json
-    document (or the bare channels block). `transport` injects the HTTP
-    callable for offline tests; email leaves use stdlib — inject per-instance
-    factories when testing them directly."""
+    """Build every route adapter in CHANNELS. `settings` is the
+    web/settings.json document (or the bare channels block). `transport`
+    injects the HTTP callable for offline tests; email leaves use stdlib —
+    inject per-instance factories when testing them directly."""
     block = _channels_block(settings)
     state = state_root(repo, settings)
     def build(cls):
         return cls(repo=repo, cfg=block.get(cls.name) or {}, state=state,
                    transport=transport)
     return {cls.name: build(cls) for cls in
-            (DiscordChannel, SlackChannel, EmailChannel, WebhookChannel)}
+            (DiscordChannel, SlackChannel, EmailChannel, WebhookChannel,
+             DingTalkChannel, FeishuChannel, WeChatChannel)}
 
 
 def status(settings, repo) -> list[dict]:

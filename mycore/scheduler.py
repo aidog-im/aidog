@@ -88,6 +88,8 @@ MAX_INTERVAL_MIN = 10080                 # 7 days
 _TIME_RE = re.compile(r"([01][0-9]|2[0-3]):[0-5][0-9]")
 _DATE_RE = re.compile(r"([0-9]{4})-([01][0-9])-([0-3][0-9])")
 _INTERVAL_RE = re.compile(r"([0-9]+)(m|h)$", re.I)
+# --origin forms: a numeric chat id, or a channel endpoint "route:target"
+_ROUTE_ORIGIN_RE = re.compile(r"[a-z][a-z0-9_]*:.+")
 
 
 class SpecError(ValueError):
@@ -409,6 +411,21 @@ def get_origin() -> int | str | None:
 
 
 # ------------------------------------------------------------------ CLI -----
+def _parse_origin(value: str) -> int | str:
+    """argparse type for --origin: a numeric chat id (-> int) or a channel
+    endpoint "route:target" (-> str). Anything else raises
+    ArgumentTypeError, which argparse reports as exit code 2 with this
+    honest message (no machine paths, no credentials)."""
+    raw = (value or "").strip()
+    if re.fullmatch(r"[0-9]+", raw):
+        return int(raw)
+    if _ROUTE_ORIGIN_RE.fullmatch(raw):
+        return raw
+    raise argparse.ArgumentTypeError(
+        f"bad origin {value!r} — expected a numeric chat id or "
+        f"route:target (e.g. discord:C1)")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="mycore.scheduler",
@@ -418,8 +435,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--text", default="", help="job text (with --add)")
     ap.add_argument("--kind", default="message", choices=KINDS)
     ap.add_argument("--source", default="ops", help="command|model|ops")
-    ap.add_argument("--origin", type=int, default=None,
-                    help="origin chat id for delivery")
+    ap.add_argument("--origin", type=_parse_origin, default=None,
+                    help="origin chat id or route:target channel endpoint")
     ap.add_argument("--del", dest="delete", metavar="ID", help="delete a job")
     ap.add_argument("--json", action="store_true", help="JSON output")
     args = ap.parse_args(argv)
