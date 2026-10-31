@@ -1,0 +1,6 @@
+{
+  "version": "0.5.7",
+  "date": "2026-01-19",
+  "channel": "private",
+  "notes": "Fix: getUpdates response parsing \u2014 the client read doc.get('updates') but Telegram returns 'result', so EVERY successful poll parsed as empty (silent zero-delivery; E2E-caught on the dedicated bot 2026-01-19 after the long-poll timeout fix). Test fixtures had mirrored the same wrong key (tautological blind spot) \u2014 all fixtures rewritten to the real Telegram response shape; suite 174/174. Live E2E now full-chain green: poll -> allowlist -> session JSONL -> assembly -> run_turn (mimo) -> SEND_OK, bot answered the owner in chat. Two stacked bugs documented: (1) transport timeout == long-poll window deadlock (0.5.6), (2) wrong response key (0.5.7)."
+}

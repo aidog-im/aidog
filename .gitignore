@@ -1,0 +1,33 @@
+# 凭据永不入库
+secrets.env
+*.env
+!.env.example
+!secrets.env.example
+
+# 运行态/构建物
+__pycache__/
+*.pyc
+*.pyo
+.state/
+*.log
+node_modules/
+
+# Memory bundles are transport artifacts — they belong in the PRIVATE memory
+# repo, never in the product repo (credential gate + publish gate still apply).
+exports/
+
+# 系统
+.DS_Store
+Thumbs.db
+web/settings.json
+web/.voice/
+.screenshots/
+web/.state.json
+deploy/*.local
+deploy/*.local.state.json
+
+# owner credential drops (tokens/keys land here — never tracked)
+tmp/
+
+# mycore 服务运行态（pidfile/service.log/会话）——永不入库
+data/

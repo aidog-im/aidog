@@ -1,0 +1,11 @@
+# Machine-local memory sources (gitignored). Copy to memory_sources.local.
+MEMORY_SRC=/path/to/pi/project/.pi/memory
+MEMORY_PERSONA=/path/to/persona/references
+# P5-4 — portable memory home (4-step chain: env AIDOG_MEMORY_HOME > this key
+# > $HOME/.aidog/memories > legacy shim profile while deploy/upstream_shim.env
+# exists). Uncomment to pin the home somewhere else:
+# MEMORY_HOME=/path/to/memory/home
+# P5-4 — extra skill roots for lib/skill_route.py (os.pathsep-separated;
+# chain: --dirs > env AIDOG_SKILL_DIRS > this key > <repo>/overlay/skills >
+# legacy profile external_dirs while the shim exists):
+# SKILL_DIRS=/path/to/skills/a:/path/to/skills/b

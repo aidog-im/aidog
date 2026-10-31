@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "policy": "Publish manifest \u2014 deny-by-default. Every tracked file must match allow or deny; deny wins. Public placement requires C\u603b's case-by-case adjudication on top of this tool passing (AGENTS.md: PUBLIC-REPO GATE).",
+  "allow": [
+    "AGENTS.md",
+    "README.md",
+    "VERSION",
+    "release.json",
+    ".gitignore",
+    "secrets.env.example",
+    "adapters/**",
+    "deploy/**",
+    "docs/**",
+    "lib/**",
+    "mycore/**",
+    "overlay/**",
+    "tests/**",
+    "web/**",
+    "aidog"
+  ],
+  "deny": {
+    "secrets.env": "real credentials \u2014 never exported",
+    "web/settings.json": "personal runtime config (data-source paths)",
+    "web/.state.json": "runtime state (boot baseline)",
+    "docs/research/*": "internal citation vault \u2014 upstream/third-party names live only here",
+    "deploy/upstream_shim.env": "upstream execution facts \u2014 must be DELETED at mycore before any public release",
+    "deploy/*.log": "runtime/install logs (also gitignored)",
+    "*.log": "runtime logs \u2014 never exported",
+    "docs/design/*": "internal decision archive (contains adjudication records + machine paths)",
+    "docs/acceptance/*": "internal acceptance records",
+    "docs/model_access_tier.md": "internal channel/credential analysis",
+    "docs/pain_points_and_migration.md": "internal pain-point history",
+    "deploy/*.local": "machine-local runtime config (chat id / memory sources)"
+  },
+  "required_deny": [
+    "secrets.env",
+    "docs/research/*",
+    "deploy/upstream_shim.env",
+    "*.log",
+    "deploy/*.local"
+  ]
+}

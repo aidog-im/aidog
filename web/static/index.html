@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>I'm AiDog</title>
+<link rel="icon" href="/static/aidog-logo.jpg" type="image/jpeg">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- cinematic boot sequence (skippable; auto-skipped for reduced motion) -->
+<div class="boot" id="boot" aria-hidden="true">
+  <div class="boot-inner">
+    <pre class="boot-log" id="bootLog"></pre>
+    <div class="boot-bar"><div id="bootFill"></div></div>
+    <button class="boot-skip" id="bootSkip" data-i18n="boot.skip">SKIP ▸</button>
+  </div>
+</div>
+
+<!-- URGENT takeover: red scan (real advisory=urgent, or ?alert=urgent preview) -->
+<div class="alert-layer" id="alertLayer" hidden>
+  <div class="alert-scan"></div>
+  <div class="alert-box">
+    <div class="alert-title" id="alertTitle">⚠ URGENT</div>
+    <ul class="alert-reasons" id="alertReasons"></ul>
+    <div class="alert-foot">
+      <span id="alertHint" data-i18n="alert.hint">tap / Esc to dismiss</span>
+      <span class="preview-tag" id="previewTag" data-i18n="alert.preview" hidden>PREVIEW</span>
+    </div>
+  </div>
+</div>
+
+<div class="hud">
+  <header class="hud-head">
+    <div class="brand">
+      <img class="brand-logo" id="brandLogo" src="/static/aidog-logo.jpg"
+           alt="I'm AiDog" width="32" height="32" data-i18n-alt="app.logoAlt">
+      <h1 id="title">I'M AIDOG</h1>
+      <span class="sub" id="subtitle">situational console</span>
+    </div>
+    <div class="head-status">
+      <span class="chip" id="uptimeChip">BOOT --:-- · UP --</span>
+      <span class="chip adv-info" id="advChip">INFO</span>
+    </div>
+    <div class="head-right">
+      <span class="clock" id="clock">--:--:--</span>
+      <button class="btn" id="langBtn">中文</button>
+    </div>
+  </header>
+
+  <div class="tool-strip" id="toolStrip">
+    <span class="tool" id="toolBj" title="Beijing time">BJ --:--:--</span>
+    <span class="tool" id="toolUtc">UTC --:--</span>
+    <span class="tool" id="toolUp">UP –</span>
+    <span class="tool" id="toolHb" data-i18n-t="tool.hbTip">HB –</span>
+    <span class="tool" id="toolToday" data-i18n-t="tool.todayTip" data-i18n="tool.todayE">TODAY –</span>
+  </div>
+
+  <div class="update-banner" id="updateBanner" hidden>
+    <span class="upd-dot"></span>
+    <span id="updateText">update available</span>
+    <code class="upd-cmd">python3 deploy/aidog_update.py apply</code>
+    <button class="btn-x" id="updateDismiss" aria-label="dismiss">×</button>
+  </div>
+
+  <main class="grid">
+    <!-- LEFT RAIL: advisory ticker · memory core · console settings -->
+    <section class="col col-left">
+      <div class="card">
+        <h2 data-i18n="sec.advisory">ADVISORY</h2>
+        <div class="voice-row">
+          <button class="voice-orb locked" id="voiceOrb" data-i18n-t="voice.tip"
+                  title="tap to arm voice" aria-pressed="false">
+            <span class="orb-core"></span>
+          </button>
+          <div class="voice-meta">
+            <div class="voice-state" id="voiceState">VOICE LOCKED</div>
+            <div class="voice-sub" id="voiceSub">—</div>
+          </div>
+        </div>
+        <div class="ticker" id="ticker">
+          <span class="ticker-dot"></span><span id="tickerText">—</span>
+        </div>
+        <div class="reason-list" id="reasonList"></div>
+      </div>
+
+      <div class="card">
+        <h2 data-i18n="sec.memory">MEMORY CORE</h2>
+        <div class="bar-block">
+          <label data-i18n="memory.curated">Curated memory</label>
+          <div class="bar"><div class="bar-fill" id="memBar"></div></div>
+          <span class="num" id="memNum">–</span>
+        </div>
+        <div class="bar-block">
+          <label data-i18n="memory.user">User profile</label>
+          <div class="bar bar-violet"><div class="bar-fill" id="userBar"></div></div>
+          <span class="num" id="userNum">–</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2 data-i18n="sec.console">CONSOLE</h2>
+        <div class="ctl-row">
+          <label data-i18n="ctl.sound">UI sound</label>
+          <button class="toggle" id="soundToggle" aria-pressed="false"><span></span></button>
+        </div>
+        <div class="ctl-row">
+          <label data-i18n="ctl.volume">Voice volume</label>
+          <input type="range" id="voiceVol" min="0" max="100" step="5" value="80"
+                 data-i18n-t="voice.volTip" title="spoken announcements volume">
+        </div>
+        <div class="ctl-row">
+          <label data-i18n="ctl.alert">Alert state</label>
+          <select id="alertSelect">
+            <option value="off" data-i18n="common.off">off</option>
+            <option value="warn" data-i18n="adv.warn">warn</option>
+            <option value="urgent" data-i18n="adv.urgent">urgent</option>
+          </select>
+        </div>
+        <div class="ctl-row">
+          <label data-i18n="ctl.refresh">Refresh (s)</label>
+          <select id="refreshSelect">
+            <option>5</option><option>10</option><option>30</option><option>60</option>
+          </select>
+        </div>
+        <div class="ctl-row">
+          <label data-i18n="ctl.currency">Currency</label>
+          <select id="curSelect">
+            <option>USD</option><option>CNY</option><option>EUR</option>
+            <option>GBP</option><option>JPY</option>
+          </select>
+        </div>
+        <div class="ctl-row">
+          <label data-i18n="ctl.fx">FX rate (0 = auto)</label>
+          <input type="number" id="fxInput" min="0" max="100000" step="0.01" value="0">
+        </div>
+        <div class="ctl-row">
+          <label data-i18n="ctl.mycModel">Kernel model</label>
+          <input type="text" id="mycModel" maxlength="100" placeholder="mimo-v2.6-flash"
+                 data-i18n-ph="ctl.mycModelPh" autocomplete="off">
+        </div>
+        <div class="ctl-row">
+          <label data-i18n="ctl.mycUrl">Kernel endpoint</label>
+          <input type="text" id="mycUrl" maxlength="256" placeholder="http://127.0.0.1:3460/v1"
+                 data-i18n-ph="ctl.mycUrlPh" autocomplete="off">
+        </div>
+        <div class="ctl-row token-row">
+          <label data-i18n="ctl.token">Access token</label>
+          <input type="password" id="tokenInput" autocomplete="off"
+                 data-i18n-ph="ctl.tokenPh" placeholder="WEB_TOKEN to unlock writes">
+        </div>
+        <div class="ctl-actions">
+          <button class="btn primary" id="saveBtn" data-i18n="ctl.save">SAVE</button>
+          <span class="save-state" id="saveState"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- CENTER: status ring (5 nodes) -->
+    <section class="col col-center">
+      <div class="ring-wrap">
+        <svg id="ring" viewBox="0 0 420 420" role="img" aria-label="system status ring">
+          <defs>
+            <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+              <feGaussianBlur stdDeviation="4" result="b"/>
+              <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+            </filter>
+            <radialGradient id="coreGrad" cx="50%" cy="50%" r="50%">
+              <stop offset="0%" stop-color="#00e5ff" stop-opacity=".55"/>
+              <stop offset="60%" stop-color="#00e5ff" stop-opacity=".10"/>
+              <stop offset="100%" stop-color="#00e5ff" stop-opacity="0"/>
+            </radialGradient>
+          </defs>
+          <circle class="ring-track" cx="210" cy="210" r="168"/>
+          <circle class="ring-track ring-track-in" cx="210" cy="210" r="120"/>
+          <g class="ring-scan" id="ringScan">
+            <path d="M210 210 L210 42 A168 168 0 0 1 294 66 Z" fill="url(#scanGrad)" opacity=".25"/>
+            <line x1="210" y1="210" x2="210" y2="34" class="scan-beam"/>
+          </g>
+          <defs>
+            <linearGradient id="scanGrad" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#00e5ff" stop-opacity=".8"/>
+              <stop offset="100%" stop-color="#00e5ff" stop-opacity="0"/>
+            </linearGradient>
+          </defs>
+          <g id="ringTicks"></g>
+          <circle class="ring-core" cx="210" cy="210" r="96" fill="url(#coreGrad)"/>
+          <g id="ringNodes"></g>
+          <text class="ring-state" id="ringState" x="210" y="204">—</text>
+          <text class="ring-sub" id="ringSub" x="210" y="232">—</text>
+        </svg>
+      </div>
+      <div class="panel-row" id="panels"></div>
+    </section>
+
+    <!-- RIGHT: arc reactor (cost energy) + channel -->
+    <section class="col col-right">
+      <div class="card reactor-card">
+        <h2><span data-i18n="sec.reactor">ARC REACTOR // COST</span>
+            <span class="live-dot" id="usageLive" hidden></span></h2>
+        <div class="reactor-wrap">
+          <svg id="reactor" viewBox="0 0 220 220" role="img" aria-label="cost reactor">
+            <circle class="r-outer" cx="110" cy="110" r="96"/>
+            <circle class="r-tick" cx="110" cy="110" r="86"/>
+            <circle class="r-arcbg" cx="110" cy="110" r="74"/>
+            <circle class="r-arc" id="rArc" cx="110" cy="110" r="74"
+                    transform="rotate(-90 110 110)"/>
+            <circle class="r-mid" cx="110" cy="110" r="54"/>
+            <circle class="r-core" id="rCore" cx="110" cy="110" r="34"/>
+            <text class="r-num" id="rCost" x="110" y="106">–</text>
+            <text class="r-unit" id="rCostUnit" x="110" y="126">$ TODAY</text>
+          </svg>
+        </div>
+        <div class="stat-grid" id="usageStats"></div>
+        <div class="stat-note" id="usageNote"></div>
+      </div>
+
+      <div class="card">
+        <h2 data-i18n="sec.channel">CHANNEL</h2>
+        <table class="kv" id="cfgTable"></table>
+      </div>
+    </section>
+  </main>
+
+  <!-- skill armory (armor-gallery analog: real SKILL.md records) -->
+  <section class="card gallery">
+    <h2><span data-i18n="sec.gallery">SKILL ARMORY</span><span class="gal-count" id="galCount"></span></h2>
+    <div class="gal-grid" id="galGrid"></div>
+  </section>
+
+  <!-- BOTTOM: typewriter event stream -->
+  <section class="card stream">
+    <h2><span data-i18n="sec.stream">LIVE STREAM</span><span class="stream-caret" id="streamCaret"></span></h2>
+    <div class="stream-body" id="stream"></div>
+  </section>
+
+  <footer>
+    <span id="footnote">loopback · free forever</span>
+    <span id="ts">–</span>
+  </footer>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
