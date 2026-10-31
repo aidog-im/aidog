@@ -1,4 +1,5 @@
-"""mycore.tools — tool registry + the 9 core tools (design §14.3 + Phase B2).
+"""mycore.tools — tool registry + the 11 core tools (design §14.3 + Phase B2
++ car 2: delegate / execute_code).
 
 Registry exposes OpenAI JSON-schema `tools` for the model boundary and a
 dispatcher for the loop. Handler contract (README): return `str`; exceptions
@@ -24,6 +25,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Lock
 from typing import Callable
 
 REPO = Path(__file__).resolve().parent.parent
@@ -48,12 +50,38 @@ class Tool:
 class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
+        # Turn binding (car 2-D6): loop.run_turn records the chat callable +
+        # budget of the ACTIVE turn so meta-tools (delegate) can reach the
+        # model connection without holding credentials themselves. Written at
+        # turn entry (service turns run sequentially), read during dispatch.
+        self._turn_chat: Callable[..., dict] | None = None
+        self._turn_budget: int | None = None
 
     def register(self, name: str, description: str, parameters: dict,
                  handler: Callable[..., str]) -> None:
         if name in self._tools:
             raise ValueError(f"duplicate tool name: {name}")
         self._tools[name] = Tool(name, description, parameters, handler)
+
+    def select(self, names: list[str]) -> "ToolRegistry":
+        """A NEW registry holding only `names` (shared Tool objects, same
+        roots/state closures) — the car 2-D6 sub-agent isolation primitive.
+        Unknown names are skipped here; callers validate honestly first."""
+        out = ToolRegistry()
+        for n in names:
+            if n in self._tools:
+                out._tools[n] = self._tools[n]
+        return out
+
+    def bind_turn(self, chat: Callable[..., dict] | None,
+                  budget: int | None = None) -> None:
+        """Called by loop.run_turn at turn entry (see class comment)."""
+        self._turn_chat = chat
+        self._turn_budget = budget
+
+    def turn_binding(self) -> tuple[Callable[..., dict] | None, int | None]:
+        """(chat, budget) of the active turn — None/None outside run_turn."""
+        return self._turn_chat, self._turn_budget
 
     def names(self) -> list[str]:
         return sorted(self._tools)
@@ -386,16 +414,58 @@ def _cron(action: str, spec: str | None, text: str | None, kind: str | None,
         return (f"scheduled {job['id']}: {scheduler.describe(job)} · "
                 f"{job['kind']} · next "
                 f"{scheduler.fmt_beijing(scheduler.next_fire(job, time.time()))}")
-    raise ToolError(f"action must be create | list | delete (got {action!r})")
+    raise ToolError(f"action must be create | list | delete (got {action!r}")
+
+
+_CRON_LOCK = Lock()   # delegate threads may hit the cron tool concurrently
+
+
+def _cron_locked(action, spec, text, kind, job_id, state_dir):
+    """cron tool entry serialized (car 2-D6): delegate threads may hit the
+    registry concurrently and the job table is load-modify-save."""
+    with _CRON_LOCK:
+        return _cron(action, spec, text, kind, job_id, state_dir)
+
+
+def _delegate(tasks: list, extra_tools: list | None,
+              registry: "ToolRegistry") -> str:
+    """The `delegate` tool handler (car 2-D6): isolated parallel sub-agents.
+    Chat + budget come from the ACTIVE turn's binding (loop.run_turn) — a
+    dispatch outside run_turn fails honestly instead of inventing a model."""
+    from . import subagent  # local import: keeps the module graph acyclic
+    chat, budget = registry.turn_binding()
+    return subagent.run_tasks(tasks, registry, extra_tools, chat, budget)
+
+
+def _execute_code(steps: list | None, code: str | None, timeout: int,
+                  registry: "ToolRegistry",
+                  roots: tuple[str, ...] | list[str],
+                  state_dir: str | Path | None) -> str:
+    """The `execute_code` tool handler (car 2-D7): steps fold or one-shot
+    Python. ExecError (a caller mistake) maps to the honest `ERROR:` line;
+    everything else is the child process's own output."""
+    from . import execute_code  # local import: keeps the module graph acyclic
+    try:
+        return execute_code.execute(steps=steps, code=code, timeout=timeout,
+                                    registry=registry, roots=roots,
+                                    state_dir=state_dir)
+    except execute_code.ExecError as e:
+        raise ToolError(str(e)) from None
 
 
 def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
-                   state_dir: str | Path | None = None) -> ToolRegistry:
-    """The 9 core tools (design §14.3 + cron/Phase B2). `allowed_roots`
+                   state_dir: str | Path | None = None,
+                   mcp_raw: str | None = None) -> ToolRegistry:
+    """The 11 core tools (design §14.3 + cron/Phase B2 + car 2 delegate/
+    execute_code) plus any configured MCP tools (car 2-D5).
+    `allowed_roots`
     overrides path policy (tests use temp dirs; production default = repo +
     system temp). `state_dir` anchors the cron registry AND the pre-write
     checkpoints (service passes its own state dir; None = resolve
-    AIDOG_MC_STATE at tool-call time)."""
+    AIDOG_MC_STATE at tool-call time). `mcp_raw` is the MCP server config
+    (JSON array; None = resolve env MYCORE_MCP > settings mycore.mcp > off).
+    MCP is fail-soft: a bad config or an unreachable server becomes an honest
+    note on registry.mcp_notes — the 11 core tools always register."""
     roots = tuple(allowed_roots) if allowed_roots else DEFAULT_ALLOWED_ROOTS
     r = ToolRegistry()
     r.register("read_file", "Read a text file with line numbers.",
@@ -451,5 +521,52 @@ def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
                    "id": _STR},
                 "required": ["action"]},
                lambda action, spec=None, text=None, kind="message", id=None:
-               _cron(action, spec, text, kind, id, state_dir))
+               _cron_locked(action, spec, text, kind, id, state_dir))
+    r.register("delegate",
+               "Delegate 1-3 independent tasks to isolated sub-agents running "
+               "in parallel. Each sub-agent sees NO conversation history (put "
+               "everything it needs in the task text) and gets only read-only "
+               "tools by default (read_file, grep, glob, http_fetch, "
+               "skill_route); name extra tools in `tools` to grant them "
+               "explicitly. `delegate` and `execute_code` can never be granted "
+               "to a sub-agent. Returns one labelled block per task.",
+               {"type": "object", "properties": {
+                   "tasks": {"type": "array", "items": _STR,
+                             "minItems": 1, "maxItems": 3,
+                             "description": "1-3 independent task descriptions"},
+                   "tools": {"type": "array", "items": _STR,
+                             "description": "extra tool names to grant beyond "
+                                            "the read-only default"}},
+                "required": ["tasks"]},
+               lambda tasks, tools=None: _delegate(tasks, tools, r))
+    r.register("execute_code",
+               "Fold multi-step work into ONE round trip. Exactly one of: "
+               "`steps` = ordered [{name, args}, ...] tool calls (max 8) run "
+               "back-to-back with every result folded into one report (no "
+               "nested execute_code/delegate); `code` = Python source run "
+               "once in a child process with helpers read/grep/glob/write/"
+               "edit/run/fetch — allowed-roots enforced, write helpers take "
+               "checkpoints, timeout <= 120s, output capped.",
+               {"type": "object", "properties": {
+                   "steps": {"type": "array",
+                             "items": {"type": "object", "properties": {
+                                 "name": _STR,
+                                 "args": {"type": "object"}},
+                                      "required": ["name"]}},
+                   "code": _STR,
+                   "timeout": {"type": "integer", "minimum": 1,
+                               "maximum": 120}}},
+               lambda steps=None, code=None, timeout=120:
+                   _execute_code(steps, code, timeout, r, roots, state_dir))
+    # --- car 2-D5: MCP servers (fail-soft: notes, never a startup crash) ---
+    r.mcp_notes: list[str] = []
+    r.mcp_sessions: list = []
+    try:
+        from . import mcp as mcp_mod          # local: optional dependency path
+        raw = mcp_mod.raw_config() if mcp_raw is None else mcp_raw
+        if raw and raw.strip():
+            from .mcp import attach
+            attach(r, raw)
+    except ValueError as e:                   # config problem: honest note
+        r.mcp_notes = [f"mcp config invalid: {e}"]
     return r

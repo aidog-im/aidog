@@ -5,7 +5,9 @@ scratch in Python stdlib only (zero third-party dependencies). Owner-approved
 scope: design doc §14.3 — loop + 8 tools + simple compaction + TG adapter +
 watchdog, developed under dual-brain A/B against the transitional kernel;
 extended by owner approval (Phase B2, v0.5.20) with the 9th tool `cron` and
-the `scheduler.py` module (natural-language cron).
+the `scheduler.py` module (natural-language cron), then by alignment car 2
+(v0.5.23) with `delegate` + `execute_code` (11 core tools total) and the
+optional `mcp.py` client (external tools attach dynamically when configured).
 
 **Status: P4-1a scaffold** — loop, model client, tool registry, compaction
 skeleton, offline test suite. The transitional kernel keeps running in
@@ -21,8 +23,9 @@ mycore/
 │                #   env only, never echoed/logged; injectable transport for tests
 ├── loop.py      # agent loop: messages -> model -> tool_calls -> execute -> repeat
 │                #   bounded iterations, honest tool errors, stop on final text
-├── tools.py     # tool registry (OpenAI JSON-schema shape) + the 9 core tools
-│                #   (the 9th, `cron`, shares its spec grammar with /cron)
+├── tools.py     # tool registry (OpenAI JSON-schema shape) + the 11 core tools
+│                #   (9th `cron`; car 2 adds `delegate` + `execute_code`; MCP
+│                #   tools attach dynamically when a server is configured)
 ├── compact.py   # simple compaction: budgeted truncation of old turns
 ├── assembly.py  # body layer -> system stack (constitution/memory always first,
 │                #   missing files -> honest notices, digest for A/B provenance)
@@ -39,6 +42,12 @@ mycore/
 ├── scheduler.py # natural-language cron (Phase B2): job registry
 │                #   <state>/cron_jobs.json, one spec grammar for /cron + the
 │                #   `cron` tool, due/catch-up math, Beijing fixed +08:00
+├── subagent.py  # car 2-D6: isolated parallel delegation (<=3 tasks, fresh
+│                #   context, read-only default tool set, recursion guard)
+├── execute_code.py  # car 2-D7: folded multi-step execution (steps fold +
+│                #   one-shot Python child with helpers, allowed-roots bound)
+├── mcp.py       # car 2-D5: minimal MCP client (stdio + HTTP JSON-RPC,
+│                #   per-tool allow/deny filters, fail-soft attach + notes)
 ├── cli.py       # one-shot runner: python3 -m mycore.cli "prompt" (A/B harness口)
 └── tests/       # offline: fake transports, no network, no credentials
 ```

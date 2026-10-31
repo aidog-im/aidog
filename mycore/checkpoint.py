@@ -31,6 +31,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -41,6 +42,10 @@ INDEX_NAME = "index.jsonl"
 MAX_ENTRIES = 100                 # rotation cap (newest kept)
 MAX_SNAPSHOT_BYTES = 1_000_000    # per-file cap (skip honestly, never fail a write)
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._-]+")
+# Car 2-D6: parallel sub-agents may write through the checkpointed tools at
+# the same time — id allocation (read index -> next_id -> append) must be
+# serialized or two snapshots could claim the same id.
+_SNAP_LOCK = threading.Lock()
 
 
 class CheckpointError(Exception):
@@ -112,21 +117,22 @@ def snapshot(path: Path, state_dir: str | Path | None = None,
     if len(data) > MAX_SNAPSHOT_BYTES:
         return None
     store = store_dir(state_dir)
-    entries = _read_index(store / INDEX_NAME)
-    next_id = (max((e["id"] for e in entries), default=0)) + 1
-    entry = {"id": next_id, "ts": float(now if now is not None else time.time()),
-             "path": str(path), "file": _snap_name(next_id, path),
-             "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
-    try:
-        store.mkdir(parents=True, exist_ok=True)
-        (store / entry["file"]).write_bytes(data)
-        with (store / INDEX_NAME).open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
-    except OSError:
-        return None
-    entries.append(entry)
-    if len(entries) > MAX_ENTRIES:
-        _prune(store, entries)
+    with _SNAP_LOCK:
+        entries = _read_index(store / INDEX_NAME)
+        next_id = (max((e["id"] for e in entries), default=0)) + 1
+        entry = {"id": next_id, "ts": float(now if now is not None else time.time()),
+                 "path": str(path), "file": _snap_name(next_id, path),
+                 "size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+        try:
+            store.mkdir(parents=True, exist_ok=True)
+            (store / entry["file"]).write_bytes(data)
+            with (store / INDEX_NAME).open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
+        except OSError:
+            return None
+        entries.append(entry)
+        if len(entries) > MAX_ENTRIES:
+            _prune(store, entries)
     return entry
 
 

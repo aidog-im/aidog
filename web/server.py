@@ -66,7 +66,7 @@ if str(REPO) in sys.path:
     sys.path.remove(str(REPO))
 sys.path.insert(0, str(REPO))
 from lib import i18n  # noqa: E402
-from mycore import cli, evolution, modeltier  # noqa: E402  (model config + evolution loop)
+from mycore import cli, evolution, mcp, modeltier  # noqa: E402  (config + MCP grammar)
 from mycore.assembly import build_system_stack, resolve_context_dirs  # noqa: E402
 from mycore.loop import run_turn  # noqa: E402
 from mycore.model import ChatClient  # noqa: E402
@@ -160,7 +160,7 @@ ALLOWED_TOP = ("language", "refresh_sec", "sound", "voice_volume",
                "alert_preview", "currency", "fx_rate", "mycore", "usage",
                "evolution")
 USAGE_KEYS = ("metrics_url", "pricing_config", "log_dir")
-MYCORE_KEYS = ("base_url", "model", "context_dirs", "upstreams")
+MYCORE_KEYS = ("base_url", "model", "context_dirs", "upstreams", "mcp")
 MYCORE_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$")
 # Supported UI languages = the discovered locale packs (overlay/locales/*);
 # fallback keeps validation sane if the packs are ever unreadable.
@@ -536,6 +536,23 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                             modeltier.parse_upstreams(val)
                         except ValueError as e:
                             errors.append(f"mycore.upstreams: {e}")
+                            continue
+                    clean_mc[key] = val
+                    continue
+                if key == "mcp":
+                    # MCP servers (car 2-D5): JSON array, empty = off. The
+                    # grammar lives in mycore.mcp — the validator reports its
+                    # exact reason; secrets are env SLOT names, never values.
+                    if not isinstance(val, str) or len(val) > mcp.MAX_CONFIG_CHARS \
+                            or "\x00" in val or "\n" in val or "\r" in val:
+                        errors.append("mycore.mcp must be one line of at most "
+                                      f"{mcp.MAX_CONFIG_CHARS} chars (empty = off)")
+                        continue
+                    if val.strip():
+                        try:
+                            mcp.parse_config(val)
+                        except ValueError as e:
+                            errors.append(f"mycore.mcp: {e}")
                             continue
                     clean_mc[key] = val
                     continue

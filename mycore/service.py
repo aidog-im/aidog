@@ -369,6 +369,10 @@ class ChatService:
         self.tg = TgClient(token=TgClient.polling_token(),
                            token_env=POLL_BOT_ENV, transport=transport)
         self.registry = build_registry(state_dir=self.state)
+        # Car 2-D5: surface MCP startup notes (success counts / honest skip
+        # reasons) in the service log — the model never sees a silent miss.
+        for note in getattr(self.registry, "mcp_notes", []):
+            self.log.write("MCP", _scrub_paths(note)[:240])
 
     # ------------------------------------------------------------ control ---
     def stop(self) -> None:

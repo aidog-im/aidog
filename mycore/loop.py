@@ -59,6 +59,13 @@ def run_turn(messages: list[dict], chat: ChatFn, registry: ToolRegistry,
     tools = registry.schema()
     iters = 0
     total_calls = 0
+    # Car 2-D6: expose this turn's chat + budget to meta-tools (delegate)
+    # through the registry — the sub-agent reuses the SAME model connection,
+    # never a credential of its own. Written before the first model call so
+    # a tool dispatched in iteration 1 already sees a bound turn.
+    bind = getattr(registry, "bind_turn", None)
+    if callable(bind):
+        bind(chat, budget_chars)
 
     def stop(reason: str, text: str) -> TurnResult:
         emit("stop", {"reason": reason, "iterations": iters})

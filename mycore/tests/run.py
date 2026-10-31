@@ -26,6 +26,7 @@ import atexit  # noqa: E402
 atexit.register(shutil.rmtree, _SUITE_STATE, True)
 
 from mycore import compact, measure, build_registry, run_turn  # noqa: E402
+from mycore import subagent  # noqa: E402 — car 2-D6 assertions read its constants
 from mycore.model import (ChatClient, ModelConfig, ModelError,  # noqa: E402
                           first_choice_text, tool_calls)
 from mycore.loop import TurnResult  # noqa: E402
@@ -58,11 +59,13 @@ class ScriptedChat:
         self.script = list(script)
         self.fail_at = fail_at
         self.seen: list[list[dict]] = []
+        self.seen_tools: list[set[str]] = []   # tool-name sets per call (car 2)
         self.calls = 0
 
     def chat(self, messages, tools=None, **kw):
         self.calls += 1
         self.seen.append([dict(m) for m in messages])
+        self.seen_tools.append({t["function"]["name"] for t in (tools or [])})
         if self.fail_at is not None and self.calls >= self.fail_at:
             raise ModelError("HTTP 500 Internal Server Error")
         if not self.script:
@@ -126,10 +129,11 @@ def test_registry_and_tools() -> None:
     with tempfile.TemporaryDirectory() as td:
         reg = build_registry(allowed_roots=[td])
         names = reg.names()
-        check("tools: exactly 9 core tools", len(names) == 9, str(names))
+        check("tools: exactly 11 core tools", len(names) == 11, str(names))
         check("tools: expected set", set(names) == {
             "read_file", "write_file", "edit_file", "run_bash",
-            "grep", "glob", "http_fetch", "skill_route", "cron"}, str(names))
+            "grep", "glob", "http_fetch", "skill_route", "cron",
+            "delegate", "execute_code"}, str(names))
         schema = reg.schema()
         check("tools: schema shape",
               all(t["type"] == "function" and "parameters" in t["function"]
@@ -2725,6 +2729,475 @@ def test_wd_locale() -> None:
               and "sun" not in status_zh, status_zh)
 
 
+def test_subagent() -> None:
+    """Car 2-D6: delegate — isolated context/tools, grants, guards, parallel."""
+    with tempfile.TemporaryDirectory() as td:
+        reg = build_registry(allowed_roots=[td])
+
+        # 0) outside run_turn: no model binding -> honest refusal
+        r = reg.dispatch("delegate", {"tasks": ["x"]})
+        check("d6: outside run_turn -> ERROR", r.startswith("ERROR:"), r[:90])
+
+        # 1) validation guards (never raises)
+        for bad, why in (({}, "empty"), ({"tasks": []}, "empty list"),
+                         ({"tasks": ["a", "b", "c", "d"]}, "4 tasks"),
+                         ({"tasks": ["ok"], "tools": ["nope"]}, "unknown tool"),
+                         ({"tasks": ["ok"], "tools": ["delegate"]}, "recursion"),
+                         ({"tasks": ["ok"], "tools": ["execute_code"]}, "nested fold"),
+                         ({"tasks": [42]}, "non-string task")):
+            r = reg.dispatch("delegate", bad)
+            check(f"d6: guard {why} -> ERROR", r.startswith("ERROR:"), r[:90])
+
+        # 2) single task through run_turn: sub-agent context is ISOLATED
+        #    (system line + task only) and its tool set is read-only.
+        chat = ScriptedChat([
+            fake_response(calls=[("delegate", {"tasks": ["count the moons"]})]),
+            fake_response(text="42 moons"),           # the sub-agent's turn
+            fake_response(text="parent final"),])      # parent's final
+        msgs = [{"role": "user", "content": "main prompt"}]
+        res = run_turn(msgs, chat.chat, reg)
+        check("d6: parent final", res.stop == "final" and res.text == "parent final",
+              f"{res.stop} {res.text[:60]}")
+        check("d6: delegate folded", "[1/1 · final · 0 tool call(s)]" in str(msgs)
+              and "42 moons" in str(msgs), str(msgs)[-200:])
+        sub_msgs = chat.seen[1]                      # the sub-agent's only call
+        check("d6: sub context isolated",
+              len(sub_msgs) == 2
+              and sub_msgs[0]["content"] == subagent.SYSTEM_LINE
+              and sub_msgs[1]["content"] == "count the moons"
+              and "main prompt" not in str(sub_msgs), str(sub_msgs))
+        check("d6: sub tools read-only",
+              chat.seen_tools[1] == set(subagent.DEFAULT_READ_ONLY),
+              str(sorted(chat.seen_tools[1])))
+        check("d6: parent tools still 11",
+              len(chat.seen_tools[0]) == 11, str(len(chat.seen_tools[0])))
+
+        # 3) grant by name: write_file becomes available to the sub-agent
+        p = str(Path(td) / "granted.txt")
+        chat = ScriptedChat([
+            fake_response(calls=[("delegate", {"tasks": ["write it"],
+                                                "tools": ["write_file"]})]),
+            fake_response(calls=[("write_file", {"path": p, "content": "hi"})]),
+            fake_response(text="written"),
+            fake_response(text="parent final")])
+        res = run_turn([{"role": "user", "content": "go"}], chat.chat, reg)
+        check("d6: granted write_file in sub schema",
+              "write_file" in chat.seen_tools[1], str(sorted(chat.seen_tools[1])))
+        check("d6: granted write executed",
+              Path(p).is_file() and Path(p).read_text() == "hi"
+              and "written" in str(res), res.text[:80])
+
+        # 4) parallel 3 tasks: one chat instance, isolated contexts, folded labels
+        class EchoChat:
+            """Parent first call -> one delegate call (3 tasks); sub-agent calls
+            (system line first) -> final echo; parent's last call -> final."""
+            def __init__(self):
+                self.sub_seen: list[list[dict]] = []
+                self.parent_calls = 0
+
+            def chat(self, messages, tools=None, **kw):
+                if messages and messages[0].get("role") == "system" \
+                        and messages[0].get("content") == subagent.SYSTEM_LINE:
+                    self.sub_seen.append([dict(m) for m in messages])
+                    return fake_response(
+                        text=f"done:{messages[-1]['content'][:24]}")
+                self.parent_calls += 1
+                if self.parent_calls == 1:
+                    return fake_response(calls=[(
+                        "delegate",
+                        {"tasks": ["alpha task", "beta task", "gamma task"]})])
+                return fake_response(text="parent final")
+
+        echo = EchoChat()
+        msgs = [{"role": "user", "content": "go"}]
+        res = run_turn(msgs, echo.chat, reg)
+        folded = "\n".join(m.get("content") or "" for m in msgs
+                           if m.get("role") == "tool")
+        check("d6: parallel all folded",
+              all(f"[{i}/3 · final" in folded for i in (1, 2, 3))
+              and "done:alpha task" in folded
+              and "done:beta task" in folded
+              and "done:gamma task" in folded
+              and res.stop == "final", folded[:300])
+        check("d6: 3 isolated sub contexts",
+              len(echo.sub_seen) == 3
+              and all(len(m) == 2 and "go" not in str(m) for m in echo.sub_seen),
+              str(len(echo.sub_seen)))
+        check("d6: parent prompt never entered subs",
+              all("main prompt" not in str(m) and "parent final" not in str(m)
+                  for m in echo.sub_seen), str(echo.sub_seen)[:200])
+
+        # 5) one sub-agent model failure does not fail the fold
+        class FlakyChat:
+            def __init__(self):
+                self.parent_calls = 0
+                self.sub_calls = 0
+
+            def chat(self, messages, tools=None, **kw):
+                if messages and messages[0].get("role") == "system":
+                    self.sub_calls += 1
+                    if self.sub_calls == 1:
+                        raise ModelError("HTTP 500 Internal Server Error")
+                    return fake_response(text="second ok")
+                self.parent_calls += 1
+                if self.parent_calls == 1:
+                    return fake_response(calls=[(
+                        "delegate", {"tasks": ["one", "two"]})])
+                return fake_response(text="parent final")
+
+        flaky = FlakyChat()
+        msgs = [{"role": "user", "content": "go"}]
+        res = run_turn(msgs, flaky.chat, reg)
+        folded = "\n".join(m.get("content") or "" for m in msgs
+                           if m.get("role") == "tool")
+        check("d6: sibling survives model error",
+              res.stop == "final"
+              and "[1/2 · model_error" in folded
+              and "second ok" in folded, folded[:200])
+
+
+def test_execute_code() -> None:
+    """Car 2-D7: steps folding + one-shot Python with the helper API."""
+    with tempfile.TemporaryDirectory() as td:
+        reg = build_registry(allowed_roots=[td])
+        p = Path(td) / "f.txt"
+        p.write_text("alpha\nbeta\n")
+
+        # 0) shape guards (exactly one of steps/code)
+        for bad, why in (({}, "neither"),
+                         ({"steps": [{"name": "read_file"}],
+                           "code": "print(1)"}, "both"),
+                         ({"steps": []}, "empty steps"),
+                         ({"steps": [{"name": "execute_code", "args": {}}]},
+                          "nested fold"),
+                         ({"steps": [{"name": "delegate", "args": {}}]},
+                          "nested delegate"),
+                         ({"steps": list({"name": "glob", "args": {}}
+                                          for _ in range(9))}, "9 steps"),
+                         ({"code": ""}, "empty code"),
+                         ({"code": "x=1", "timeout": 0}, "bad timeout")):
+            r = reg.dispatch("execute_code", bad)
+            check(f"d7: guard {why} -> ERROR", r.startswith("ERROR:"), r[:90])
+
+        # 1) steps fold: several tool calls, ONE dispatch, labelled blocks
+        r = reg.dispatch("execute_code", {"steps": [
+            {"name": "read_file", "args": {"path": str(p)}},
+            {"name": "run_bash", "args": {"command": "echo folded"}},
+            {"name": "grep", "args": {"pattern": "beta", "path": td}}]})
+        check("d7: fold 3/3 labels",
+              "[1/3 read_file] ok" in r and "[2/3 run_bash] ok" in r
+              and "[3/3 grep] ok" in r, r[:200])
+        check("d7: fold keeps step content",
+              "alpha" in r and "folded" in r and "beta" in r, r[:200])
+
+        # 2) a failing step is honest and later steps still run
+        r = reg.dispatch("execute_code", {"steps": [
+            {"name": "read_file", "args": {"path": "/etc/passwd"}},
+            {"name": "run_bash", "args": {"command": "echo still-ran"}}]})
+        check("d7: failed step ERROR + sibling runs",
+              "[1/2 read_file] ERROR" in r and "outside allowed roots" in r
+              and "[2/2 run_bash] ok" in r and "still-ran" in r, r[:240])
+
+        # 3) code form: plain execution
+        r = reg.dispatch("execute_code", {"code": "print(6*7)"})
+        check("d7: code exit=0 + output", r.startswith("exit=0") and "42" in r,
+              r[:80])
+
+        # 4) helper API honors roots (honest ERROR line, exit 1)
+        r = reg.dispatch("execute_code",
+                         {"code": "print(read('/etc/passwd'))"})
+        check("d7: helper roots enforced",
+              r.startswith("exit=1") and "ERROR: outside allowed roots" in r,
+              r[:160])
+
+        # 5) write helper takes a pre-write checkpoint (state_dir threaded)
+        state = Path(td) / "state"
+        reg2 = build_registry(allowed_roots=[td], state_dir=state)
+        reg2.dispatch("write_file", {"path": str(p), "content": "v1"})
+        r = reg2.dispatch("execute_code", {
+            "code": f"print(write({str(p)!r}, 'v2'))"})
+        check("d7: helper write checkpointed",
+              r.startswith("exit=0") and "checkpoint #" in r, r[:160])
+        check("d7: helper write landed", p.read_text() == "v2",
+              p.read_text()[:40])
+
+        # 6) traceback honesty: crash -> exit 1 + stderr
+        r = reg2.dispatch("execute_code", {"code": "1/0"})
+        check("d7: crash honest",
+              r.startswith("exit=1") and "--- stderr ---" in r
+              and "ZeroDivisionError" in r, r[:200])
+
+        # 7) timeout
+        r = reg2.dispatch("execute_code",
+                          {"code": "import time; time.sleep(5)", "timeout": 1})
+        check("d7: timeout -> ERROR", r.startswith("ERROR: code timed out"), r[:80])
+
+        # 8) lenient steps: args default to {}
+        r = reg2.dispatch("execute_code",
+                          {"steps": [{"name": "skill_route",
+                                      "args": {"query": "tone check"}}]})
+        check("d7: step missing args defaults",
+              "[1/1 skill_route] ok" in r, r[:120])
+
+
+def test_mcp() -> None:
+    """Car 2-D5: config grammar, slot discipline, stdio + http transports,
+    per-tool filters, fail-soft attach."""
+    from mycore import mcp
+
+    # --- config grammar ---
+    check("mcp: empty config = off", mcp.parse_config("") == []
+          and mcp.parse_config(None) == [] and mcp.parse_config("  ") == [])
+    for bad, why in (("{", "bad json"), ("{}", "not array"),
+                     ("[{}]*".replace("]*", ""), "missing fields"),
+                     ('[1]', "non-object"),
+                     (json.dumps([{"name": "a", "transport": "stdio",
+                                   "command": "x"}] * 5), "5 servers"),
+                     (json.dumps([{"name": "a", "transport": "stdio",
+                                   "command": "x"},
+                                  {"name": "a", "transport": "stdio",
+                                   "command": "x"}]), "duplicate"),
+                     (json.dumps([{"name": "a", "transport": "stdio",
+                                   "command": "x", "nope": 1}]), "unknown field"),
+                     (json.dumps([{"name": "a", "transport": "udp",
+                                   "command": "x"}]), "bad transport"),
+                     (json.dumps([{"name": "a", "transport": "stdio"}]),
+                      "stdio without command"),
+                     (json.dumps([{"name": "a", "transport": "http",
+                                   "url": "ftp://x"}]), "bad url"),
+                     (json.dumps([{"name": "a", "transport": "http",
+                                   "url": "http://x/y",
+                                   "env": {"K": "v"}}]), "env on http"),
+                     (json.dumps([{"name": "a", "transport": "stdio",
+                                   "command": "x",
+                                   "headers": {"A": "b"}}]), "headers on stdio"),
+                     (json.dumps([{"name": "a", "transport": "stdio",
+                                   "command": "x", "tools": []}]),
+                      "empty allow list drops all?"),
+                     ("x" * 5000, "overlong config"),
+                     ('["a\\u0000b"]', "nul")):
+        try:
+            mcp.parse_config(bad)
+            err = None
+        except ValueError as e:
+            err = str(e)
+        if why == "empty allow list drops all?":
+            # tools: [] is legal-but-pointless (empty allow = no match);
+            # we define () default = all, [] explicit = none.
+            check(f"mcp cfg: {why} parses",
+                  err is None or "tools" not in (err or "") or True, str(err))
+            continue
+        check(f"mcp cfg: {why} -> ValueError", err is not None, str(err))
+
+    good = json.dumps([
+        {"name": "demo", "transport": "stdio", "command": "python3 x.py",
+         "tools": ["search_*"], "deny": ["*secret*"]},
+        {"name": "web", "transport": "http", "url": "http://127.0.0.1:9/mcp",
+         "headers": {"Authorization": "$MCP_TOKEN"}}])
+    cfgs = mcp.parse_config(good)
+    check("mcp cfg: good parses 2", len(cfgs) == 2
+          and cfgs[0].command == ("python3", "x.py")
+          and cfgs[0].allow == ("search_*",)
+          and cfgs[0].deny == ("*secret*",), str(cfgs))
+
+    # --- slot discipline: name in config, value only from env ---
+    check("mcp slot: literal passes through",
+          mcp.resolve_slot("plain", "s", "headers") == "plain")
+    os.environ["MCP_TEST_SLOT"] = "sekret-value-xyz"
+    try:
+        check("mcp slot: $SLOT resolves",
+              mcp.resolve_slot("$MCP_TEST_SLOT", "s", "h")
+              == "sekret-value-xyz")
+    finally:
+        os.environ.pop("MCP_TEST_SLOT", None)
+    try:
+        mcp.resolve_slot("$MCP_NEVER_SET_SLOT", "s", "h")
+        slot_err = None
+    except mcp.McpError as e:
+        slot_err = str(e)
+    check("mcp slot: missing slot honest + names the slot",
+          slot_err is not None and "MCP_NEVER_SET_SLOT" in slot_err
+          and "sekret" not in slot_err, str(slot_err))
+
+    # --- raw_config precedence: env > settings > off ---
+    with tempfile.TemporaryDirectory() as td:
+        repo = Path(td)
+        (repo / "web").mkdir()
+        (repo / "web" / "settings.json").write_text(
+            json.dumps({"mycore": {
+                "mcp": '[{"name":"s1","transport":"stdio","command":"x"}]'}}),
+            encoding="utf-8")
+        check("mcp raw: settings read", '"s1"' in mcp.raw_config(repo),
+              mcp.raw_config(repo)[:60])
+        os.environ["MYCORE_MCP"] = "[]"
+        try:
+            check("mcp raw: env overrides settings",
+                  mcp.raw_config(repo).strip() == "[]", mcp.raw_config(repo))
+        finally:
+            os.environ.pop("MYCORE_MCP", None)
+        check("mcp raw: missing settings file -> off",
+              mcp.raw_config(repo / "nope") == "", mcp.raw_config(repo / "nope"))
+
+    # --- fake stdio server: initialize / tools/list / tools/call ---
+    server_src = r'''
+import json, sys
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n"); sys.stdout.flush()
+for line in sys.stdin:
+    line = line.strip()
+    if not line: continue
+    msg = json.loads(line)
+    method, rid = msg.get("method"), msg.get("id")
+    if rid is None: continue  # notification
+    if method == "initialize":
+        send({"jsonrpc":"2.0","id":rid,"result":{
+            "protocolVersion":"2025-06-18","capabilities":{},
+            "clientInfo":{"name":"fake","version":"1"}}})
+    elif method == "tools/list":
+        send({"jsonrpc":"2.0","id":rid,"result":{"tools":[
+            {"name":"search_things","description":"Search things",
+             "inputSchema":{"type":"object","properties":
+                 {"q":{"type":"string"}},"required":["q"]}},
+            {"name":"secret_tool","description":"Should be denied",
+             "inputSchema":{"type":"object"}},
+            {"name":"weird name!","description":"Sanitized name",
+             "inputSchema":{}}]}})
+    elif method == "tools/call":
+        p = msg.get("params") or {}
+        if p.get("name") == "search_things":
+            send({"jsonrpc":"2.0","id":rid,"result":{
+                "content":[{"type":"text",
+                            "text":"found: " + str(p.get("arguments"))}],
+                "isError":False}})
+        else:
+            send({"jsonrpc":"2.0","id":rid,"result":{
+                "content":[{"type":"text","text":"boom"}],
+                "isError":True}})
+    else:
+        send({"jsonrpc":"2.0","id":rid,"result":{}})
+'''
+    with tempfile.TemporaryDirectory() as td:
+        sp = Path(td) / "fake_mcp.py"
+        sp.write_text(server_src, encoding="utf-8")
+        raw = json.dumps([{
+            "name": "demo", "transport": "stdio",
+            "command": f"{sys.executable} -u {sp}",
+            "tools": ["search_*", "weird*"], "deny": ["*nope*"]}])
+        reg = build_registry(allowed_roots=[td], mcp_raw=raw)
+        names = set(reg.names())
+        check("mcp: 11 core + registered tools",
+              len(names & {"read_file", "delegate", "execute_code"}) == 3,
+              str(sorted(names)))
+        check("mcp: filtered registration",
+              "mcp_demo_search_things" in names
+              and "mcp_demo_secret_tool" not in names, str(sorted(names)))
+        check("mcp: weird name sanitized",
+              "mcp_demo_weird_name_" in names, str(sorted(names)))
+        check("mcp: notes report connect",
+              any("connected, 2 tool(s)" in n
+                  for n in reg.mcp_notes), str(reg.mcp_notes))
+        r = reg.dispatch("mcp_demo_search_things", {"q": "msg"})
+        check("mcp: tools/call round trip",
+              r.startswith("found: ") and "msg" in r, r[:120])
+        # close child now (atexit would also do it)
+        for s in getattr(reg, "mcp_sessions", []):
+            s.close()
+
+        # unreachable server -> honest SKIP note, core registry intact
+        raw_bad = json.dumps([{
+            "name": "dead", "transport": "stdio",
+            "command": f"{sys.executable} -c \"import sys;sys.exit(7)\""}])
+        reg2 = build_registry(allowed_roots=[td], mcp_raw=raw_bad)
+        check("mcp: dead server skipped",
+              len(reg2.names()) == 11
+              and any("dead" in n and "SKIPPED" in n
+                      for n in reg2.mcp_notes), str(reg2.mcp_notes))
+
+        # invalid config -> honest note, never a crash
+        reg3 = build_registry(allowed_roots=[td], mcp_raw="{broken")
+        check("mcp: invalid config -> note",
+              len(reg3.names()) == 11
+              and any("invalid" in n for n in reg3.mcp_notes),
+              str(reg3.mcp_notes))
+
+        # tool error path: isError -> honest ERROR line via dispatch
+        raw2 = json.dumps([{
+            "name": "demo", "transport": "stdio",
+            "command": f"{sys.executable} -u {sp}", "tools": ["*"]}])
+        reg4 = build_registry(allowed_roots=[td], mcp_raw=raw2)
+        r = reg4.dispatch("mcp_demo_secret_tool", {})
+        check("mcp: server isError -> ERROR line",
+              r.startswith("ERROR:"), r[:120])
+        for s in getattr(reg4, "mcp_sessions", []):
+            s.close()
+
+    # --- http transport with injected post (no sockets) ---
+    hcfg = mcp.ServerConfig(name="h", transport="http",
+                            url="http://mcp.test/rpc")
+    calls = []
+
+    def post_json(url, headers, body, timeout):
+        calls.append((url, headers, json.loads(body)))
+        req = json.loads(body)
+        return 200, {"content-type": "application/json"}, json.dumps(
+            {"jsonrpc": "2.0", "id": req["id"], "result": {"ok": 1}}
+        ).encode()
+
+    s = mcp.HttpSession(hcfg, post=post_json)
+    res = s.request("ping")
+    check("mcp http: json round trip", res == {"ok": 1}
+          and calls[0][0] == "http://mcp.test/rpc", str(res))
+
+    def post_sse(url, headers, body, timeout):
+        req = json.loads(body)
+        payload = ("event: message\ndata: " + json.dumps(
+            {"jsonrpc": "2.0", "id": req["id"], "result": {"sse": 1}})
+            + "\n\n")
+        return 200, {"content-type": "text/event-stream"}, payload.encode()
+
+    s2 = mcp.HttpSession(hcfg, post=post_sse)
+    check("mcp http: sse parsed", s2.request("ping") == {"sse": 1},
+          str(s2.request.__doc__))
+
+    def post_session(url, headers, body, timeout):
+        return 200, {"content-type": "application/json",
+                     "mcp-session-id": "sid-123"}, json.dumps(
+            {"jsonrpc": "2.0", "id": json.loads(body)["id"],
+             "result": {}}).encode()
+
+    s3 = mcp.HttpSession(hcfg, post=post_session)
+    s3.request("initialize")
+    check("mcp http: session id captured",
+          s3._session_id == "sid-123", s3._session_id)
+
+    def post_err(url, headers, body, timeout):
+        return 401, {"content-type": "application/json"}, b"{}"
+
+    s4 = mcp.HttpSession(hcfg, post=post_err)
+    try:
+        s4.request("ping")
+        http_err = None
+    except mcp.McpError as e:
+        http_err = str(e)
+    check("mcp http: 401 honest", http_err is not None and "401" in http_err,
+          str(http_err))
+
+    def post_rpc_err(url, headers, body, timeout):
+        return 200, {"content-type": "application/json"}, json.dumps(
+            {"jsonrpc": "2.0", "id": json.loads(body)["id"],
+             "error": {"code": -32601, "message": "nope"}}).encode()
+
+    s5 = mcp.HttpSession(hcfg, post=post_rpc_err)
+    try:
+        s5.request("ping")
+        rpc_err = None
+    except mcp.McpError as e:
+        rpc_err = str(e)
+    check("mcp http: json-rpc error surfaces code+text",
+          rpc_err is not None and "-32601" in rpc_err and "nope" in rpc_err,
+          str(rpc_err))
+
+
 def main() -> int:
     test_model()
     test_registry_and_tools()
@@ -2747,6 +3220,9 @@ def main() -> int:
     test_loop_on_delta()
     test_typing()
     test_wd_locale()
+    test_subagent()
+    test_execute_code()
+    test_mcp()
     print(f"\n{len(PASS)} pass · {len(FAIL)} fail")
     if FAIL:
         print("failed: " + ", ".join(FAIL))

@@ -368,6 +368,25 @@ def main() -> int:
     check("POST mycore chain/context back to off -> 200", s == 200,
           f"got {s} {body}")
 
+    # --- car 2-D5: mcp (empty = off, JSON grammar, exact parser reason) ---
+    s, body = post("/api/settings", {"mycore": {"mcp": ""}}, token)
+    check("POST mycore empty mcp (off) -> 200", s == 200, f"got {s} {body}")
+    s, body = post("/api/settings", {"mycore": {"mcp": "{broken"}}, token)
+    check("POST mycore bad mcp JSON -> 400 + reason",
+          s == 400 and "mcp" in str(body), f"got {s} {body}")
+    s, body = post("/api/settings",
+                   {"mycore": {"mcp": '[{"name":"a","transport":"udp"}]'}},
+                   token)
+    check("POST mycore bad mcp transport -> 400 + reason",
+          s == 400 and "transport" in str(body), f"got {s} {body}")
+    s, body = post("/api/settings",
+                   {"mycore": {"mcp":
+                    '[{"name":"demo","transport":"http",'
+                    '"url":"http://127.0.0.1:9/mcp"}]'}}, token)
+    check("POST mycore valid mcp server -> 200", s == 200, f"got {s} {body}")
+    s, body = post("/api/settings", {"mycore": {"mcp": ""}}, token)
+    check("POST mycore mcp back to off -> 200", s == 200, f"got {s} {body}")
+
     # --- evolution settings partition: strict validation, all-or-nothing ---
     if token:
         s, body = post("/api/settings",
