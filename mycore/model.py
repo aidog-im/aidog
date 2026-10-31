@@ -58,6 +58,11 @@ class ModelConfig:
     # default topology, zero behavior change).
     upstreams: tuple[Upstream, ...] = ()
     upstreams_note: str = ""          # parse problem, surfaced via describe()
+    # X15 (Wave 6 delta2): opt-in per-model request params merged into the
+    # chat/completions payload ONLY when non-empty (settings
+    # mycore.reasoning_effort resolves it). Empty dict = the payload stays
+    # byte-identical to the pre-X15 wire — defaults never change silently.
+    extra_body: dict = field(default_factory=dict)
 
     def chain(self) -> tuple[tuple[str, str, str], ...]:
         """Ordered attempts: primary first, then each upstream. Every entry is
@@ -453,6 +458,12 @@ class ChatClient:
             "temperature": opts.get("temperature", cfg.temperature),
             "max_tokens": opts.get("max_tokens", cfg.max_tokens),
         }
+        # X15: opt-in request params (reasoning effort etc.). setdefault
+        # semantics: an explicit opt/CLI value always wins, and with an empty
+        # extra_body this loop never runs — the wire is unchanged.
+        if isinstance(cfg.extra_body, dict):
+            for key, val in cfg.extra_body.items():
+                payload.setdefault(key, val)
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = opts.get("tool_choice", "auto")

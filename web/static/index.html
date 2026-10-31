@@ -181,6 +181,20 @@
           <!-- Wave 3 (X3): raw status.mycore{service,watchdog} readout;
                app.js hides it entirely when the fields are absent. -->
           <div class="stat-grid" id="mycoreFacts" hidden></div>
+          <!-- Wave 5 (X10): checkpoint catalog beside the mycore readout —
+               METADATA ONLY (id, time, size, repo-relative path, hash): a
+               snapshot may cover a credential file, so no snapshot byte can
+               ever render here. app.js hides the whole block when the read
+               fails (an honest absence beats a guess) and shows the empty
+               list as its own note. -->
+          <div id="ckptBlock" hidden>
+            <div class="ctl-row token-row"
+                 style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--line);margin-bottom:6px;">
+              <label>CHECKPOINTS</label>
+              <span class="save-state" id="ckptMsg" role="status"></span>
+            </div>
+            <div id="ckptList"></div>
+          </div>
         </div>
 
         <div class="card span-2">
@@ -353,10 +367,31 @@
                  data-i18n-ph="chat.ph" placeholder="ask the assistant…">
           <button class="btn primary" id="chatSend" data-i18n="chat.send">SEND</button>
           <button class="btn" id="chatClear" data-i18n="chat.clear">CLEAR</button>
+          <label class="btn" title="attach an image for your next message — the model endpoint must support vision; a non-multimodal endpoint answers with an honest refusal, never a fake">IMG
+            <input type="file" id="chatImg" accept="image/png,image/jpeg,image/webp" hidden>
+          </label>
+          <span class="stat-note" id="chatImgNote" hidden></span>
           <span class="chat-msg" id="chatMsg" role="status"></span>
         </div>
         <div class="chat-meta" id="chatMeta"></div>
         <div class="chat-meta" id="ctxMeta" hidden></div>
+      </section>
+
+      <!-- Wave 6 delta2 (X13 + X12): session browser — READ-ONLY three states
+           (list / searching / empty), substring search honestly labeled (no
+           FTS claim), per-row JSON/MD export downloads, and the opt-in
+           auto-prune state + one-shot disk advisory (X12) on one line. -->
+      <section class="card">
+        <h2><span>SESSIONS</span><span class="chat-badge" id="sessBadge">–</span></h2>
+        <div class="ctl-row">
+          <input type="search" id="sessSearch" maxlength="200" autocomplete="off"
+                 placeholder="search session text (substring match — no full-text index)">
+          <button class="btn" id="sessGo" type="button">SEARCH</button>
+          <button class="btn" id="sessAll" type="button">LIST</button>
+          <span class="save-state" id="sessMsg" role="status"></span>
+        </div>
+        <div id="sessList"></div>
+        <div class="stat-note" id="sessPrune" hidden></div>
       </section>
 
       <!-- media face (car 4c): voice session (wake phrase -> command -> spoken
@@ -579,6 +614,14 @@
         <h2><span data-i18n="sec.stream">LIVE STREAM</span><span class="stream-caret" id="streamCaret"></span></h2>
         <div class="stream-body" id="stream"></div>
       </section>
+
+      <!-- Wave 6 delta2 (X17): artifacts gallery — every generated image in
+           the media dir, newest first, each thumb opens the SAME single-image
+           route (/api/media/<name>). Empty state is honest, never seeded. -->
+      <section class="card">
+        <h2><span>ARTIFACTS</span><span class="chat-badge" id="artBadge">–</span></h2>
+        <div class="art-grid" id="artList"></div>
+      </section>
     </section>
 
     <!-- SETTINGS: grouped form (console / usage / model / access) -->
@@ -614,6 +657,29 @@
             <select id="refreshSelect">
               <option>5</option><option>10</option><option>30</option><option>60</option>
             </select>
+          </div>
+          <!-- Wave 5 (X11): profile management — the `aidog profile` CLI's
+               console leg. The catalog (GET /api/profiles) is read-only
+               presence/counts: a slot value never renders, and the active
+               profile reuses the status row's own `profile` field. create/rm
+               are Bearer-gated POSTs that run the SAME CLI rules (reserved
+               default refused first, state-file guard, no --force), so this
+               card can never delete a profile that still holds state. -->
+          <div id="profBlock" style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--line);">
+            <div class="ctl-row token-row" style="margin-bottom:6px;">
+              <label title="Named isolated runtime dirs: aidog profile list / create / rm">Profile directories</label>
+              <span class="save-state" id="profMsg" role="status"></span>
+            </div>
+            <div id="profList"></div>
+            <div class="cron-create" id="profCreate" style="margin-top:8px;">
+              <input type="text" id="profName" maxlength="32" autocomplete="off"
+                     spellcheck="false" aria-label="profile name"
+                     placeholder="new profile name (a-z0-9, then a-z0-9 _ -)">
+              <div class="ctl-actions">
+                <button class="btn primary" id="profCreateBtn" type="button">CREATE</button>
+              </div>
+            </div>
+            <div class="stat-note">a profile is a separate dog — own bot token, own state, own console port · remove needs an empty state dir</div>
           </div>
         </div>
 
@@ -668,6 +734,24 @@
             <label data-i18n="ctl.mycBudget">Compaction budget (chars)</label>
             <input type="number" id="mycBudget" min="4000" max="1000000" step="1"
                    placeholder="24000 = default">
+          </div>
+          <!-- Wave 6 delta2 (X12/X15): OPT-IN switches — an untouched form
+               changes nothing (0 days = off; effort off = the default wire
+               byte-for-byte). Prune age is applied on save, at most hourly
+               afterwards; the disk advisory shows once in Sessions. -->
+          <div class="ctl-row">
+            <label title="Delete console/TG session files older than N days (0 = off). The live console session is never pruned.">Session auto-prune (days, 0 = off)</label>
+            <input type="number" id="mycPrune" min="0" max="3650" step="1"
+                   placeholder="0 = off" spellcheck="false">
+          </div>
+          <div class="ctl-row">
+            <label title="Sends reasoning_effort with each chat request when set (OpenAI-style param). Off = never sent — endpoints that reject unknown params stay safe.">Reasoning effort (extra request param)</label>
+            <select id="mycEffort">
+              <option value="">off — endpoint default</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+            </select>
           </div>
           <div class="ctl-row">
             <label data-i18n="ctl.mycContextDirs">Context dirs (":" separated)</label>

@@ -11450,6 +11450,431 @@ def test_wave3() -> None:
             _mt.SHARED_HEALTH.reset()
 
 
+def test_delta2() -> None:
+    """Wave 6 delta2 backend (parity lane delta): X12 session auto-prune +
+    one-shot disk advisory, X13 sessions list/search/export, X15
+    reasoning_effort passthrough, X16 vision input (validation + honest
+    note), X17 artifacts catalog. Throwaway dirs + module surgery only —
+    production settings, secrets, sessions and media are never written
+    (every seam is restored in a finally). The positive multimodal leg and
+    the wire-level checks live in tmp/parity_delta2_verify.js."""
+    import io as _io
+    import time as _time
+    import web.server as ws
+    from mycore import cli as _cli
+    from mycore import session as _sess
+
+    TMP = Path(tempfile.mkdtemp(prefix="delta2_"))
+    now = 1_700_000_000.0
+
+    # ---------------- X12: prune_old retention boundary --------------------
+    d = TMP / "sessions"
+    (d / "archive").mkdir(parents=True)
+
+    def seed(name: str, age_days: float, parent: Path = d) -> Path:
+        p = parent / name
+        p.write_text('{"role": "user", "content": "x"}\n', encoding="utf-8")
+        ts = now - age_days * 86400
+        os.utime(p, (ts, ts))
+        return p
+
+    old = seed("old.jsonl", 10)
+    edge = seed("edge.jsonl", 5)              # age EXACTLY the threshold
+    guard = seed("guard.jsonl", 10)
+    seed("note.txt", 10)
+    seed("keep.model", 10)
+    res = _sess.prune_old(d, 5, keep=("guard",), now=now)
+    check("delta2 prune: strictly-older session removed",
+          not old.exists() and res["removed"] == 1, str(res))
+    check("delta2 prune: exactly-at-threshold file kept (inclusive boundary)",
+          edge.exists())
+    check("delta2 prune: keep-list stem never touched", guard.exists())
+    check("delta2 prune: non-.jsonl files untouched",
+          (d / "note.txt").exists() and (d / "keep.model").exists())
+    check("delta2 prune: honest counters (removed 1, kept 2, freed > 0, 0 errors)",
+          res["kept"] == 2 and res["freed"] > 0 and res["errors"] == 0,
+          str(res))
+    arch = seed("web.1700000000.jsonl", 10, d / "archive")
+    res2 = _sess.prune_old(d, 5, keep=("guard",), now=now)
+    check("delta2 prune: archive sessions pruned by the same rule",
+          not arch.exists() and res2["removed"] == 1, str(res2))
+    for bad in (0, -3, True, "5"):
+        try:
+            _sess.prune_old(d, bad)  # type: ignore[arg-type]
+            check(f"delta2 prune: invalid threshold {bad!r} refused", False)
+        except ValueError:
+            check(f"delta2 prune: invalid threshold {bad!r} refused", True)
+
+    # ---------------- X12: advisory is pure + one-shot ---------------------
+    low = ws.disk_low_advisory(500 * 1024 ** 2)   # 500 MiB < 1 GiB floor
+    check("delta2 advisory: low disk -> honest sentence",
+          isinstance(low, str) and "disk space low" in low
+          and "auto-prune" in low, str(low))
+    check("delta2 advisory: healthy disk -> no advisory",
+          ws.disk_low_advisory(100 * 1024 ** 3) is None)
+    check("delta2 advisory: unknown free (None) -> no fabricated warning",
+          ws.disk_low_advisory(None) is None)
+
+    # ---------------- X12/X15 settings schema ------------------------------
+    clean, errs = ws.validate_settings_patch(
+        {"mycore": {"session_prune_days": 90, "reasoning_effort": "high"}})
+    check("delta2 schema: prune days + effort accepted together",
+          errs == [] and clean["mycore"]["session_prune_days"] == 90
+          and clean["mycore"]["reasoning_effort"] == "high", str(errs))
+    for bad in (99999, -1, "30", True, 3.5):
+        _, errs = ws.validate_settings_patch(
+            {"mycore": {"session_prune_days": bad}})
+        check(f"delta2 schema: prune days {bad!r} refused",
+              bool(errs) and "session_prune_days" in errs[0], str(errs))
+    for bad in ("turbo", 3, None, True):
+        _, errs = ws.validate_settings_patch(
+            {"mycore": {"reasoning_effort": bad}})
+        check(f"delta2 schema: effort {bad!r} refused",
+              bool(errs) and "reasoning_effort" in errs[0], str(errs))
+    _, errs = ws.validate_settings_patch({"mycore": {"reasoning_effort": ""}})
+    check("delta2 schema: empty effort (off) accepted", errs == [], str(errs))
+
+    saved = {"settings": ws.SETTINGS_FILE, "secrets": ws.SECRETS,
+             "dirs": ws.chat_sessions_dir}
+    try:
+        ws.SETTINGS_FILE = TMP / "settings.json"
+        ws.SETTINGS_FILE.write_text("{}", encoding="utf-8")
+        ws.SECRETS = TMP / "secrets.env"
+        token = "delta2-token-0123456789abcdef"
+        ws.SECRETS.write_text(f"WEB_TOKEN={token}\n", encoding="utf-8")
+        ws._PRUNE_STATE.update(
+            ran_at=0.0,
+            result={"removed": 0, "kept": 0, "freed": 0, "errors": 0},
+            advisory_sent=False)
+
+        def call(handler: str, path: str, bearer: str | None = None,
+                 doc: dict | None = None):
+            """Run one Handler method in-process (wave3 module-surgery
+            pattern): response lands in a box, never on a socket."""
+            h = ws.Handler.__new__(ws.Handler)
+            raw = json.dumps(doc).encode() if doc is not None else b""
+            h.headers = {"Content-Length": str(len(raw))}
+            if bearer is not None:
+                h.headers["Authorization"] = f"Bearer {bearer}"
+            h.rfile = _io.BytesIO(raw)
+            h.path = path
+            box: dict = {}
+            h._json = lambda obj, code=200: box.setdefault("res", (code, obj))
+            h._send = lambda code, body, ctype: box.setdefault(
+                "res", (code, (body, ctype)))
+            getattr(h, handler)()
+            return box.get("res")
+
+        # ---------------- X12 prune view: opt-in + one-shot advisory -------
+        view = ws.session_prune_view()
+        check("delta2 prune view: default OFF (opt-in) with honest zeros + advisory key",
+              view["enabled"] is False and view["days"] == 0
+              and view["removed"] == 0 and view["ran_at"] is None
+              and "advisory" in view, str(view))
+        ws._PRUNE_STATE["advisory_sent"] = False
+
+        class _LowDisk:
+            free = 400 * 1024 ** 2   # 400 MiB — under the 1 GiB floor
+
+        real_du = ws.shutil.disk_usage
+        ws.shutil.disk_usage = lambda p: _LowDisk()  # type: ignore[assignment]
+        try:
+            first = ws.session_prune_view()
+            second = ws.session_prune_view()
+        finally:
+            ws.shutil.disk_usage = real_du
+        check("delta2 advisory: low disk reported ONCE, then silent",
+              isinstance(first.get("advisory"), str)
+              and "disk space low" in first["advisory"]
+              and second.get("advisory") is None,
+              f"first={first.get('advisory')!r} second={second.get('advisory')!r}")
+
+        sdir_state = Path(_SUITE_STATE) / "sessions"
+        sdir_state.mkdir(parents=True, exist_ok=True)
+
+        def seed_state(name: str, age_days: float) -> Path:
+            p = sdir_state / name
+            p.write_text('{"role": "user", "content": "x"}\n',
+                         encoding="utf-8")
+            ts = _time.time() - age_days * 86400
+            os.utime(p, (ts, ts))
+            return p
+
+        victim = seed_state("delta2old.jsonl", 90)
+        fresh = seed_state("delta2fresh.jsonl", 1)
+        live = seed_state("web.jsonl", 90)      # old BUT protected
+        ws.SETTINGS_FILE.write_text(json.dumps(
+            {"mycore": {"session_prune_days": 45}}), encoding="utf-8")
+        ws._PRUNE_STATE.update(ran_at=0.0, advisory_sent=False)
+        view = ws.session_prune_view()
+        check("delta2 prune view: enabled -> old removed, fresh + web kept",
+              not victim.exists() and fresh.exists() and live.exists()
+              and view["enabled"] is True and view["days"] == 45
+              and view["removed"] >= 1 and view["ran_at"] is not None,
+              str(view))
+
+        # settings write applies the switch immediately (force prune leg)
+        victim2 = seed_state("delta2old2.jsonl", 90)
+        r = call("_handle_settings_write", "/api/settings", bearer=token,
+                 doc={"mycore": {"session_prune_days": 30}})
+        check("delta2 settings write: prune switch accepted (200 ok)",
+              r is not None and r[0] == 200 and r[1].get("ok") is True,
+              str(r)[:160])
+        check("delta2 settings write: applying the switch prunes NOW",
+              not victim2.exists(), "victim survived the settings write")
+        r = call("_handle_settings_write", "/api/settings", bearer=token,
+                 doc={"mycore": {"session_prune_days": 99999}})
+        check("delta2 settings write: out-of-range days -> 400 with the range",
+              r is not None and r[0] == 400
+              and "0..3650" in str(r[1].get("details")), str(r)[:200])
+
+        # ---------------- X13 list / substring search / export -------------
+        sdir = TMP / "s13"
+        (sdir / "archive").mkdir(parents=True)
+
+        def mk(name: str, lines: list, parent: Path = sdir) -> Path:
+            p = parent / name
+            p.write_text("\n".join(json.dumps(x) for x in lines) + "\n",
+                         encoding="utf-8")
+            return p
+
+        a = mk("alpha.jsonl", [
+            {"meta": {"created": 1.0, "model": "m1", "format": 1}},
+            {"role": "user", "content": "please remember the PURPLE elephant"},
+            {"role": "assistant", "content": "noted"}])
+        b = mk("beta.jsonl", [
+            {"meta": {"created": 2.0}},
+            {"role": "user", "content": "hello\x00 world " + "x" * 400}])
+        c = mk("web.1700000123.jsonl",
+               [{"role": "user", "content": "archived purple thought"}],
+               sdir / "archive")
+        os.utime(a, (1000, 1000))
+        os.utime(b, (3000, 3000))
+        os.utime(c, (2000, 2000))
+
+        lst = _sess.list_sessions(sdir)
+        ids = [r_["id"] for r_ in lst["sessions"]]
+        check("delta2 sessions list: newest-first incl. archive + honest count",
+              ids == ["beta", "archive/web.1700000123", "alpha"]
+              and lst["count"] == 3 and lst["truncated"] is False
+              and "search" not in lst, str(ids))
+        brow = lst["sessions"][0]
+        check("delta2 sessions list: row fields + control-char stripped + capped summary",
+              set(brow) >= {"id", "when", "size", "summary"}
+              and "\x00" not in brow["summary"]
+              and brow["summary"].endswith("…")
+              and len(brow["summary"]) <= 121, brow["summary"][:40])
+        sr = _sess.list_sessions(sdir, q="purple")
+        check("delta2 search: case-insensitive substring hits + honest method label",
+              sr["count"] == 2
+              and {r_["id"] for r_ in sr["sessions"]}
+              == {"alpha", "archive/web.1700000123"}
+              and sr["search"]["method"] == "substring"
+              and sr["search"]["case_insensitive"] is True
+              and all(r_["hits"] >= 1 for r_ in sr["sessions"]), str(sr))
+        miss = _sess.list_sessions(sdir, q="zzz-no-such-text")
+        check("delta2 search: no match -> honest empty result",
+              miss["count"] == 0 and miss["sessions"] == [])
+        lim = _sess.list_sessions(sdir, limit=1)
+        check("delta2 search: limit -> truncated flag keeps full count",
+              len(lim["sessions"]) == 1 and lim["count"] == 3
+              and lim["truncated"] is True, str(lim))
+
+        text, mime = _sess.export_session(sdir, "alpha", "json")
+        doc = json.loads(text)
+        check("delta2 export json: round-trip + content type",
+              mime.startswith("application/json") and doc["id"] == "alpha"
+              and doc["count"] == 2 and doc["corrupt"] == 0
+              and doc["messages"][0]["role"] == "user", mime)
+        md, mmime = _sess.export_session(sdir, "archive/web.1700000123", "md")
+        check("delta2 export md: transcript blocks + archive id resolves",
+              mmime.startswith("text/markdown") and md.startswith("# session ")
+              and "**user:**" in md and "archived purple thought" in md,
+              mmime)
+        for bad_id, bad_fmt, exc in (("nosuch", "json", FileNotFoundError),
+                                     ("../x", "json", ValueError),
+                                     ("a/b/c", "json", ValueError),
+                                     ("alpha", "csv", ValueError),
+                                     ("alpha/../../secrets", "json", ValueError)):
+            try:
+                _sess.export_session(sdir, bad_id, bad_fmt)
+                check(f"delta2 export refuses id={bad_id!r} fmt={bad_fmt!r}",
+                      False)
+            except exc:
+                check(f"delta2 export refuses id={bad_id!r} fmt={bad_fmt!r}",
+                      True)
+            except Exception as e:  # noqa: BLE001
+                check(f"delta2 export refuses id={bad_id!r} fmt={bad_fmt!r}",
+                      False, type(e).__name__)
+
+        # ---------------- X13 endpoint face --------------------------------
+        ws.chat_sessions_dir = lambda: sdir  # type: ignore[assignment]
+        r = call("_handle_sessions_get", "/api/sessions")
+        check("delta2 GET /api/sessions: 200 shape (rows, prune, advisory)",
+              r is not None and r[0] == 200 and r[1]["count"] == 3
+              and isinstance(r[1].get("prune"), dict)
+              and "advisory" in r[1]["prune"] and "search" not in r[1],
+              str(r)[:200])
+        r = call("_handle_sessions_get", "/api/sessions?q=PURPLE")
+        check("delta2 GET /api/sessions?q= -> substring search labeled",
+              r[0] == 200 and r[1]["count"] == 2
+              and r[1]["search"]["method"] == "substring", str(r)[:160])
+        r = call("_handle_sessions_get", "/api/sessions?q=" + "x" * 300)
+        check("delta2 GET /api/sessions: oversized q -> 400", r[0] == 400)
+        r = call("_handle_sessions_get", "/api/sessions?limit=0")
+        check("delta2 GET /api/sessions: limit=0 -> 400", r[0] == 400)
+        r = call("_handle_sessions_get", "/api/sessions?id=nosuch&format=json")
+        check("delta2 GET export: unknown id -> 404 naming it",
+              r[0] == 404 and "nosuch" in str(r[1].get("details")), str(r))
+        r = call("_handle_sessions_get", "/api/sessions?id=alpha&format=csv")
+        check("delta2 GET export: bad format -> 400",
+              r[0] == 400 and "format" in str(r[1].get("details")), str(r))
+        r = call("_handle_sessions_get", "/api/sessions?id=alpha&format=md")
+        check("delta2 GET export: md 200 + markdown content type + body",
+              r is not None and r[0] == 200
+              and r[1][1].startswith("text/markdown")
+              and b"**user:**" in r[1][0], str(r)[:120])
+
+        # ---------------- X17 artifacts endpoint ---------------------------
+        mdir = TMP / "media"
+        mdir.mkdir()
+        (mdir / "pic1.png").write_bytes(b"\x89PNGmock")
+        (mdir / "pic2.webp").write_bytes(b"RIFFmock")
+        (mdir / "pic3.txt").write_text("not an image", encoding="utf-8")
+        (mdir / "bad name.png").write_bytes(b"x")   # name whitelist excludes
+        real_media = ws.MEDIA_DIR
+        ws.MEDIA_DIR = mdir
+        try:
+            r = call("_handle_artifacts_get", "/api/artifacts")
+            rows = (r[1] or {}).get("images") or []
+            check("delta2 GET /api/artifacts: catalog with fixed-row metadata",
+                  r[0] == 200 and r[1]["count"] == 2 and len(rows) == 2
+                  and all(set(row) == {"name", "url", "size", "when", "ext"}
+                          for row in rows)
+                  and all(row["url"].startswith("/api/media/")
+                          for row in rows), str(r)[:200])
+            r = call("_handle_artifacts_get", "/api/artifacts?limit=1")
+            check("delta2 artifacts: bounded page + truncated flag",
+                  r[1]["count"] == 2 and len(r[1]["images"]) == 1
+                  and r[1]["truncated"] is True, str(r)[:160])
+            r = call("_handle_artifacts_get", "/api/artifacts?limit=0")
+            check("delta2 artifacts: limit=0 -> 400", r[0] == 400)
+            for f in mdir.iterdir():
+                f.unlink()
+            r = call("_handle_artifacts_get", "/api/artifacts")
+            check("delta2 artifacts: empty dir -> honest empty catalog",
+                  r[0] == 200 and r[1]["images"] == []
+                  and r[1]["count"] == 0, str(r)[:160])
+        finally:
+            ws.MEDIA_DIR = real_media
+
+        # ---------------- X16 chat image validation (rejection paths) -------
+        good_img = "data:image/png;base64," + "A" * 80
+        r = call("_handle_chat", "/api/chat", bearer=token,
+                 doc={"text": "hi", "image": "javascript:alert(1)"})
+        check("delta2 chat: malformed image data-URL -> 400 before the stream",
+              r[0] == 400 and "data:image" in str(r[1].get("details")), str(r)[:160])
+        r = call("_handle_chat", "/api/chat", bearer=token,
+                 doc={"text": "hi",
+                      "image": "data:text/html;base64," + "A" * 80})
+        check("delta2 chat: wrong image mime scheme -> 400", r[0] == 400)
+        r = call("_handle_chat", "/api/chat",
+                 doc={"text": "hi", "image": good_img})
+        check("delta2 chat: image route still Bearer-gated (401)",
+              r[0] == 401, str(r))
+        r = call("_handle_chat", "/api/chat", bearer=token,
+                 doc={"text": "hi",
+                      "image": "data:image/png;base64,"
+                               + "A" * (ws.VISION_MAX_CHARS + 10)})
+        check("delta2 chat: oversize image -> 400 at the size gate",
+              r[0] == 400, str(r)[:120])
+
+        # body budget: /api/chat reads up to CHAT_BODY_MAX, other routes 16K
+        big = '{"pad":"' + "x" * 17000 + '"}'
+        h = ws.Handler.__new__(ws.Handler)
+        h.headers = {"Content-Length": str(len(big))}
+        h.rfile = _io.BytesIO(big.encode())
+        box: dict = {}
+        h._json = lambda obj, code=200: box.setdefault("res", code)
+        out = h._read_json_body(ws.CHAT_BODY_MAX)
+        check("delta2 chat body: raised budget admits 17KB (image route)",
+              isinstance(out, dict) and not box, str(box))
+        h.rfile = _io.BytesIO(big.encode())
+        out2 = h._read_json_body()
+        check("delta2 body: default routes stay 16K-capped (413)",
+              out2 is None and box.get("res") == 413, str(box))
+    finally:
+        ws.SETTINGS_FILE = saved["settings"]
+        ws.SECRETS = saved["secrets"]
+        ws.chat_sessions_dir = saved["dirs"]
+
+    # ---------------- X16 helpers: marker text + honest note ---------------
+    txt = ws.content_blocks_text([
+        {"type": "text", "text": "look at"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        {"type": "text", "text": "this"}])
+    check("delta2 content_blocks_text: joined text + [image], no base64/URL",
+          txt == "look at [image] this" and "base64" not in txt, txt)
+    noted = ws.vision_rejection_note(
+        "[mycore: model call failed (ModelError) — HTTP 400 Bad Request; "
+        "turn stopped after 0 iteration(s)]")
+    check("delta2 vision note: HTTP 4xx refusal says vision unsupported",
+          "[vision:" in noted and "unsupported" in noted, noted)
+    transport = ("[mycore: model call failed (ModelError) — transport "
+                 "failure: URLError; turn stopped after 0 iteration(s)]")
+    check("delta2 vision note: non-4xx failure gets no false claim",
+          ws.vision_rejection_note(transport) == transport
+          and ws.vision_rejection_note("all good") == "all good")
+
+    # ---------------- X15: payload passthrough + resolve -------------------
+    seen_body: dict = {}
+
+    def cap_transport(url, headers, payload, timeout):
+        seen_body.clear()
+        seen_body.update(json.loads(payload))
+        return json.dumps({"choices": [{"message": {"role": "assistant",
+                                                     "content": "ok"}}]})
+
+    ChatClient(ModelConfig(), transport=cap_transport).chat(
+        [{"role": "user", "content": "x"}])
+    check("delta2 x15: default config sends NO extra params (wire unchanged)",
+          "reasoning_effort" not in seen_body
+          and set(seen_body) == {"model", "messages", "temperature",
+                                 "max_tokens"}, str(sorted(seen_body)))
+    cfg_eff = ModelConfig(extra_body={"reasoning_effort": "high"})
+    ChatClient(cfg_eff, transport=cap_transport).chat(
+        [{"role": "user", "content": "x"}])
+    check("delta2 x15: configured param rides the payload, defaults intact",
+          seen_body.get("reasoning_effort") == "high"
+          and seen_body.get("temperature") == cfg_eff.temperature
+          and seen_body.get("max_tokens") == cfg_eff.max_tokens,
+          str(sorted(seen_body)))
+
+    real_repo = _cli.REPO
+    try:
+        _cli.REPO = TMP
+        (TMP / "web").mkdir(exist_ok=True)
+        sp = TMP / "web" / "settings.json"
+        sp.write_text(json.dumps({"mycore": {"reasoning_effort": "medium"}}),
+                      encoding="utf-8")
+        cfg = _cli.resolve_model_config()
+        check("delta2 x15: settings reasoning_effort resolves into extra_body",
+              cfg.extra_body == {"reasoning_effort": "medium"},
+              str(cfg.extra_body))
+        sp.write_text(json.dumps({"mycore": {"reasoning_effort": "turbo"}}),
+                      encoding="utf-8")
+        cfg = _cli.resolve_model_config()
+        check("delta2 x15: hand-edited junk ignored (extra_body stays empty)",
+              cfg.extra_body == {}, str(cfg.extra_body))
+        sp.write_text("{}", encoding="utf-8")
+        cfg = _cli.resolve_model_config()
+        check("delta2 x15: absent setting -> default config untouched",
+              cfg.extra_body == {}, str(cfg.extra_body))
+    finally:
+        _cli.REPO = real_repo
+
+
+
 def main() -> int:
     test_model()
     test_registry_and_tools()
@@ -11503,6 +11928,7 @@ def main() -> int:
     test_profiles()
     test_mission()
     test_wave3()
+    test_delta2()
     print(f"\n{len(PASS)} pass · {len(FAIL)} fail")
     if FAIL:
         print("failed: " + ", ".join(FAIL))

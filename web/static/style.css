@@ -1157,3 +1157,12 @@ footer { border-top: 1px solid var(--ink); font-family: var(--mono); }
 .cron-create input:focus { outline: none; border-color: var(--blue);
   box-shadow: var(--glow); }
 #ctxMeta.ctx-over { color: var(--red); }
+
+/* Wave 6 delta2 (X17 gallery + X13 sessions + X16 vision note) */
+.art-row { align-items: center; }
+.art-thumb { width: 56px; height: 56px; object-fit: cover; border-radius: 10px;
+  border: 1px solid var(--line); display: block; background: #fff; }
+.art-row a { line-height: 0; }
+.stat-note.warn { color: var(--amber); }
+#chatImgNote { flex: 1 0 100%; }   /* attachment status gets its own line */
+#sessList .ctl-row { align-items: flex-start; }

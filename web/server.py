@@ -24,11 +24,17 @@ Routes:
                                    memory artifact (evolution loop console leg)
   POST /api/evolution           -> Bearer; {action:"reflect", period} generates
                                    the period skeleton (same core as /reflect)
-  POST /api/chat                -> Bearer; {text, model?} streams an agent turn
-                                   as SSE (meta/delta/tool/done/error);
+  POST /api/chat                -> Bearer; {text, model?, image?} streams an
+                                   agent turn as SSE (meta/delta/tool/done/error);
                                    {action:"clear"} archives the console session;
                                    optional `model` is whitelist-gated (400 on
-                                   an unknown id — the TG /model rule)
+                                   an unknown id — the TG /model rule);
+                                   optional `image` (X16) is one
+                                   data:image/(png|jpeg|webp);base64 URL of at
+                                   most 1.5M chars riding THIS turn only (400
+                                   bad shape / 413 over the body cap; a
+                                   non-multimodal endpoint surfaces an honest
+                                   vision-rejection note in `done.text`)
   GET  /api/channels            -> channel adapter status (list of {name,
                                    enabled, configured, ...}; empty list +
                                    "note" when the channel module is absent) and
@@ -113,6 +119,24 @@ Routes:
                                    {images: [{name, url}]} via imagegen (honest 503)
   GET  /api/media/<name>        -> one generated image from data/images/ (strict
                                    name whitelist, no traversal)
+  GET  /api/artifacts           -> X17 gallery: generated-image catalog
+                                   {images[{name, url, size, when, ext}],
+                                   count, limit, offset, truncated} — newest
+                                   first, bounded pages (?limit/?offset), an
+                                   honest empty 200 when nothing was
+                                   generated, 503 when the dir is unreadable
+  GET  /api/sessions            -> X13 read face: {sessions[{id, when, size,
+                                   summary[, hits, partial]}], count,
+                                   truncated, limit, search?{q, method:
+                                   "substring"}, prune{enabled, days, removed,
+                                   kept, freed, errors, ran_at, advisory},
+                                   advisory is one-shown per process; ?q= is
+                                   a case-insensitive substring scan (no FTS,
+                                   said out loud), ?limit= 1..500;
+                                   ?id=<sid>&format=json|md exports ONE
+                                   session as an attachment (400 bad id/
+                                   format, 404 unknown id) — message content
+                                   only, never a credential slot value
   GET  /api/skills/remote       -> official skills catalog (car 4, 0.5.47):
                                    {source: remote|cache|unavailable,
                                    fetched_at, count, skills[7-field rows]};
@@ -120,6 +144,30 @@ Routes:
                                    ladder (bundled site copy, then an honest
                                    empty 200 — never 5xx), loopback read,
                                    no auth (same contract as GET /api/mission)
+  GET  /api/checkpoints        -> X10 read face (Wave 5): metadata-only
+                                   checkpoint catalog {entries[{id, ts, when,
+                                   path, file, size, sha256}], count} — a
+                                   snapshot BYTE never leaves
+                                   mycore.checkpoint; ?id=<n> -> {entry} |
+                                   400 non-numeric id | 404 unknown id;
+                                   fail-soft empty 200, loopback, no auth
+  POST /api/checkpoints        -> Bearer; {action:"restore", id} mirrors the
+                                   CLI `--restore` one for one (400 bad
+                                   shape, 404 unknown id, 409 missing/corrupt
+                                   snapshot with mycore's own message in
+                                   details[0]); one audit line per attempt
+  GET  /api/profiles           -> X11 read face: {profiles[{name, default,
+                                   active, secrets, settings, web_port,
+                                   state_dir, state_files, can_remove}],
+                                   count, active, profiles_root} — presence /
+                                   counts / port only (an absent credential is
+                                   false, never a redacted string)
+  POST /api/profiles           -> Bearer; {action:"create"|"rm", name} runs
+                                   the `aidog profile` CLI rules verbatim
+                                   (400 invalid/reserved name, duplicate, or a
+                                   state-file guard — NO --force on this
+                                   route, the default profile is refused
+                                   before any subprocess runs)
   GET  /static/i18n/<lang>.json -> locale packs served from the SSOT
                                    overlay/locales/ (en default, zh switchable)
 """
@@ -157,13 +205,14 @@ if str(REPO) in sys.path:
 sys.path.insert(0, str(REPO))
 from lib import i18n  # noqa: E402
 from lib import profile_paths  # noqa: E402  (car F §13.1: per-profile path seams)
-from mycore import cli, evolution, hooks, mission, mcp, modeltier, terminal  # noqa: E402  (config + MCP/ hooks/ terminal/ mission grammar)
+from mycore import checkpoint, cli, evolution, hooks, mission, mcp, modeltier, terminal  # noqa: E402  (X10 snapshots + config + MCP/ hooks/ terminal/ mission grammar)
 from mycore.assembly import build_system_stack, resolve_context_dirs  # noqa: E402
 from mycore.compact import measure  # noqa: E402  (X14 context usage: the loop's own payload metric)
 from mycore.loop import run_turn  # noqa: E402
 from mycore.model import ChatClient  # noqa: E402
 from mycore.service import state_dir as mycore_state_dir  # noqa: E402
-from mycore.session import Session  # noqa: E402
+from mycore.session import (Session, export_session, list_sessions,  # noqa: E402
+                             prune_old)
 from mycore.tools import (KNOWN_TOOL_NAMES, build_registry,  # noqa: E402
                           resolve_disabled_tools)
 HOST, PORT = "127.0.0.1", int(os.environ.get("AIDOG_WEB_PORT", "8790"))
@@ -191,12 +240,32 @@ CHAT_MAX_CHARS = 4000                 # one console chat message (input cap)
 CHAT_HISTORY_CAP = 2000               # per-message chars returned by /history
 CHAT_SESSION_NAME = "web"             # console session file stem (numeric
                                       # chat_ids belong to the TG service)
+# Wave 6 delta2 (X12/X13/X16/X17): caps for the session/gallery/vision faces.
+SESSION_LIST_LIMIT = 200          # GET /api/sessions default page size
+SESSION_LIST_MAX = 500            # hard cap on ?limit=
+SESSIONS_Q_MAX = 200              # chars in ?q= (substring scan)
+ARTIFACTS_LIMIT = 60              # GET /api/artifacts default page size
+ARTIFACTS_MAX = 200               # hard cap on ?limit=
+CHAT_BODY_MAX = 2_000_000         # chat POST body budget (X16 image attach;
+                                  # the TEXT cap stays CHAT_MAX_CHARS=4000)
+VISION_MAX_CHARS = 1_500_000      # chars in one data-URL image attachment
+VISION_URL_RE = re.compile(
+    r"^data:image/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]{64,}={0,2}$")
+PRUNE_DAYS_MAX = 3650             # mycore.session_prune_days bounds (0 = off)
+DISK_LOW_FREE = 1024 ** 3         # X12 advisory: under 1 GiB free = warn once
+REASONING_EFFORTS = ("", "low", "medium", "high")  # X15 enum ("" = off)
 # Wave 3 backend (X5/X9/X14): caps for the new read/create faces.
 UPSTREAM_TEST_TIMEOUT = 5.0           # seconds allowed to ONE endpoint probe
 UPSTREAM_TEST_URL_MAX = 2048          # chars in an ad-hoc probe url
 CRON_PROMPT_MAX = 4096                # chars in a console-created job body
                                       # (the registry's own MAX_TEXT=4000
                                       # still applies inside create_job)
+# Wave 5 delta1 (X10 checkpoints + X11 profiles): the profile name grammar is
+# the SAME rule lib/profile_paths and aidog_persist enforce (three call sites,
+# one rule — the CLI re-checks it anyway, this copy only saves a subprocess on
+# an obviously bad name). Reserved names are never creatable, never removable.
+PROFILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+PROFILE_RESERVED = ("default", "profile")
 _state_lock = threading.Lock()
 # Mission board mutations (0.5.44): the console is a ThreadingHTTPServer, so
 # read-modify-write on the registry runs under one lock (single active mission
@@ -316,7 +385,8 @@ ALLOWED_TOP = ("language", "refresh_sec", "sound", "voice_volume",
                "evolution", "channels", "hooks", "media", "web3", "mission")
 USAGE_KEYS = ("metrics_url", "pricing_config", "log_dir")
 MYCORE_KEYS = ("base_url", "model", "context_dirs", "upstreams", "mcp", "shell",
-               "tools_off", "models", "budget")
+               "tools_off", "models", "budget", "session_prune_days",
+               "reasoning_effort")
 MYCORE_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$")
 # mycore.models / mycore.budget join the schema (activation car §1.6): the
 # raw-file consumers (service._allowed_models / service._budget /
@@ -950,6 +1020,29 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                         errors.append(
                             f"mycore.budget must be an integer in "
                             f"{BUDGET_MIN}..{BUDGET_MAX}")
+                        continue
+                    clean_mc[key] = val
+                    continue
+                if key == "session_prune_days":
+                    # X12: opt-in session auto-prune age in days; 0/absent =
+                    # off (same opt-in stance as upstream). int only, bounded.
+                    if isinstance(val, bool) or not isinstance(val, int) \
+                            or not 0 <= val <= PRUNE_DAYS_MAX:
+                        errors.append(
+                            f"mycore.session_prune_days must be an integer in "
+                            f"0..{PRUNE_DAYS_MAX} (0 = off)")
+                        continue
+                    clean_mc[key] = val
+                    continue
+                if key == "reasoning_effort":
+                    # X15: opt-in per-model request param passthrough. Closed
+                    # enum, "" = off = the pre-X15 wire byte-for-byte; raw
+                    # hand-edited junk is ignored by cli.resolve_model_config.
+                    if not isinstance(val, str) or val not in REASONING_EFFORTS:
+                        errors.append(
+                            "mycore.reasoning_effort must be one of: "
+                            + "|".join(e or "(empty)"
+                                      for e in REASONING_EFFORTS))
                         continue
                     clean_mc[key] = val
                     continue
@@ -2391,6 +2484,116 @@ def clear_chat_session() -> bool:
     return True
 
 
+# ------------------------------------------- Wave 6 delta2: X12 auto-prune ---
+# Opt-in session auto-prune (settings mycore.session_prune_days; 0/absent =
+# off — the same opt-in stance as upstream). The console applies it on a
+# settings write that touches the key (force) and lazily on GET /api/sessions
+# at most once per hour, so a read face never becomes a busy deleter. The
+# disk advisory is ONE-SHOWN per console process: the first observation of
+# free space under DISK_LOW_FREE reports it, then stays silent — a nag that
+# never stops is a bug, not a warning.
+
+_PRUNE_LOCK = threading.Lock()
+_PRUNE_STATE: dict = {"ran_at": 0.0,
+                      "result": {"removed": 0, "kept": 0, "freed": 0,
+                                 "errors": 0},
+                      "advisory_sent": False}
+PRUNE_INTERVAL = 3600.0            # seconds between lazy (GET-triggered) runs
+
+
+def session_prune_days() -> int:
+    """Threshold from settings: a positive int in 1..PRUNE_DAYS_MAX, else 0
+    (off). Bools and hand-edited junk read as off — fail-silent, never a
+    crash, never a delete."""
+    raw = (load_settings().get("mycore") or {}).get("session_prune_days")
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return 0
+    return raw if 1 <= raw <= PRUNE_DAYS_MAX else 0
+
+
+def disk_low_advisory(free: int | None) -> str | None:
+    """X12 advisory text for `free` bytes; None = healthy or unknown (a
+    failed disk_usage must never fake a warning). Pure, so the test suite
+    pins both sides without filling a disk."""
+    if free is None or free >= DISK_LOW_FREE:
+        return None
+    gib = max(int(free) // (1024 ** 3), 0)
+    return (f"disk space low: {gib} GiB free — sessions and generated images "
+            f"keep growing; enable session auto-prune (Settings -> Model) "
+            f"or free space")
+
+
+def session_prune_view(force: bool = False) -> dict:
+    """X12 read face: current prune state, running the prune when due
+    (force = a settings write just changed the key). Returns {enabled, days,
+    removed, kept, freed, errors, ran_at, advisory} — honest zeros before
+    the first run, advisory one-shown (see module note). Never raises."""
+    days = session_prune_days()
+    now = time.time()
+    with _PRUNE_LOCK:
+        if days > 0 and (force or not _PRUNE_STATE["ran_at"]
+                         or now - _PRUNE_STATE["ran_at"] >= PRUNE_INTERVAL):
+            try:
+                res = prune_old(chat_sessions_dir(), days,
+                                keep=(CHAT_SESSION_NAME,))
+            except Exception as e:  # noqa: BLE001 — fail-soft, class only
+                sys.stderr.write(f"session prune failed "
+                                 f"err={type(e).__name__}\n")
+                res = {"removed": 0, "kept": 0, "freed": 0, "errors": 1}
+            _PRUNE_STATE["ran_at"] = now
+            _PRUNE_STATE["result"] = res
+            sys.stderr.write(f"session prune days={days} "
+                             f"removed={res.get('removed', 0)} "
+                             f"freed={res.get('freed', 0)}\n")
+        out = {"enabled": days > 0, "days": days,
+               "ran_at": _PRUNE_STATE["ran_at"] or None}
+        out.update(_PRUNE_STATE["result"])
+        if _PRUNE_STATE["advisory_sent"]:
+            out["advisory"] = None                 # already had its one shot
+            return out
+        free: int | None = None
+        for probe in (chat_sessions_dir(), mycore_state_dir(), REPO):
+            try:
+                free = shutil.disk_usage(probe).free
+                break
+            except OSError:
+                continue
+        adv = disk_low_advisory(free)
+        if adv:
+            _PRUNE_STATE["advisory_sent"] = True
+        out["advisory"] = adv
+        return out
+
+
+def content_blocks_text(blocks: list) -> str:
+    """X16: multimodal content blocks -> plain text: text parts joined, each
+    image part an honest '[image]' marker (no base64, no URL ever re-enters
+    the session file or an export)."""
+    parts: list[str] = []
+    for block in blocks if isinstance(blocks, list) else []:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text" and isinstance(block.get("text"), str):
+            parts.append(block["text"])
+        elif block.get("type") == "image_url":
+            parts.append("[image]")
+    return " ".join(parts)
+
+
+def vision_rejection_note(text: str) -> str:
+    """X16 honest degradation: an image-attached turn that ended in a model
+    error carrying an HTTP 4xx was REFUSED by the endpoint — for an image
+    payload that means no vision support, and we say so instead of implying
+    an answer exists. Non-4xx failures (transport, timeout) get no note: the
+    image was not proven to be the cause."""
+    note = text or ""
+    if "HTTP 4" in note:
+        return note + (" [vision: the endpoint rejected the image input "
+                       "with HTTP 4xx — image understanding (vision) "
+                       "appears unsupported on this endpoint]")
+    return note
+
+
 # ------------------------------------------------------- webhook inbound ---
 # The console answers POST /api/channels/webhook synchronously: one
 # in-process turn on a webhook-OWNED session (never the console "web"
@@ -2872,6 +3075,116 @@ def collect_cron() -> dict:
         return {"jobs": [], "count": 0}
 
 
+def _repo_relative(path: object) -> str:
+    """Repo-relative POSIX path, or the bare file name for a path outside the
+    repo — the console never serializes a machine path (the standing rule for
+    every payload this server builds)."""
+    raw = str(path or "")
+    if not raw:
+        return ""
+    p = Path(raw)
+    try:
+        return p.resolve().relative_to(REPO.resolve()).as_posix()
+    except (OSError, ValueError):
+        return p.name
+
+
+def checkpoint_row(entry: dict) -> dict:
+    """One X10 row for GET /api/checkpoints — METADATA ONLY: id, timestamp,
+    snapshot path + size + sha256. The snapshot BYTES never leave
+    mycore.checkpoint (a checkpoint may cover a credential file), so this row
+    is the whole payload, always — no content, no preview, no inline base64."""
+    ts = entry.get("ts")
+    size = entry.get("size")
+    try:
+        ts_f = float(ts) if ts is not None else 0.0
+    except (TypeError, ValueError):
+        ts_f = 0.0
+    return {
+        "id": int(entry.get("id", -1)),
+        "ts": ts_f,
+        "when": checkpoint.fmt_when(ts_f),
+        "path": _repo_relative(entry.get("path")),
+        "file": str(entry.get("file") or ""),
+        "size": int(size) if isinstance(size, (int, float)) else 0,
+        "sha256": str(entry.get("sha256") or ""),
+    }
+
+
+def collect_checkpoints() -> dict:
+    """GET /api/checkpoints — the X10 read face. Fail-soft by contract: an
+    absent, unreadable or corrupt index answers {entries: [], count: 0}, never
+    a 500 (mycore.checkpoint re-reads the index per call, so this list is live
+    and needs no cache)."""
+    try:
+        entries = checkpoint.list_entries(limit=0)   # rotation caps at 100
+    except Exception as e:  # noqa: BLE001 — catalog must not break the console
+        sys.stderr.write(f"checkpoint list failed err={type(e).__name__}\n")
+        return {"entries": [], "count": 0}
+    rows = [checkpoint_row(e) for e in entries]
+    return {"entries": rows, "count": len(rows)}
+
+
+def _state_file_count(state: Path) -> int | None:
+    """Files under <profile>/state — the SAME test aidog_persist's rm guard
+    applies (empty dirs are scaffolding, not state). None = unreadable, which
+    the catalog reports honestly and the UI treats as NOT removable."""
+    try:
+        return sum(1 for p in state.rglob("*") if p.is_file())
+    except OSError:
+        return None
+
+
+def collect_profiles() -> dict:
+    """GET /api/profiles — the X11 read face, the console mirror of
+    `aidog profile list`. Presence / counts / port ONLY: a slot value or a
+    file byte never enters the payload (an absent credential answers
+    `secrets: false`, never a redacted string), and the DEFAULT row always
+    describes the implicit no-AIDOG_PROFILE profile so a per-profile env can
+    never skew the catalog. Fail-soft: one unreadable profile degrades to
+    `state_files: null`, never a 500."""
+    try:
+        active = profile_paths.profile_name()   # "" = the default profile
+    except Exception:  # noqa: BLE001 — an invalid env must not 500 a GET
+        active = ""
+
+    def build(name: str, state: Path, secrets: Path, settings: Path,
+              port: int | None, is_default: bool) -> dict:
+        files = _state_file_count(state)
+        return {
+            "name": name,
+            "default": is_default,
+            "active": (active == "") if is_default else (name == active),
+            "secrets": secrets.is_file(),
+            "settings": settings.is_file(),
+            "web_port": port,
+            "state_dir": _repo_relative(state),
+            "state_files": files,
+            "can_remove": (not is_default) and files == 0,
+        }
+
+    rows = [build("default", REPO / "data" / "mycore_service",
+                  REPO / "secrets.env", REPO / "web" / "settings.json",
+                  8790, True)]
+    root = profile_paths.profiles_root(REPO)
+    if root.is_dir():
+        for p in sorted(root.iterdir()):
+            if not p.is_dir() or not PROFILE_NAME_RE.match(p.name):
+                continue      # invalidly-named dirs are listed but never adopted
+            meta: dict = {}
+            try:
+                doc = json.loads((p / "profile.json").read_text(encoding="utf-8"))
+                meta = doc if isinstance(doc, dict) else {}
+            except (OSError, ValueError):
+                meta = {}
+            port = meta.get("web_port")
+            rows.append(build(p.name, p / "state", p / "secrets.env",
+                              p / "settings.json",
+                              port if isinstance(port, int) else None, False))
+    return {"profiles": rows, "count": len(rows), "active": active,
+            "profiles_root": _repo_relative(root)}
+
+
 def collect_mission() -> dict:
     """GET /api/mission — the mission board (0.5.44). Fail-soft by contract:
     an absent, unreadable or corrupt registry answers the honest empty
@@ -3318,6 +3631,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_secrets_get()
         if path == "/api/cron":
             return self._json(collect_cron())
+        if path == "/api/checkpoints":
+            return self._handle_checkpoints_get()
+        if path == "/api/profiles":
+            return self._json(collect_profiles())
+        if path == "/api/sessions":
+            return self._handle_sessions_get()
+        if path == "/api/artifacts":
+            return self._handle_artifacts_get()
         if path == "/api/mission":
             mid = ""
             if "?" in self.path:
@@ -3369,6 +3690,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_openai_chat()
         if path == "/api/cron":
             return self._handle_cron_post()
+        if path == "/api/checkpoints":
+            return self._handle_checkpoints_post()
+        if path == "/api/profiles":
+            return self._handle_profiles_post()
         if path == "/api/mycore/upstreams/test":
             return self._handle_upstreams_test()
         if path == "/api/mission":
@@ -3626,6 +3951,154 @@ class Handler(BaseHTTPRequestHandler):
             sys.stderr.write(f"cron create refused rc={code}\n")
         return self._json(out, code)
 
+    # -------------------------------------- Wave 5 delta1: X10 checkpoints ---
+    def _handle_checkpoints_get(self) -> None:
+        """GET /api/checkpoints[?id=<n>] — the X10 read face (loopback, no
+        auth, same contract as every GET). `?id=` answers ONE row (400 on a
+        non-numeric id, honest 404 on an unknown one); without it the whole
+        catalog. Metadata only: the snapshot bytes never leave
+        mycore.checkpoint, so a credential file's content cannot render."""
+        payload = collect_checkpoints()
+        entries = payload.get("entries") or []
+        query = urllib.parse.parse_qs(self.path.split("?", 1)[1]) \
+            if "?" in self.path else {}
+        if "id" not in query:
+            return self._json(payload)
+        raw = (query.get("id") or [""])[0].strip()
+        if not raw.isdigit():
+            return self._json({"error": "validation failed",
+                               "details": ["id must be a non-negative integer"]},
+                              400)
+        eid = int(raw)
+        row = next((r for r in entries if r.get("id") == eid), None)
+        if row is None:
+            return self._json({"error": "not found",
+                               "details": [f"no checkpoint with id {eid}"]}, 404)
+        return self._json({"entry": row})
+
+    def _handle_checkpoints_post(self) -> None:
+        """POST /api/checkpoints {action:"restore", id} — Bearer gate, then the
+        CLI `--restore` semantics mirrored one for one: bad shape -> 400, an
+        unknown id -> 404 (checked BEFORE the write, same message the CLI
+        prints), a missing/corrupt snapshot or an io failure -> 409 with
+        mycore.checkpoint's own honest message in details[0]. Every attempt —
+        refused or successful — writes exactly one audit line to stderr."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        if doc.get("action") != "restore":
+            return self._json({"error": "validation failed",
+                               "details": ["action must be one of: restore"]},
+                              400)
+        raw = doc.get("id")
+        sid = (str(raw).strip()
+               if isinstance(raw, (int, str)) and not isinstance(raw, bool)
+               else "")
+        if not sid.isdigit():
+            return self._json({"error": "validation failed",
+                               "details": ["id must be a non-negative integer"]},
+                              400)
+        entry_id = int(sid)
+        known = any(e.get("id") == entry_id
+                    for e in (collect_checkpoints().get("entries") or []))
+        if not known:
+            sys.stderr.write(f"checkpoint restore refused id={entry_id} "
+                             f"reason=unknown\n")
+            return self._json({"error": "not found",
+                               "details": [f"no checkpoint with id {entry_id}"]},
+                              404)
+        try:
+            entry = checkpoint.restore(entry_id)
+        except checkpoint.CheckpointError as e:   # honest module message
+            sys.stderr.write(f"checkpoint restore failed id={entry_id} "
+                             f"detail={e}\n")
+            return self._json({"error": "restore failed",
+                               "details": [str(e)]}, 409)
+        except OSError as e:  # noqa: BLE001 — type name only, never a path
+            sys.stderr.write(f"checkpoint restore failed id={entry_id} "
+                             f"err={type(e).__name__}\n")
+            return self._json({"error": f"restore failed: {type(e).__name__}"},
+                              500)
+        sys.stderr.write(f"checkpoint restore ok id={entry_id} "
+                         f"size={entry.get('size')} snap={entry.get('file')}\n")
+        return self._json({"ok": True, "entry": checkpoint_row(entry)})
+
+    # ------------------------------------------ Wave 5 delta1: X11 profiles ---
+    def _handle_profiles_post(self) -> None:
+        """POST /api/profiles {action:"create"|"rm", name} — Bearer gate, then
+        the SAME rules `aidog profile create|rm` enforces: shape/name checks
+        here (400 with the CLI's own wording) and the rest delegated to
+        deploy/aidog_persist.py so there is ONE source of truth for the name
+        grammar, the reserved default and the state-file guard. Its first
+        output line travels up VERBATIM as details[0].
+
+        Red lines: the reserved default is refused BEFORE any subprocess runs,
+        `--force` is never passed (a profile with state files can never be
+        removed from the console), and a refusal touches no profile byte."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        action = doc.get("action")
+        if action not in ("create", "rm"):
+            sys.stderr.write("profile post refused reason=action\n")
+            return self._json({"error": "validation failed",
+                               "details": ["action must be one of: create | rm"]},
+                              400)
+        name = doc.get("name")
+        if not isinstance(name, str) or not name.strip():
+            sys.stderr.write(f"profile {action} refused name= "
+                             f"reason=name\n")
+            return self._json({"error": "validation failed",
+                               "details": ["name must be a non-empty string"]},
+                              400)
+        name = name.strip()
+        if not PROFILE_NAME_RE.match(name):
+            sys.stderr.write(f"profile {action} refused name={name} "
+                             f"reason=grammar\n")
+            return self._json({
+                "error": "validation failed",
+                "details": [f"invalid profile name {name!r}: expected "
+                            f"[a-z0-9][a-z0-9_-]{{0,31}}"]}, 400)
+        if name in PROFILE_RESERVED:
+            detail = (f"{name!r} is reserved for the default profile — "
+                      f"pick another name" if action == "create" else
+                      "the default profile has no directory and can never "
+                      f"be removed")
+            sys.stderr.write(f"profile {action} refused name={name} "
+                             f"reason=reserved\n")
+            return self._json({"error": "validation failed",
+                               "details": [detail]}, 400)
+        try:
+            proc = subprocess.run(
+                [sys.executable, "deploy/aidog_persist.py",
+                 "profile", action, name],
+                cwd=str(REPO), capture_output=True, text=True, timeout=60)
+        except subprocess.TimeoutExpired:
+            return self._json({"error": "profile op timed out (60s)"}, 504)
+        except OSError as e:  # noqa: BLE001 — type name only
+            return self._json({"error": f"launch failed: {type(e).__name__}"},
+                              500)
+        lines = [ln for ln in (proc.stdout or "").splitlines() if ln.strip()]
+        if proc.returncode != 0:
+            err = [ln for ln in (proc.stderr or "").splitlines() if ln.strip()]
+            details = (lines or err or
+                       [f"profile {action} failed (rc {proc.returncode})"])[:3]
+            sys.stderr.write(f"profile {action} refused name={name} "
+                             f"rc={proc.returncode} detail={details[0]}\n")
+            return self._json({"error": "validation failed",
+                               "details": details}, 400)
+        sys.stderr.write(f"profile {action} ok name={name}\n")
+        # success output carries no credential (only slot NAMES and next-step
+        # hints); the repo prefix is stripped so no machine path serializes.
+        rel = [ln.replace(str(REPO) + os.sep, "").replace(str(REPO), "")
+               for ln in lines[:12]]
+        return self._json({"ok": True, "action": action, "name": name,
+                           "lines": rel})
+
     def _handle_upstreams_test(self) -> None:
         """POST /api/mycore/upstreams/test {url?} — Bearer gate, then ONE 5s
         probe per configured failover endpoint (or only `url` when given),
@@ -3818,6 +4291,104 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True,
                                "mission": mission.public_row(rec)})
 
+    # ------------------------------------------ Wave 6 delta2: X13/X17 faces ---
+    def _handle_artifacts_get(self) -> None:
+        """GET /api/artifacts[?limit=&offset=] — the X17 gallery catalog:
+        metadata rows for generated images in MEDIA_DIR, newest first,
+        bounded pages. Loopback read like every GET. An unreadable directory
+        is an honest 503; an empty one is a truthful {images: [], count: 0} —
+        never a fabricated sample row."""
+        query = (urllib.parse.parse_qs(self.path.split("?", 1)[1])
+                 if "?" in self.path else {})
+
+        def page_of(key: str, default: int) -> int | None:
+            raw = (query.get(key) or [""])[0].strip()
+            if not raw:
+                return default
+            return int(raw) if raw.isdigit() else None
+
+        limit = page_of("limit", ARTIFACTS_LIMIT)
+        offset = page_of("offset", 0)
+        if limit is None or offset is None or not 1 <= limit <= ARTIFACTS_MAX \
+                or not 0 <= offset <= 100000:
+            return self._json({
+                "error": "validation failed",
+                "details": [f"limit must be 1..{ARTIFACTS_MAX} and offset a "
+                            "non-negative integer"]}, 400)
+        try:
+            entries: list[tuple] = []
+            for p in MEDIA_DIR.iterdir():
+                if not p.is_file() or not IMAGE_NAME_RE.match(p.name):
+                    continue
+                if p.suffix.lower() not in MEDIA_MIME:
+                    continue
+                st = p.stat()
+                entries.append((st.st_mtime, st.st_size, p.name))
+        except OSError as e:  # noqa: BLE001 — type name only
+            sys.stderr.write(f"artifacts list failed err={type(e).__name__}\n")
+            return self._json({"error": "media directory unavailable"}, 503)
+        entries.sort(reverse=True)
+        total = len(entries)
+        page = entries[offset:offset + limit]
+        images = [{"name": name, "url": "/api/media/" + name, "size": size,
+                   "when": round(mtime, 3),
+                   "ext": name.rsplit(".", 1)[-1].lower()}
+                  for mtime, size, name in page]
+        return self._json({"images": images, "count": total, "limit": limit,
+                           "offset": offset,
+                           "truncated": offset + len(images) < total})
+
+    def _handle_sessions_get(self) -> None:
+        """GET /api/sessions[?q=&limit=] | ?id=<sid>&format=json|md — the X13
+        read face (loopback, no bearer: same contract as every GET). Content
+        is the chat content /api/chat/history already renders — never a
+        credential slot value; summaries strip control chars. ?id= answers
+        ONE export with an attachment content-type (400 bad id/format, 404
+        unknown id). The list additionally runs the X12 prune view (opt-in,
+        at most hourly) so the console can show prune state + the one-shown
+        disk advisory without a write route."""
+        query = (urllib.parse.parse_qs(self.path.split("?", 1)[1])
+                 if "?" in self.path else {})
+        sid = (query.get("id") or [""])[0].strip()
+        if sid:
+            fmt = (query.get("format") or ["json"])[0]
+            try:
+                text, mime = export_session(chat_sessions_dir(), sid, fmt)
+            except ValueError as e:
+                return self._json({"error": "validation failed",
+                                   "details": [str(e)]}, 400)
+            except FileNotFoundError as e:
+                return self._json({"error": "not found",
+                                   "details": [str(e)]}, 404)
+            except OSError as e:  # noqa: BLE001 — type name only
+                sys.stderr.write(f"session export failed "
+                                 f"err={type(e).__name__}\n")
+                return self._json({"error": "export unavailable"}, 503)
+            return self._send(200, text.encode("utf-8"), mime)
+        q = (query.get("q") or [""])[0]
+        if len(q) > SESSIONS_Q_MAX:
+            return self._json({"error": "validation failed",
+                               "details": [f"q must be at most "
+                                           f"{SESSIONS_Q_MAX} chars"]}, 400)
+        raw_limit = (query.get("limit") or [""])[0].strip()
+        if raw_limit and not raw_limit.isdigit():
+            return self._json({"error": "validation failed",
+                               "details": ["limit must be a positive integer"]},
+                              400)
+        limit = int(raw_limit) if raw_limit else SESSION_LIST_LIMIT
+        if not 1 <= limit <= SESSION_LIST_MAX:
+            return self._json({"error": "validation failed",
+                               "details": [f"limit must be 1.."
+                                           f"{SESSION_LIST_MAX}"]}, 400)
+        try:
+            payload = list_sessions(chat_sessions_dir(), q=q or None,
+                                    limit=limit)
+        except Exception as e:  # noqa: BLE001 — fail-soft, class only
+            sys.stderr.write(f"session list failed err={type(e).__name__}\n")
+            return self._json({"error": "sessions unavailable"}, 503)
+        payload["prune"] = session_prune_view()
+        return self._json(payload)
+
     # ------------------------------------------------------ evolution legs ---
     def _require_token(self) -> bool:
         """Bearer WEB_TOKEN gate (same contract as the settings write). The
@@ -3834,9 +4405,11 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return True
 
-    def _read_json_body(self) -> dict | None:
+    def _read_json_body(self, limit: int = MAX_BODY) -> dict | None:
         """Length/JSON/dict validation with responses on failure (None = a
-        response was already sent)."""
+        response was already sent). `limit` lets a caller that expects an
+        image attachment (X16: /api/chat -> CHAT_BODY_MAX) raise the body
+        budget without moving any other route's cap."""
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
@@ -3845,8 +4418,8 @@ class Handler(BaseHTTPRequestHandler):
         if length <= 0:
             self._json({"error": "empty body"}, 400)
             return None
-        if length > MAX_BODY:
-            self._json({"error": f"body too large (max {MAX_BODY} bytes)"}, 413)
+        if length > limit:
+            self._json({"error": f"body too large (max {limit} bytes)"}, 413)
             return None
         try:
             doc = json.loads(self.rfile.read(length).decode("utf-8"))
@@ -3983,7 +4556,7 @@ class Handler(BaseHTTPRequestHandler):
         that turn only."""
         if not self._require_token():
             return
-        doc = self._read_json_body()
+        doc = self._read_json_body(CHAT_BODY_MAX)
         if doc is None:
             return
         model = doc.get("model")
@@ -4009,10 +4582,23 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "validation failed",
                                "details": [f"text too long (max {CHAT_MAX_CHARS} chars)"]},
                               400)
+        image = doc.get("image")
+        if image is not None:
+            # X16: strict shape gate BEFORE the stream opens. The data URL is
+            # bounded and suffix-whitelisted; a non-string, a script URL or a
+            # truncated base64 blob is a 400, never a half-turn.
+            if not isinstance(image, str) or len(image) > VISION_MAX_CHARS \
+                    or not VISION_URL_RE.match(image):
+                return self._json({"error": "validation failed",
+                                   "details": ["image must be a "
+                                               "data:image/(png|jpeg|webp);"
+                                               "base64 URL of 64.."
+                                               f"{VISION_MAX_CHARS} chars"]},
+                                  400)
 
         self._sse_start()
         try:
-            ok = self._run_chat_turn(text, model)
+            ok = self._run_chat_turn(text, model, image=image)
         except Exception as e:  # noqa: BLE001 — never leak internals to the stream
             sys.stderr.write(f"chat turn failed err={type(e).__name__}\n")
             self._sse("error", {"error": "internal"})
@@ -4020,12 +4606,18 @@ class Handler(BaseHTTPRequestHandler):
         if not ok:
             return
 
-    def _run_chat_turn(self, text: str, model: str | None = None) -> bool:
+    def _run_chat_turn(self, text: str, model: str | None = None,
+                       image: str | None = None) -> bool:
         """Drive one turn over the console session and stream its events.
         Returns False when the client disconnected (observers must stop).
         `model` (X7) is a whitelist member already validated by the caller:
         only cfg.model moves for THIS turn — endpoint and failover chain stay
-        put, exactly like the TG per-chat override does."""
+        put, exactly like the TG per-chat override does.
+        `image` (X16) is one validated data-URL: it rides the outgoing user
+        message as an image_url block for THIS turn only — the session file
+        keeps a textified '[image]' marker (no base64 persists, nothing gets
+        resent next turn), and a 4xx refusal gets vision_rejection_note's
+        honest sentence in the final `done.text`."""
         cfg = cli.resolve_model_config()
         if model:
             cfg.model = model
@@ -4040,7 +4632,11 @@ class Handler(BaseHTTPRequestHandler):
         stack = build_system_stack(context_dirs=resolve_context_dirs())
         messages = stack + history
         pre_ids = {id(m) for m in messages}
-        messages.append({"role": "user", "content": text})
+        content = text
+        if image:
+            content = [{"type": "text", "text": text},
+                       {"type": "image_url", "image_url": {"url": image}}]
+        messages.append({"role": "user", "content": content})
 
         alive = [True]
         if not self._sse("meta", {"model": cfg.model}):
@@ -4081,6 +4677,15 @@ class Handler(BaseHTTPRequestHandler):
 
         delta = [m for m in messages
                  if id(m) not in pre_ids and m.get("role") != "system"]
+        if image:
+            # X16: persist the MARKER, not the bytes — the session stays
+            # small, later turns never resend the image, and chat history /
+            # export render an honest '[image]' instead of vanishing.
+            for m in delta:
+                if isinstance(m.get("content"), list):
+                    m["content"] = content_blocks_text(m["content"])
+            if res.stop == "model_error":
+                res.text = vision_rejection_note(res.text)
         try:
             sess.append_many(delta)
         except OSError as e:  # noqa: BLE001 — stream stays honest, log only
@@ -4811,6 +5416,11 @@ class Handler(BaseHTTPRequestHandler):
             except OSError as e:  # noqa: BLE001
                 return self._json({"error": f"persist failed: {type(e).__name__}"}, 500)
             sys.stderr.write(f"settings updated keys={','.join(sorted(clean))}\n")
+            mc_patch = clean.get("mycore")
+            if isinstance(mc_patch, dict) and "session_prune_days" in mc_patch:
+                # X12: applying the switch prunes now (force beats the hourly
+                # lazy cadence — the operator just asked for it).
+                session_prune_view(force=True)
             # display currency / fx / usage paths affect the next usage render
             if {"currency", "fx_rate", "usage"} & set(clean):
                 with _usage_lock:

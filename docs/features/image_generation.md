@@ -73,6 +73,13 @@ leaks into a TG chat and vice versa — each side drains only what it created.
   `..`/encoded traversal), and must carry a known image suffix
   (`.png/.jpg/.webp`) — anything else is a plain 404. Read-only, no auth
   (same loopback posture as `GET /api/status`).
+- **Gallery (0.5.51, X17)**: `GET /api/artifacts?limit=&offset=` lists the
+  same directory as metadata rows (`{name, url, size, when, ext}`, limit
+  1..200, `truncated` flag) and the Stream view renders thumbnails that
+  link back to `GET /api/media/<name>` — names are whitelisted the same
+  way, an empty directory is an honest empty 200, and a read failure is a
+  503. It is a **read-only index of what already exists**, not a second
+  storage path.
 
 ## 5. Honest boundaries
 

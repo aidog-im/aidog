@@ -75,9 +75,14 @@ authoritative text.
 
 | Route | Auth | Answer |
 |---|---|---|
-| `POST /api/chat` `{text}` | Bearer `WEB_TOKEN` | SSE stream (below) |
+| `POST /api/chat` `{text, model?}` | Bearer `WEB_TOKEN` | SSE stream (below); `model` is optional and validated against the same whitelist the Telegram per-chat override uses (400 `model must be one of: …`, checked **before** `text`) |
 | `POST /api/chat` `{action:"clear"}` | Bearer `WEB_TOKEN` | `{"ok": true, "archived": bool}` — rotates the session into `sessions/archive/` (same rule as TG `/reset`) |
+| `POST /api/chat` `{text, image?}` | Bearer `WEB_TOKEN` | `image` = data-URL ≤1.5MB (larger → 413): the multimodal block is scoped to **this turn only**, the session stores just an `[image]` marker (no base64 ever persisted), and a non-multimodal endpoint refusing the image comes back as an honest `[vision: …unsupported]` note in the streamed text — never a fake success |
 | `GET /api/chat/history` | none (loopback read) | `{messages:[{role,content}], count}` — **user/assistant turns only** (system constitution and tool payloads never leave the server), content capped at 2000 chars |
+| `GET /api/chat/history.context` | none (loopback read) | `{available, used_chars, budget_chars, over_budget}` — the context-usage line; `available:false` or a non-numeric counter renders as honest "not available", never a fabricated 0 |
+| `GET /api/sessions` (`?q=`, `?limit=`) | none (loopback read) | `{sessions:[{id,when,size,summary}], count, truncated, search?, prune}` — `q` ≤200 chars matches by **substring** and says so (`search.method:"substring"`, not advertised as FTS); `limit` 1..500 else 400; `prune` carries the opt-in auto-prune state (`enabled,days,removed,kept,freed,advisory,…`) |
+| `GET /api/sessions?id=&format=json\|md` | none (loopback read) | one session exported as an attachment stream; 400 bad id/format · 404 unknown id. **Read-only surface: pruning only ever happens through the `mycore.session_prune_days` setting (opt-in, default off)** |
+| `GET /api/artifacts` (`?limit=`,`?offset=`) | none (loopback read) | `{images:[{name,url,size,when,ext}], count, truncated}` — the generated-image gallery (name-whitelisted, paginated; empty dir → honest empty 200, read failure → 503), each entry linking into the single-image `GET /api/media/<name>` route |
 
 SSE contract (HTTP/1.0 handler: no `Content-Length`, `Connection: close`, so
 the browser's `fetch` reader runs until EOF):
@@ -129,6 +134,14 @@ come from the locale packs (`sec.chat`, `chat.*`).
   resolves env first, then the own-line `MODEL_API_KEY` secrets slot — the
   store the console writes. Env still wins; loopback keeps its placeholder;
   no value is ever logged or echoed.
+- **Two opt-in keys joined `MYCORE_KEYS` (0.5.51)**: `mycore.session_prune_days`
+  (int 0..3650, **0/absent = off** — the console exposes it in Settings and a
+  save triggers one guarded prune; live `web` sessions and the age boundary
+  are protected, and a <1GiB disk raises a one-shot advisory) and
+  `mycore.reasoning_effort` (`""`/low/medium/high; `""` keeps the request
+  **byte-identical** — `ModelConfig.extra_body` only merges when set, so the
+  default wire payload is unchanged by construction). Console and Telegram
+  resolve the value through the same `cli` path — one source of truth.
 
 Evidence: `tmp/e2e_activation.py` `L2` (schema matrix + raw consumer +
 unknown-key survival) and `L8` (env → slot → placeholder, in-process),

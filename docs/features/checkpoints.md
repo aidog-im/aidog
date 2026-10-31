@@ -47,7 +47,8 @@ pretending (`· previous file not checkpointed (too large or unreadable)`).
 |---|---|
 | TG (and any command-capable chat) | `/checkpoint` (list newest 10) · `/checkpoint restore <id>` (bare `/checkpoint <id>` accepted) · in `/help` |
 | Ops / headless | `python3 -m mycore.checkpoint --list [--json]` · `--restore <id>` (exit 0/1/2) |
-| Web console chat | no command parsing in v1 — use the CLI (stated, not hidden) |
+| Web console (0.5.51, X10) | Overview → Services `CHECKPOINTS` card: `GET /api/checkpoints` (list, metadata only), `GET /api/checkpoints?id=<n>` (detail / 404), `POST /api/checkpoints {action:"restore", id}` (Bearer-gated, one stderr audit line per attempt, 404 unknown / 409 missing-or-corrupt snapshot) — snapshot **bytes are never rendered** |
+| Web console chat | no command parsing — use the card above or the CLI (stated, not hidden) |
 
 Replies scrub machine paths through the service's repo-relative rule (only a
 file name outside the repo shows, never an absolute path).

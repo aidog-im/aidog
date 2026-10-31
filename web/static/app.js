@@ -713,6 +713,7 @@ async function imgGenerate() {
     }
     imgState(t("img.ok", "generated ✓"), false);
     beep(880, 0.05);
+    if (artData !== null) refreshArtifacts();   // X17: an open gallery follows
   } catch (e) {
     imgState(t("img.fail", "generation failed ({reason})")
                .replace("{reason}", String(e).slice(0, 80)), true);
@@ -2044,6 +2045,13 @@ function chatSend() {
   if (!text) return;
   const token = localStorage.getItem(TOKEN_KEY) || "";
   if (!token) { chatNote("err", t("chat.needToken", "access token required (set it in Settings)")); return; }
+  if (pendingImage && chatBusy) {
+    // X16: an attachment is a one-shot per turn — refuse instead of letting
+    // the queue silently pair it with a different message.
+    chatNote("err", t("chat.imgBusy",
+      "finish the current turn before sending an image"));
+    return;
+  }
   chatNote("", "");
   input.value = "";
   if (chatBusy) {
@@ -2064,7 +2072,16 @@ async function chatTurn(text) {
   const input = document.getElementById("chatInput");
   chatBusy = true;
   chatBadge(true);
-  chatBubble("user", text);
+  // X16: the picked image (if any) rides THIS turn only — consume it here so
+  // no later queue item can ever resend it, and mark it honestly in the
+  // transcript bubble.
+  const img = pendingImage;
+  pendingImage = null;
+  const imgPick = document.getElementById("chatImg");
+  if (imgPick) imgPick.value = "";
+  const imgNoteEl = document.getElementById("chatImgNote");
+  if (imgNoteEl) imgNoteEl.hidden = true;
+  chatBubble("user", text + (img ? ` [image: ${img.name}]` : ""));
   const bubble = chatBubble("assistant", "");
   bubble.classList.add("pending");
   let acc = "";
@@ -2090,11 +2107,13 @@ async function chatTurn(text) {
   try {
     // X7: the picker's value rides THIS turn; "" (default) carries nothing
     const model = ((document.getElementById("chatModel") || {}).value || "").trim();
+    const payload = model ? { text, model } : { text };
+    if (img) payload.image = img.dataUrl;      // X16: one data-URL attachment
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json",
                  "Authorization": "Bearer " + token },
-      body: JSON.stringify(model ? { text, model } : { text }) });
+      body: JSON.stringify(payload) });
     if (!res.ok) {                       // 401/400 answered before the stream
       const body = await res.json().catch(() => ({}));
       chatNote("err", res.status === 401
@@ -3361,6 +3380,20 @@ function mycoreExtraPayload() {
       const n = parseInt(bEl.value, 10);
       if (Number.isFinite(n)) out.budget = n;   // server enforces 4000..1000000
     }
+    // X12/X15 opt-in switches: they enter the payload only when they really
+    // say something (a non-zero day count, or a stored value being cleared) —
+    // an untouched default never rides along and never rewrites the document.
+    const pEl = document.getElementById("mycPrune");
+    if (pEl) {
+      const n = parseInt(pEl.value, 10);
+      const days = Number.isFinite(n) ? Math.min(3650, Math.max(0, n)) : 0;
+      if (days !== 0 || stored.session_prune_days) out.session_prune_days = days;
+    }
+    const eEl = document.getElementById("mycEffort");
+    if (eEl) {
+      const eff = eEl.value || "";
+      if (eff || stored.reasoning_effort) out.reasoning_effort = eff;
+    }
   }
   if (toolsDirty) {
     const off = toolsOffValue() || [];
@@ -3396,6 +3429,9 @@ function initSettingsPanels() {
   // activation car: mycore.models / mycore.budget are console-managed now
   setField("mycModels", Array.isArray(myc.models) ? myc.models.join(", ") : "");
   setField("mycBudget", myc.budget);
+  // Wave 6 delta2: the two opt-in switches round-trip like the other fields
+  setField("mycPrune", myc.session_prune_days);
+  setField("mycEffort", myc.reasoning_effort || "");
   chanDirty = false; usageDirty = false; mycDirty = false; toolsDirty = false;
   mycRestartDirty = false;
   hookDirty.clear();
@@ -3852,6 +3888,249 @@ async function cronCreate() {
       String((e && e.message) || e).slice(0, 80);
   } finally {
     btn.disabled = false;
+  }
+}
+
+/* ============================ Wave 5 delta1: X10 checkpoints + X11 profiles
+   ----------------------------------------------------------------------
+   X10 (Overview, Services card): GET /api/checkpoints is METADATA ONLY —
+   id / time / size / repo-relative path / hash. A snapshot may cover a
+   credential file, so no snapshot byte is ever rendered; the row layout is
+   fixed and a failed read HIDES the block (an honest absence beats a guess).
+   Restore is a Bearer-gated POST whose server refusal renders verbatim.
+
+   X11 (Settings, CONSOLE card): GET /api/profiles is a read-only catalog of
+   presence + counts (a slot value never renders); create/remove are
+   Bearer-gated POSTs that run the SAME `aidog profile` CLI rules — the
+   server owns every refusal and its details[0] shows word for word.
+   All copy below is an English inline/fallback string: the console packs
+   stay frozen at 662 keys this lane (site/README pin that number). */
+let ckptData = null;
+
+async function refreshCheckpoints() {
+  try {
+    const r = await fetch("/api/checkpoints");
+    const d = r.ok ? await r.json() : null;
+    ckptData = (d && Array.isArray(d.entries)) ? d : null;
+  } catch (e) { ckptData = null; }
+  renderCheckpoints();
+}
+
+function renderCheckpoints() {
+  const box = document.getElementById("ckptBlock");
+  const list = document.getElementById("ckptList");
+  if (!box || !list) return;
+  if (!ckptData) { box.hidden = true; return; }   // failed/absent read: hide
+  const rows = (ckptData.entries || []).filter(
+    c => c && Number.isFinite(Number(c.id)));
+  if (!rows.length) {
+    list.innerHTML = `<div class="stat-note">${escapeHtml(
+      t("ckpt.empty", "no checkpoints yet"))}</div>`;
+    box.hidden = false;
+    return;
+  }
+  list.innerHTML = rows.map(c => {
+    const id = Number(c.id);
+    const bits = ["#" + id];
+    if (c.when) bits.push(String(c.when));
+    bits.push((Number(c.size) || 0) + " B");
+    const p = String(c.path || c.file || "");
+    const restore = `<button class="btn" type="button" ` +
+      `data-ckpt-restore="${id}" ` +
+      `title="${escapeHtml(t("ckpt.restoreTip",
+        "Restore this checkpoint — the current file is snapshotted first, so the restore is itself undoable"))}" ` +
+      `style="padding:2px 9px;font-size:12px;" ` +
+      `aria-label="restore checkpoint ${id}">` +
+      `${escapeHtml(t("ckpt.restoreBtn", "RESTORE"))}</button>`;
+    return `<div class="ctl-row" data-ckpt="${id}">` +
+      `<label style="flex:1;min-width:0;overflow-wrap:anywhere;">` +
+      `${escapeHtml(bits.join(" · "))}</label>` +
+      `<span class="stat-note" style="margin-top:0;overflow-wrap:anywhere;" ` +
+      `title="${escapeHtml(p)}">${escapeHtml(p)}</span>` +
+      restore + `</div>`;
+  }).join("");
+  box.hidden = false;
+}
+
+async function checkpointRestore(id) {
+  const msg = document.getElementById("ckptMsg");
+  if (!msg) return;
+  const ask = t("ckpt.restoreConfirm",
+    "Restore checkpoint #{id}? The current file is snapshotted first, " +
+    "so the restore is itself undoable.").replace("{id}", id);
+  if (!window.confirm(ask)) return;
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    msg.className = "save-state err";
+    msg.textContent = t("cred.needToken",
+      "access token required — set it in Access");
+    return;
+  }
+  msg.className = "save-state";
+  msg.textContent = t("ckpt.restoring", "restoring…");
+  try {
+    const res = await fetch("/api/checkpoints", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify({ action: "restore", id: Number(id) }) });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const details = Array.isArray(body.details) ? body.details : [];
+      msg.className = "save-state err";
+      msg.textContent = details[0] || body.error || ("HTTP " + res.status);
+      return;
+    }
+    msg.className = "save-state";
+    msg.textContent = t("ckpt.restored", "restored ✓");
+    refreshCheckpoints();
+  } catch (e) {
+    msg.className = "save-state err";
+    msg.textContent = t("cron.fail", "request failed — ") +
+      String((e && e.message) || e).slice(0, 80);
+  }
+}
+
+let profData = null;
+
+async function refreshProfiles() {
+  try {
+    const r = await fetch("/api/profiles");
+    const d = r.ok ? await r.json() : null;
+    profData = (d && Array.isArray(d.profiles)) ? d : null;
+  } catch (e) { profData = null; }
+  renderProfiles();
+}
+
+function renderProfiles() {
+  const list = document.getElementById("profList");
+  if (!list) return;
+  if (!profData) {
+    list.innerHTML = `<div class="stat-note">${escapeHtml(
+      t("prof.unavailable", "profiles unavailable"))}</div>`;
+    return;
+  }
+  // active name reuses the status row's own `profile` field ("" = default)
+  const active = (statusData && typeof statusData.profile === "string")
+    ? statusData.profile : String(profData.active || "");
+  const head = `<div class="stat-note" style="margin-top:0;">${escapeHtml(
+    t("prof.active", "active profile") + ": " + (active || "default"))}</div>`;
+  const rows = (profData.profiles || []).map(p => {
+    const name = String((p && p.name) || "");
+    if (!name) return "";
+    const badge = p.default
+      ? `<span class="chat-badge">${escapeHtml(
+          t("prof.defaultBadge", "default"))}</span>` : "";
+    const bits = [p.secrets ? "secrets ✓" : "secrets –",
+                  p.settings ? "settings ✓" : "settings –",
+                  p.web_port ? ("port " + p.web_port) : "port –",
+                  (p.state_files === null || p.state_files === undefined)
+                    ? "state unknown"
+                    : ("state " + p.state_files + " file" +
+                       (p.state_files === 1 ? "" : "s"))];
+    if (p.active) bits.push(t("prof.activeMark", "active"));
+    if (!p.default && p.can_remove === false) {
+      bits.push(t("prof.stateNotEmpty", "state must be empty to remove"));
+    }
+    // the × stays for every non-default row: the SERVER owns the refusal and
+    // its detail renders verbatim (hiding it would hide the honest error)
+    const del = p.default ? "" :
+      `<button class="btn" type="button" data-prof-rm="${escapeHtml(name)}" ` +
+      `title="${escapeHtml(t("prof.rmTip", "Remove this profile (only when its state dir is empty)"))}" ` +
+      `style="padding:2px 9px;font-size:12px;" ` +
+      `aria-label="remove profile ${escapeHtml(name)}">×</button>`;
+    return `<div class="ctl-row" data-prof="${escapeHtml(name)}">` +
+      `<label style="flex:1;min-width:0;overflow-wrap:anywhere;">` +
+      `${escapeHtml(name)}${badge}</label>` +
+      `<span class="stat-note" style="margin-top:0;">` +
+      `${escapeHtml(bits.join(" · "))}</span>` + del + `</div>`;
+  }).join("");
+  list.innerHTML = head + rows;
+}
+
+async function profileCreate() {
+  const btn = document.getElementById("profCreateBtn");
+  const msg = document.getElementById("profMsg");
+  const input = document.getElementById("profName");
+  if (!btn || !msg || !input) return;
+  const name = String(input.value || "").trim();
+  if (!name) {
+    msg.className = "save-state err";
+    msg.textContent = t("prof.nameRequired", "profile name required");
+    return;
+  }
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    msg.className = "save-state err";
+    msg.textContent = t("cred.needToken",
+      "access token required — set it in Access");
+    return;
+  }
+  btn.disabled = true;
+  msg.className = "save-state";
+  msg.textContent = t("prof.creating", "creating…");
+  try {
+    const res = await fetch("/api/profiles", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify({ action: "create", name: name }) });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const details = Array.isArray(body.details) ? body.details : [];
+      msg.className = "save-state err";
+      msg.textContent = details[0] || body.error || ("HTTP " + res.status);
+      return;
+    }
+    input.value = "";
+    msg.className = "save-state";
+    msg.textContent = t("prof.created", "created ✓");
+    refreshProfiles();
+  } catch (e) {
+    msg.className = "save-state err";
+    msg.textContent = t("cron.fail", "request failed — ") +
+      String((e && e.message) || e).slice(0, 80);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function profileRm(name) {
+  const msg = document.getElementById("profMsg");
+  if (!name || !msg) return;
+  const ask = t("prof.rmConfirm",
+    'Remove profile "{name}"? It is deleted only when its state dir is empty.')
+    .replace("{name}", name);
+  if (!window.confirm(ask)) return;
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    msg.className = "save-state err";
+    msg.textContent = t("cred.needToken",
+      "access token required — set it in Access");
+    return;
+  }
+  msg.className = "save-state";
+  msg.textContent = t("prof.removing", "removing…");
+  try {
+    const res = await fetch("/api/profiles", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify({ action: "rm", name: name }) });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const details = Array.isArray(body.details) ? body.details : [];
+      msg.className = "save-state err";
+      msg.textContent = details[0] || body.error || ("HTTP " + res.status);
+      return;
+    }
+    msg.className = "save-state";
+    msg.textContent = t("prof.removed", "removed ✓");
+    refreshProfiles();
+  } catch (e) {
+    msg.className = "save-state err";
+    msg.textContent = t("cron.fail", "request failed — ") +
+      String((e && e.message) || e).slice(0, 80);
   }
 }
 
@@ -5171,6 +5450,282 @@ const VIEWS = ["overview", "chat", "skills", "exchange", "evolution", "stream", 
 const QS_VIEW = (params.get("view") || "").toLowerCase();
 let currentView = VIEWS.includes(QS_VIEW) ? QS_VIEW : "overview";
 
+/* ============================ Wave 6 delta2: X12/X13/X15/X16/X17 ==========
+   Five parity faces, one lane:
+     X17 gallery  — GET /api/artifacts lists generated images (Stream view),
+                     each thumb opens the SAME single-image route
+                     (/api/media/<name>); an empty dir says so honestly.
+     X13 sessions — GET /api/sessions list/search/export in the CHAT view:
+                     substring search is LABELED as a substring scan (no FTS
+                     claim), rows carry id/time/size/summary only, exports
+                     download the server's own JSON/MD verbatim. Read-only.
+     X12 prune    — the settings switch renders its state + the one-shot disk
+                     advisory on the same panel (server owns every number).
+     X15 effort   — settings round-trip lives in initSettingsPanels /
+                     mycoreExtraPayload (opt-in, default = unchanged wire).
+     X16 vision   — an attached image is resized client-side to <=1024px JPEG
+                     and rides ONE chat turn; the server persists an honest
+                     '[image]' marker and never base64 bytes.
+   All copy is inline English or t(key, fallback): locale packs stay frozen
+   at 662 keys this lane (site/README pin that number). */
+let artData = null;      // X17 gallery payload (null = never loaded)
+let sessData = null;     // X13 sessions payload (null = never loaded)
+let pendingImage = null; // X16 {name, dataUrl} waiting for the next turn
+
+function fmtBytes(n) {
+  const v = Number(n) || 0;
+  if (v < 1024) return v + " B";
+  if (v < 1048576) return (v / 1024).toFixed(1) + " KB";
+  return (v / 1048576).toFixed(1) + " MB";
+}
+
+/* ------------------------------------------------- X17 artifacts gallery -- */
+async function refreshArtifacts() {
+  try {
+    const r = await fetch("/api/artifacts");
+    const d = r.ok ? await r.json() : null;
+    artData = (d && Array.isArray(d.images)) ? d : null;
+  } catch (e) { artData = null; }
+  renderArtifacts();
+}
+
+function renderArtifacts() {
+  const box = document.getElementById("artList");
+  const badge = document.getElementById("artBadge");
+  if (!box) return;
+  if (!artData) {                       // failed/absent read: honest, no fake
+    box.innerHTML = `<div class="stat-note">${escapeHtml(
+      t("art.unavailable", "artifacts unavailable"))}</div>`;
+    if (badge) badge.textContent = "–";
+    return;
+  }
+  const rows = artData.images || [];
+  if (badge) badge.textContent = String(artData.count ?? rows.length);
+  if (!rows.length) {
+    box.innerHTML = `<div class="stat-note">${escapeHtml(
+      t("art.empty", "no generated images yet — try IMAGE TRIAL in Chat"))}</div>`;
+    return;
+  }
+  box.innerHTML = rows.map(im => {
+    const url = "/api/media/" + encodeURIComponent(im.name);
+    const when = im.when ? new Date(im.when * 1000).toLocaleString() : "";
+    return `<div class="ctl-row art-row">` +
+      `<a href="${url}" target="_blank" rel="noopener" ` +
+      `title="${escapeHtml(t("art.open", "open full size"))}">` +
+      `<img class="art-thumb" src="${url}" alt="${escapeHtml(im.name)}" ` +
+      `loading="lazy"></a>` +
+      `<label style="flex:1;min-width:0;overflow-wrap:anywhere;">` +
+      `${escapeHtml(im.name)}</label>` +
+      `<span class="stat-note" style="margin-top:0;">` +
+      `${escapeHtml(when)} · ${fmtBytes(im.size)}</span></div>`;
+  }).join("") + (artData.truncated
+    ? `<div class="stat-note">${rows.length} of ${artData.count} shown ` +
+      `(newest first)</div>` : "");
+}
+
+/* --------------------------------------------------- X13 sessions panel --- */
+async function refreshSessions(q) {
+  const list = document.getElementById("sessList");
+  if (list) {
+    list.innerHTML = `<div class="stat-note">${escapeHtml(
+      t("sess.loading", "loading…"))}</div>`;
+  }
+  try {
+    const url = "/api/sessions" +
+      (q ? "?q=" + encodeURIComponent(q) : "");
+    const r = await fetch(url);
+    const d = r.ok ? await r.json() : null;
+    sessData = (d && Array.isArray(d.sessions)) ? d : null;
+  } catch (e) { sessData = null; }
+  renderSessions(q);
+}
+
+function renderSessions(q) {
+  const list = document.getElementById("sessList");
+  const badge = document.getElementById("sessBadge");
+  const pruneEl = document.getElementById("sessPrune");
+  if (!list) return;
+  if (!sessData) {
+    if (badge) badge.textContent = "–";
+    list.innerHTML = `<div class="stat-note">${escapeHtml(
+      t("sess.unavailable", "sessions unavailable"))}</div>`;
+    if (pruneEl) pruneEl.hidden = true;
+    return;
+  }
+  const rows = sessData.sessions || [];
+  if (badge) badge.textContent = String(sessData.count ?? rows.length);
+  if (!rows.length) {
+    list.innerHTML = `<div class="stat-note">${escapeHtml(q
+      ? t("sess.noMatch", "no session matches (substring scan)")
+      : t("sess.empty", "no sessions yet"))}</div>`;
+  } else {
+    list.innerHTML = rows.map(s => {
+      const sid = String(s.id || "");
+      const bits = [sid,
+        s.when ? new Date(s.when * 1000).toLocaleString() : "",
+        fmtBytes(s.size)];
+      const hits = (s.hits != null) ? ` · ${s.hits} hit(s)` : "";
+      const partial = s.partial ? " · partial scan" : "";
+      const exp = fmt => `<button class="btn" type="button" ` +
+        `data-sess-exp="${escapeHtml(sid)}" data-sess-fmt="${fmt}" ` +
+        `aria-label="${escapeHtml("export session " + sid + " as " + fmt)}" ` +
+        `style="padding:2px 9px;font-size:12px;">${fmt.toUpperCase()}</button>`;
+      return `<div class="ctl-row">` +
+        `<label style="flex:1;min-width:0;overflow-wrap:anywhere;">` +
+        `${escapeHtml(bits.filter(Boolean).join(" · "))}` +
+        `${escapeHtml(hits + partial)}</label>` +
+        `<span class="stat-note" style="margin-top:0;overflow-wrap:anywhere;">` +
+        `${escapeHtml(s.summary || "")}</span>` +
+        exp("json") + exp("md") + `</div>`;
+    }).join("");
+    if (sessData.search) {
+      const m = sessData.search;
+      list.innerHTML += `<div class="stat-note">${escapeHtml(
+        t("sess.matchNote", "match: ") + m.method + " scan" +
+        (m.case_insensitive ? ", case-insensitive" : "") +
+        " · " + sessData.count + " session(s) — no full-text index")}</div>`;
+    }
+  }
+  // X12: prune state + the one-shot advisory, server-owned wording
+  const pr = sessData.prune;
+  if (pruneEl) {
+    if (!pr) { pruneEl.hidden = true; return; }
+    const bits = [pr.enabled
+      ? `session auto-prune: on · keep ${pr.days} day${pr.days === 1 ? "" : "s"}`
+      : "session auto-prune: off (Settings → Model)"];
+    if (pr.enabled && pr.ran_at) {
+      bits.push(`last run ${new Date(pr.ran_at * 1000).toLocaleString()}` +
+        ` · removed ${pr.removed} · freed ${fmtBytes(pr.freed)}`);
+    }
+    if (pr.errors) bits.push(`${pr.errors} file error(s)`);
+    let txt = bits.join(" · ");
+    if (pr.advisory) txt += " — " + pr.advisory;
+    pruneEl.textContent = txt;
+    pruneEl.className = pr.advisory ? "stat-note warn" : "stat-note";
+    pruneEl.hidden = false;
+  }
+}
+
+async function sessionExport(id, fmt) {
+  const msg = document.getElementById("sessMsg");
+  try {
+    const r = await fetch("/api/sessions?id=" + encodeURIComponent(id) +
+                          "&format=" + encodeURIComponent(fmt));
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      if (msg) {
+        msg.className = "save-state err";
+        msg.textContent = String(
+          (body.details || [body.error || "error"])[0] || "");
+      }
+      return;
+    }
+    const blob = await r.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = id.split("/").pop() + (fmt === "md" ? ".md" : ".json");
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    if (msg) {
+      msg.className = "save-state";
+      msg.textContent = t("sess.exported", "exported ✓");
+    }
+  } catch (e) {
+    if (msg) {
+      msg.className = "save-state err";
+      msg.textContent = t("cron.fail", "request failed — ") +
+        String((e && e.message) || e).slice(0, 80);
+    }
+  }
+}
+
+/* ------------------------------------------------------ X16 vision input -- */
+async function chatImgPrepare(file) {
+  const dataUrl = await new Promise((res, rej) => {
+    const fr = new FileReader();
+    fr.onload = () => res(fr.result);
+    fr.onerror = () => rej(new Error("read failed"));
+    fr.readAsDataURL(file);
+  });
+  const img = await new Promise((res, rej) => {
+    const im = new Image();
+    im.onload = () => res(im);
+    im.onerror = () => rej(new Error("decode failed"));
+    im.src = dataUrl;
+  });
+  const maxDim = 1024;                  // bounded before it ever hits the wire
+  let w = img.naturalWidth || img.width || 1;
+  let h = img.naturalHeight || img.height || 1;
+  const scale = Math.min(1, maxDim / Math.max(w, h));
+  w = Math.max(1, Math.round(w * scale));
+  h = Math.max(1, Math.round(h * scale));
+  const cv = document.createElement("canvas");
+  cv.width = w; cv.height = h;
+  const ctx = cv.getContext("2d");
+  if (!ctx) throw new Error("no 2d context");
+  ctx.drawImage(img, 0, 0, w, h);
+  return { name: String(file.name || "image").slice(0, 120),
+           dataUrl: cv.toDataURL("image/jpeg", 0.85) };
+}
+
+/* --- wiring (every listener guarded: an absent element is a no-op) --- */
+const sessGoEl = document.getElementById("sessGo");
+if (sessGoEl) sessGoEl.addEventListener("click", () => {
+  const q = ((document.getElementById("sessSearch") || {}).value || "").trim();
+  refreshSessions(q);
+});
+const sessSearchEl = document.getElementById("sessSearch");
+if (sessSearchEl) sessSearchEl.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    refreshSessions(String(sessSearchEl.value || "").trim());
+  }
+});
+const sessAllEl = document.getElementById("sessAll");
+if (sessAllEl) sessAllEl.addEventListener("click", () => {
+  const box = document.getElementById("sessSearch");
+  if (box) box.value = "";
+  refreshSessions("");
+});
+const sessListEl = document.getElementById("sessList");
+if (sessListEl) sessListEl.addEventListener("click", e => {
+  const b = e.target && e.target.closest
+    ? e.target.closest("[data-sess-exp]") : null;
+  if (b) sessionExport(b.getAttribute("data-sess-exp"),
+                       b.getAttribute("data-sess-fmt"));
+});
+const chatImgEl = document.getElementById("chatImg");
+if (chatImgEl) chatImgEl.addEventListener("change", async () => {
+  const noteEl = document.getElementById("chatImgNote");
+  const file = chatImgEl.files && chatImgEl.files[0];
+  if (!file) {
+    pendingImage = null;
+    if (noteEl) noteEl.hidden = true;
+    return;
+  }
+  try {
+    pendingImage = await chatImgPrepare(file);
+    if (noteEl) {
+      noteEl.hidden = false;
+      noteEl.className = "stat-note";
+      noteEl.textContent = t("chat.imgReady", "image ready: ") +
+        pendingImage.name +
+        t("chat.imgRides", " — goes with your next message");
+    }
+  } catch (e) {
+    pendingImage = null;
+    chatImgEl.value = "";
+    if (noteEl) {
+      noteEl.hidden = false;
+      noteEl.className = "stat-note warn";
+      noteEl.textContent = t("chat.imgBad",
+        "could not read that image — pick a PNG/JPEG/WEBP");
+    }
+  }
+});
+
 function setView(name, fromUser) {
   if (!VIEWS.includes(name)) name = "overview";
   currentView = name;
@@ -5194,6 +5749,10 @@ function setView(name, fromUser) {
   // click (fresh data after a decision elsewhere) and on the first paint
   // (deep link / boot). A language switch only re-renders, it never refetches.
   if (name === "exchange" && (fromUser || exPlans === null)) exPlansLoad();
+  // Wave 6 delta2: the gallery (X17) and the session browser (X13) lazy-load
+  // with the SAME rule — first open, then only on a user nav click.
+  if (name === "stream" && (fromUser || !artData)) refreshArtifacts();
+  if (name === "chat" && (fromUser || !sessData)) refreshSessions("");
 }
 
 /* --------------------------------------------------------- topbar height -- */
@@ -5261,7 +5820,7 @@ if (exCapSaveBtnEl) exCapSaveBtnEl.addEventListener("click", exCapSave);
     mycDirty = true; mycRestartDirty = true;
   });
 });
-["mycUpstreams", "mycModels", "mycBudget"].forEach(id => {
+["mycUpstreams", "mycModels", "mycBudget", "mycPrune", "mycEffort"].forEach(id => {
   const el = document.getElementById(id);
   if (el) el.addEventListener("input", () => { mycDirty = true; });
 });
@@ -5319,6 +5878,23 @@ const cronListDelEl = document.getElementById("cronList");
 if (cronListDelEl) cronListDelEl.addEventListener("click", e => {
   const btn = e.target.closest("#cronDelBtn, [data-job]");
   if (btn && btn.dataset.job) cronDel(btn.dataset.job);
+});
+/* Wave 5: X10 checkpoint restore row + X11 profile create/remove */
+const ckptListEl = document.getElementById("ckptList");
+if (ckptListEl) ckptListEl.addEventListener("click", e => {
+  const btn = e.target.closest("[data-ckpt-restore]");
+  if (btn) checkpointRestore(btn.getAttribute("data-ckpt-restore"));
+});
+const profCreateBtnEl = document.getElementById("profCreateBtn");
+if (profCreateBtnEl) profCreateBtnEl.addEventListener("click", profileCreate);
+const profNameEl = document.getElementById("profName");
+if (profNameEl) profNameEl.addEventListener("keydown", e => {
+  if (e.key === "Enter") { e.preventDefault(); profileCreate(); }
+});
+const profListEl = document.getElementById("profList");
+if (profListEl) profListEl.addEventListener("click", e => {
+  const btn = e.target.closest("[data-prof-rm]");
+  if (btn) profileRm(btn.getAttribute("data-prof-rm"));
 });
 /* mission card (0.5.44): four actions + the tier select, all guarded */
 [["missionStartBtn", "start"], ["missionPauseBtn", "pause"],
@@ -5446,6 +6022,8 @@ refreshStatus(); refreshUsage(); refreshEvents(); refreshVersion(); refreshSkill
 loadSkillsRemote();  // car 5: per-skill availability for the ORCHESTRATION row
 refreshEvolution();
 refreshCron();           // cron list for the Overview card (+ delete row)
+refreshCheckpoints();    // X10: checkpoint catalog (Overview, metadata only)
+refreshProfiles();       // X11: profile catalog (Settings, read-only)
 refreshMission();        // mission board: honest idle until the first probe
 refreshSetup();          // activation car: Overview checklist (hidden if 404)
 loadChatHistory();   // console session restored at boot (read-only route)

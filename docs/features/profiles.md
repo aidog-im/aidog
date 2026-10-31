@@ -90,6 +90,7 @@ default layer is additionally scanned for profile-marker bytes by the suite
 | `bash deploy/profile_ctl.sh start\|stop\|status <name>` | `start` gates on `run_service.sh --check` (credentials never touch argv), then tmux pair `aidog_svc_<name>` (service, own state root) + `aidog_web_<name>` (console on `profile.json` `web_port`); `stop` kills **exactly those two session names** (never a broad `pkill`); `status` prints session state + probes **`/api/health` and asserts `status == "ok"`** so a foreign process squatting the port does not read as up. The default stack (`aidog_web`/`aidog_svc`/`aidog_mwd`, owned by `boot_services.sh`) is only ever read, never touched |
 | `profile_ctl` exit codes | **0** ok · **1** usage/state error · **2** bad name · **3** not provisioned · **4** no bot token · **5** profile dir missing |
 | `/api/status` | carries `"profile": <active name>` (empty string = default); the console header appends `· <name>` to the status summary only when non-empty — default output is byte-for-byte pre-car-F, and no locale key was added (bare noun) |
+| Web console (0.5.51, X11) | Settings → CONSOLE `PROFILES` card: `GET /api/profiles` (read-only list — name / default flag / presence counts and port only, **zero value echo**), `POST /api/profiles {action:"create"\|"rm", name}` (**Bearer-gated**; the server validates `[a-z0-9][a-z0-9_-]{0,31}` and the reserved `default` *before* spawning `aidog_persist.py profile <action> <name>` — the CLI stays the single source of truth; **rm has NO `--force`**: a profile whose `state/` holds files is refused, `default` can never be removed; the CLI's first line lands verbatim in `details[0]`, and every refusal writes an audit line) |
 
 ## 6. Verification
 
@@ -97,6 +98,7 @@ default layer is additionally scanned for profile-marker bytes by the suite
 |---|---|---|
 | Isolation suite (offline, stdlib, writes confined to `/tmp`) | `python3 tests/profile_f.py` | **63/63** — path seams 12 · dual-profile subprocess cross-check 24 · stack + skill roots 8 · `aidog profile` CLI 12 · `run_service.sh` semantics 5 · end-of-suite default-layer scan 2 |
 | Car-F E2E (real machine, temporary script) | `python3 tmp/e2e_car_f.py` | **18/18** — 18 legs incl. baseline/final byte-identical default layer, profile console on 18791–18795, token-gated POST, fail-closed `--check` rc 3/4/5 |
+| Console management surface probe (0.5.51, X11) | `node tmp/parity_delta1_verify.js` | **41/41** incl. profiles legs: create valid/invalid/duplicate names, rm `default` refused, rm non-empty refused, rm empty succeeds, zero value echo in DOM+API, production default layer byte-identical at teardown |
 | Full gate line (car G, v0.5.32) | see HANDOVER §3 | core **1020/1020** · smoke **154/154** · router **30/30** · memory **58/58** · setup **99/99** · profile **63/63** · desktop **15/15** · publish **READY(0)** |
 
 The suite's core leg runs **two real `ChatService` child processes**

@@ -49,6 +49,13 @@ def resolve_model_config() -> ModelConfig:
                 cfg.model = mc["model"]
             if isinstance(mc.get("upstreams"), str) and mc["upstreams"].strip():
                 raw_upstreams = mc["upstreams"]
+            # X15 (Wave 6 delta2): opt-in per-model request param. Settings
+            # mycore.reasoning_effort is the only producer; anything else
+            # (absent / "" / hand-edited junk) leaves extra_body empty, so the
+            # request payload stays byte-identical to the pre-X15 wire.
+            eff = mc.get("reasoning_effort")
+            if isinstance(eff, str) and eff in ("low", "medium", "high"):
+                cfg.extra_body = {"reasoning_effort": eff}
     except (OSError, ValueError):
         pass
     if os.environ.get("MYCORE_BASE_URL"):
