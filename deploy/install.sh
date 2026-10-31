@@ -22,7 +22,8 @@
 #
 # Usage:
 #   bash deploy/install.sh     # from a clone of the product repository
-#   aidog setup                # same thing, once the CLI is installed
+#   aidog setup                # interactive wizard (fill slots, then boot +
+#                              # verify); --check status, --yes = this script
 #
 # English output per repo i18n policy (all docs/source are English).
 set -uo pipefail

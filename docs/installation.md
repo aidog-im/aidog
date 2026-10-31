@@ -20,8 +20,8 @@ you — by **name**, never by value — exactly what still needs a human.
 ```bash
 git clone <product-repo-url> aidog && cd aidog   # private repo: clone access required
 bash deploy/install.sh                           # <- the one command
-$EDITOR secrets.env                              # fill the slots it lists (by name)
-aidog setup                                      # re-run: goes READY when green
+aidog setup                                      # guided wizard: fill the slots it lists
+aidog setup --check                              # any time: read-only status (0/2/1)
 ```
 
 The installer is **idempotent** — it never overwrites files you already have,
@@ -29,6 +29,34 @@ so re-running it is always safe (it doubles as the repair/verify command).
 
 Exit codes: `0` ready · `2` installed but credentials/backend pending
 (fail-closed by design, nothing broken) · `1` hard failure.
+
+## Setup wizard
+
+`aidog setup` (no flags) walks every slot interactively instead of leaving you
+with `$EDITOR secrets.env`:
+
+- **filled slots are reported and kept** (`NAME set (len N)`) — the wizard
+  never overwrites; rotate a value by editing `secrets.env` yourself;
+- **empty slots are prompted** — secrets use hidden input on a TTY, and no
+  value is ever echoed back (output carries slot names and lengths only);
+- **each answer is validated** (token format, comma-separated ids, http(s)
+  endpoint …); an invalid answer is retried up to 3× with the reason, then the
+  slot stays empty (fail-closed);
+- **every write is read back and syntax-checked** (`own-line KEY=value` for
+  `secrets.env`, JSON re-parse for `web/settings.json`);
+- at the end it offers to run the installer (doctor + boot + verify), or skip
+  with `--no-boot`.
+
+Non-interactive variants (CI / scripted):
+
+| Command | Behavior | Exit |
+|---|---|---|
+| `aidog setup --check` | read-only slot + format report, creates nothing | `0` ready · `2` pending · `1` broken |
+| `aidog setup --yes` | the idempotent installer (provision + boot + verify) | installer's `0/2/1` |
+| `aidog setup --yes --no-boot` | provision + report only, never boots | `0/2` |
+
+A non-TTY `aidog setup` (no flags) falls back to `--yes`, so scripts keep the
+old provision + boot + verify behavior without ever blocking on a prompt.
 
 ## What the installer does
 
@@ -96,7 +124,7 @@ and exits `2` — that is an honest "no brain configured yet", not a crash.
 
 | Task | Command |
 |---|---|
-| Re-verify any time | `aidog setup` |
+| Re-verify any time | `aidog setup --check` (read-only) or `aidog setup --yes` (boot + verify) |
 | Health report | `python3 deploy/aidog_doctor.py` (exit 0 = no FAIL) |
 | Stop / start runtime | `bash deploy/boot_services.sh stop` / `start` (or `status`) |
 | Check for a new version | `python3 deploy/aidog_update.py check` (console shows an upgrade banner too) |

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """aidog_persist — I'm AiDog CLI: one-command setup + memory portability.
 
-  ./aidog setup                # provision machine-local files, install CLI,
-                               # boot and verify (idempotent fresh-install/repair)
+  ./aidog setup                # interactive setup wizard (fill/validate
+                               # credential slots, then optional boot + verify);
+                               # --check = status report, --yes = non-interactive
+                               # idempotent installer (provision + boot + verify)
   ./aidog export [--src DIR] [--persona DIR] [--out DIR] [--tag NAME]
   ./aidog import <tarball> [--dest-profile DIR] [--source-home DIR] [--persona-home DIR]
   ./aidog list [--dir DIR]
@@ -542,11 +544,23 @@ def cmd_list(args: argparse.Namespace) -> int:
 
 # ---------------------------------------------------------------------------
 
-def cmd_setup(_args: argparse.Namespace) -> int:
-    """One-command install/repair: run deploy/install.sh (idempotent)."""
+def cmd_setup(args: argparse.Namespace) -> int:
+    """B3: delegate to deploy/aidog_setup.py (interactive wizard; --check/--yes
+    /--no-boot flags). `aidog setup` with no flags = wizard when stdin is a
+    TTY, otherwise the idempotent installer (scripted runs keep the old
+    provision + boot + verify behavior)."""
     import subprocess
-    script = Path(__file__).resolve().parent / "install.sh"
-    return subprocess.call(["bash", str(script)])
+    setup_py = Path(__file__).resolve().parent / "aidog_setup.py"
+    flags: list[str] = []
+    if getattr(args, "check", False):
+        flags.append("--check")
+    if getattr(args, "yes", False):
+        flags.append("--yes")
+    if getattr(args, "no_boot", False):
+        flags.append("--no-boot")
+    if not flags and not sys.stdin.isatty():
+        flags.append("--yes")  # scripted: never block on prompts
+    return subprocess.call([sys.executable, str(setup_py), *flags])
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -557,7 +571,13 @@ def build_parser() -> argparse.ArgumentParser:
                     "memory bundles (private memory repo transport).")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    s = sub.add_parser("setup", help="provision machine-local files, install the CLI, boot and verify (idempotent)")
+    s = sub.add_parser("setup", help="interactive setup wizard (fill credential slots, validate, boot); --check status only, --yes non-interactive installer")
+    s.add_argument("--check", action="store_true",
+                   help="report slot status only (exit 0 ready / 2 pending / 1 error)")
+    s.add_argument("--yes", action="store_true",
+                   help="non-interactive: run deploy/install.sh (provision + boot + verify)")
+    s.add_argument("--no-boot", action="store_true",
+                   help="skip the boot/verify step (wizard: no final question; --yes: provision + report only)")
     s.set_defaults(func=cmd_setup)
 
     e = sub.add_parser("export", help="bundle memory (+persona) into a manifest tarball")

@@ -19,13 +19,17 @@ by this repo / business layer). Authoritative design document:
 ```bash
 git clone <product-repo-url> aidog && cd aidog   # private repo
 bash deploy/install.sh                           # one command: provision + boot + verify
-$EDITOR secrets.env                              # fill the slots it lists (by name)
-aidog setup                                      # re-run until it prints READY
+aidog setup                                      # guided wizard: fills the slots it lists
+                                                  # (hidden input, values never echoed)
 ```
 
-The installer creates every machine-local file (all gitignored) from sanitized
-templates, installs the `aidog` command, boots the runtime, and reports exactly
-which credential slots remain — by name, never by value. Full guide:
+The installer creates every machine-local file (all gitignored) from
+sanitized templates, installs the `aidog` command, boots the runtime, and
+reports exactly which credential slots remain — by name, never by value.
+`aidog setup` is the
+interactive follow-up (filled slots are kept, empty ones prompted, every write
+read back and checked; `--check` for a read-only report, `--yes` for the old
+non-interactive installer). Full guide:
 [`docs/installation.md`](docs/installation.md).
 
 ## Language / i18n
