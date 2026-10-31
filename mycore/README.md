@@ -3,7 +3,9 @@
 Model-agnostic agent loop + minimal toolset + simple compaction, written from
 scratch in Python stdlib only (zero third-party dependencies). Owner-approved
 scope: design doc §14.3 — loop + 8 tools + simple compaction + TG adapter +
-watchdog, developed under dual-brain A/B against the transitional kernel.
+watchdog, developed under dual-brain A/B against the transitional kernel;
+extended by owner approval (Phase B2, v0.5.20) with the 9th tool `cron` and
+the `scheduler.py` module (natural-language cron).
 
 **Status: P4-1a scaffold** — loop, model client, tool registry, compaction
 skeleton, offline test suite. The transitional kernel keeps running in
@@ -19,7 +21,8 @@ mycore/
 │                #   env only, never echoed/logged; injectable transport for tests
 ├── loop.py      # agent loop: messages -> model -> tool_calls -> execute -> repeat
 │                #   bounded iterations, honest tool errors, stop on final text
-├── tools.py     # tool registry (OpenAI JSON-schema shape) + the 8 core tools
+├── tools.py     # tool registry (OpenAI JSON-schema shape) + the 9 core tools
+│                #   (the 9th, `cron`, shares its spec grammar with /cron)
 ├── compact.py   # simple compaction: budgeted truncation of old turns
 ├── assembly.py  # body layer -> system stack (constitution/memory always first,
 │                #   missing files -> honest notices, digest for A/B provenance)
@@ -33,6 +36,9 @@ mycore/
 │                #   allowlist auth -> per-chat JSONL session + slash commands ->
 │                #   reply; single-instance pidfile, redacting service.log,
 │                #   --once / --dry-run (offline-tested; not yet wired to boot)
+├── scheduler.py # natural-language cron (Phase B2): job registry
+│                #   <state>/cron_jobs.json, one spec grammar for /cron + the
+│                #   `cron` tool, due/catch-up math, Beijing fixed +08:00
 ├── cli.py       # one-shot runner: python3 -m mycore.cli "prompt" (A/B harness口)
 └── tests/       # offline: fake transports, no network, no credentials
 ```

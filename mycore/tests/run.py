@@ -116,10 +116,10 @@ def test_registry_and_tools() -> None:
     with tempfile.TemporaryDirectory() as td:
         reg = build_registry(allowed_roots=[td])
         names = reg.names()
-        check("tools: exactly 8 core tools", len(names) == 8, str(names))
+        check("tools: exactly 9 core tools", len(names) == 9, str(names))
         check("tools: expected set", set(names) == {
             "read_file", "write_file", "edit_file", "run_bash",
-            "grep", "glob", "http_fetch", "skill_route"}, str(names))
+            "grep", "glob", "http_fetch", "skill_route", "cron"}, str(names))
         schema = reg.schema()
         check("tools: schema shape",
               all(t["type"] == "function" and "parameters" in t["function"]
@@ -1495,6 +1495,426 @@ def test_evolution() -> None:
               kinds.count("learn.memory") >= 1 and kinds[-1] == "learn.memory")
 
 
+def test_scheduler() -> None:
+    """Phase B2 natural-language cron: spec grammar, due matrix, registry
+    persistence, the `cron` tool, and the /cron service leg — all offline
+    (fake transport, injected model, temp state dirs)."""
+    from datetime import datetime as _dt
+    from mycore import scheduler as sch
+    from mycore.service import ChatService
+    from mycore.tg import POLL_BOT_ENV
+    import os as _os
+
+    # --- spec grammar: the four canonical forms ---
+    check("cron: spec every", sch.parse_spec("every 30m")
+          == {"type": "interval", "minutes": 30})
+    check("cron: spec every hours", sch.parse_spec("every 2h")
+          == {"type": "interval", "minutes": 120})
+    check("cron: spec daily", sch.parse_spec("daily 08:00")
+          == {"type": "daily", "time": "08:00"})
+    check("cron: spec weekly", sch.parse_spec("weekly mon 09:00")
+          == {"type": "weekly", "weekday": "mon", "time": "09:00"})
+    check("cron: spec once", sch.parse_spec("once 2026-10-26 09:00")
+          == {"type": "once", "at": "2026-10-26 09:00"})
+    check("cron: describe round-trips the spec",
+          sch.describe(sch.parse_spec("every 2h")) == "every 2h"
+          and sch.describe(sch.parse_spec("weekly sun 23:59"))
+          == "weekly sun 23:59")
+    # --- refusal paths (each SpecError text is chat-safe) ---
+    bad = ["", "   ", "sometimes 09:00", "daily 9:00", "daily 25:00",
+           "weekly moon 09:00", "weekly mon 9am", "every 0m", "every 99999m",
+           "every 30", "every 30 min", "once 2026-13-01 09:00",
+           "once 2026-02-30 09:00", "once tomorrow 09:00", "daily", "once"]
+    for spec in bad:
+        try:
+            sch.parse_spec(spec)
+            check(f"cron: reject {spec!r}", False, "accepted")
+        except sch.SpecError as e:
+            ok = "/mnt/" not in str(e) and "/root/" not in str(e)
+            check(f"cron: reject {spec!r}", ok, str(e))
+
+    NOW = _dt(2026, 10, 20, 22, 0, tzinfo=sch.BEIJING).timestamp()
+
+    # --- due matrix: daily ---
+    jobs = []
+    d = sch.create_job(jobs, "daily 09:10", "stretch", now=NOW - 3600)
+    check("cron: daily not due before its time",
+          not sch.is_due(d, NOW - 12 * 3600 + 8 * 3600))   # 08:00 same day
+    day8 = _dt(2026, 10, 20, 8, 0, tzinfo=sch.BEIJING).timestamp()
+    day910 = _dt(2026, 10, 20, 9, 10, tzinfo=sch.BEIJING).timestamp()
+    day911 = _dt(2026, 10, 20, 9, 11, tzinfo=sch.BEIJING).timestamp()
+    d2 = sch.create_job(jobs, "daily 09:10", "x", now=day8)
+    check("cron: daily due after its time", sch.is_due(d2, day911))
+    check("cron: daily not due before its time (same day)",
+          not sch.is_due(d2, day8 + 60))
+    sch.mark_fired(d2, day911)
+    check("cron: daily silent for the rest of the fire day",
+          not sch.is_due(d2, day911 + 60))
+    tomorrow910 = day911 + 24 * 3600 - 60
+    check("cron: daily due again next day", sch.is_due(d2, tomorrow910))
+    late = sch.create_job(jobs, "daily 09:10", "x",
+                          now=_dt(2026, 10, 20, 10, 0,
+                                  tzinfo=sch.BEIJING).timestamp())
+    check("cron: created after today's time waits for tomorrow",
+          not sch.is_due(late, _dt(2026, 10, 20, 23, 0,
+                                   tzinfo=sch.BEIJING).timestamp())
+          and sch.is_due(late, tomorrow910 + 24 * 3600))
+
+    # --- due matrix: weekly (latest occurrence walk-back) ---
+    # 2026-10-20 is a Tuesday; weekly mon 09:00's latest occurrence <= now
+    # is Monday 2026-10-19 09:00.
+    w = sch.create_job(jobs, "weekly mon 09:00", "x",
+                       now=_dt(2026, 10, 12, 8, 0,
+                               tzinfo=sch.BEIJING).timestamp())
+    mon911 = _dt(2026, 10, 19, 9, 11, tzinfo=sch.BEIJING).timestamp()
+    check("cron: weekly due after this week's occurrence",
+          sch.is_due(w, NOW) and sch.is_due(w, mon911))
+    sch.mark_fired(w, mon911)
+    check("cron: weekly silent until next occurrence",
+          not sch.is_due(w, NOW))
+    check("cron: weekly due again the following week",
+          sch.is_due(w, NOW + 6 * 24 * 3600))
+    w2 = sch.create_job(jobs, "weekly mon 09:00", "x",
+                        now=_dt(2026, 10, 20, 10, 0,
+                                tzinfo=sch.BEIJING).timestamp())
+    check("cron: weekly created after this week's Monday waits a week",
+          not sch.is_due(w2, NOW)
+          and sch.is_due(w2, _dt(2026, 10, 26, 9, 11,
+                                 tzinfo=sch.BEIJING).timestamp()))
+
+    # --- due matrix: interval (anchor moves, no fire burst) ---
+    iv = sch.create_job(jobs, "every 5m", "x", now=NOW)
+    check("cron: interval not due before N minutes",
+          not sch.is_due(iv, NOW + 299))
+    check("cron: interval due at N minutes", sch.is_due(iv, NOW + 300))
+    sch.mark_fired(iv, NOW + 700)                     # late fire (downtime)
+    check("cron: interval reschedules from the fire (no burst)",
+          not sch.is_due(iv, NOW + 700 + 299)
+          and sch.is_due(iv, NOW + 700 + 300))
+    check("cron: interval first fire is created_at + N",
+          sch.is_due(sch.create_job(jobs, "every 1m", "x", now=NOW),
+                     NOW + 60))
+
+    # --- due matrix: once ---
+    once = sch.create_job(
+        jobs, "once 2026-10-26 09:00", "x", now=NOW)
+    check("cron: once not due before its datetime",
+          not sch.is_due(once, NOW))
+    once_at = _dt(2026, 10, 26, 9, 0, tzinfo=sch.BEIJING).timestamp()
+    check("cron: once due at its datetime", sch.is_due(once, once_at + 1))
+    sch.mark_fired(once, once_at + 1)
+    check("cron: once fires exactly once then is done",
+          once["done"] and not sch.is_due(once, once_at + 3600)
+          and sch.next_fire(once, once_at) is None)
+    try:
+        sch.create_job(jobs, "once 2020-01-01 09:00", "x", now=NOW)
+        check("cron: once in the past refused", False, "accepted")
+    except sch.SpecError:
+        check("cron: once in the past refused", True)
+
+    # --- create caps + id shape ---
+    for bad_text in ("", "   ", "x" * (sch.MAX_TEXT + 1)):
+        try:
+            sch.create_job(jobs, "daily 09:00", bad_text, now=NOW)
+            check(f"cron: text cap {len(bad_text)}", False, "accepted")
+        except sch.SpecError:
+            check(f"cron: text cap {len(bad_text)}", True)
+    try:
+        sch.create_job(jobs, "daily 09:00", "x", kind="shout", now=NOW)
+        check("cron: unknown kind refused", False, "accepted")
+    except sch.SpecError:
+        check("cron: unknown kind refused", True)
+    one = sch.create_job([], "daily 09:00", "x", now=NOW)
+    check("cron: id is 6 hex chars", bool(re.fullmatch(r"[0-9a-f]{6}",
+                                                       one["id"])), one["id"])
+    full = [sch.create_job([], "daily 09:00", f"t{i}", now=NOW)
+            for i in range(sch.MAX_JOBS)]
+    try:
+        sch.create_job(full, "daily 09:00", "x", now=NOW)
+        check("cron: job limit enforced", False, "accepted")
+    except sch.SpecError:
+        check("cron: job limit enforced", True)
+
+    # --- registry persistence: round-trip + fail-soft ---
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "cron_jobs.json"
+        sch.save_jobs(p, [d, once])
+        back = sch.load_jobs(p)
+        check("cron: save/load round-trip keeps fields",
+              len(back) == 2 and back[0]["text"] == "stretch"
+              and back[1]["kind"] == "message"
+              and back[0]["origin"] == d["origin"])
+        p.write_text("{ not json", encoding="utf-8")
+        check("cron: corrupt registry loads empty (fail-soft)",
+              sch.load_jobs(p) == [])
+        p.write_text(json.dumps({"jobs": [d, {"id": "x", "type": "daily"},
+                                        42, "nope"]}), encoding="utf-8")
+        check("cron: garbage entries dropped on load",
+              len(sch.load_jobs(p)) == 1)
+        check("cron: missing registry loads empty",
+              sch.load_jobs(Path(td) / "absent.json") == [])
+        removed = sch.delete_job(back, d["id"])
+        check("cron: delete by id", removed and len(back) == 1)
+        check("cron: delete unknown id is a no-op",
+              not sch.delete_job(back, "zzzzzz"))
+
+    # --- the `cron` tool (registry leg) ---
+    with tempfile.TemporaryDirectory() as td:
+        reg = build_registry(state_dir=td)
+        out = reg.dispatch("cron", {"action": "list"})
+        check("cron: tool list on empty registry", out == "no scheduled jobs")
+        out = reg.dispatch("cron", {"action": "create", "spec": "daily 09:00",
+                                    "text": "tool job"})
+        check("cron: tool create echoes id + next",
+              out.startswith("scheduled ") and "daily 09:00" in out, out)
+        saved = sch.load_jobs(Path(td) / sch.STATE_FILE_NAME)
+        check("cron: tool create persisted with origin=None",
+              len(saved) == 1 and saved[0]["source"] == "model"
+              and saved[0]["origin"] is None)
+        jid = saved[0]["id"]
+        check("cron: tool list shows the job",
+              jid in reg.dispatch("cron", {"action": "list"}))
+        check("cron: tool delete",
+              reg.dispatch("cron", {"action": "delete", "id": jid})
+              == f"deleted {jid}"
+              and sch.load_jobs(Path(td) / sch.STATE_FILE_NAME) == [])
+        for args, why in (
+                ({"action": "create", "spec": "daily 09:00"}, "missing text"),
+                ({"action": "create", "spec": "nope", "text": "x"}, "bad spec"),
+                ({"action": "delete", "id": "nope00"}, "unknown id"),
+                ({"action": "delete"}, "delete without id"),
+                ({"action": "explode"}, "unknown action")):
+            res = reg.dispatch("cron", args)
+            check(f"cron: tool ERROR path ({why})",
+                  res.startswith("ERROR:"), res[:80])
+        # origin context: a job created inside a chat turn remembers it
+        sch.set_origin(555000)
+        try:
+            reg.dispatch("cron", {"action": "create", "spec": "every 1m",
+                                  "text": "origin job"})
+        finally:
+            sch.clear_origin()
+        oj = sch.load_jobs(Path(td) / sch.STATE_FILE_NAME)
+        check("cron: tool create inside a turn records the origin chat",
+              len(oj) == 1 and oj[0]["origin"] == 555000)
+        check("cron: origin context cleared after the turn",
+              sch.get_origin() is None)
+
+    # --- service leg: /cron command + fire + delivery ---
+    saved_tok = _os.environ.get(POLL_BOT_ENV)
+    saved_wd = _os.environ.get("MYCORE_WD_CHAT")
+    _os.environ[POLL_BOT_ENV] = "second-bot-TEST-token"
+    _os.environ.pop("MYCORE_WD_CHAT", None)
+    try:
+        clock = [float((NOW))]
+        nowf = lambda: clock[0]  # noqa: E731
+        fake = FakeTgTransport()
+        with tempfile.TemporaryDirectory() as td:
+            svc = ChatService(Path(td), frozenset({111}), transport=fake,
+                              chat=lambda messages=None, tools=None, **kw:
+                              fake_response(text="pong"), now=nowf)
+
+            def cmd(text, cid=424242, uid=111, upd=1):
+                before = len(fake.sends)
+                svc.handle_update(mk_update(upd, uid, cid, text))
+                return fake.sends[before][1] if len(fake.sends) > before \
+                    else None
+
+            # help advertises the command (en pack)
+            from lib import i18n as _i18n
+            check("cron: /help lists /cron (en)",
+                  "/cron" in _i18n.get("en", "cmd.help.body"))
+            check("cron: /help lists /cron (zh)",
+                  "/cron" in _i18n.get("zh", "cmd.help.body"))
+
+            out = cmd("/cron")
+            check("cron: /cron list empty is honest",
+                  out is not None and "no cron jobs" in out, str(out))
+            out = cmd("/cron add daily 09:10 :: drink water")
+            reg_path = Path(td) / sch.STATE_FILE_NAME
+            jobs_now = sch.load_jobs(reg_path)
+            check("cron: /cron add creates + stamps origin chat",
+                  out.startswith("cron ") and "created" in out
+                  and len(jobs_now) == 1
+                  and jobs_now[0]["origin"] == 424242
+                  and jobs_now[0]["source"] == "command", str(out))
+            jid = jobs_now[0]["id"]
+            out = cmd("/cron")
+            check("cron: /cron list shows id + spec + preview",
+                  jid in out and "daily 09:10" in out and "drink water" in out,
+                  str(out))
+            out = cmd("/cron add prompt weekly fri 08:00 :: weekly digest")
+            jobs_now = sch.load_jobs(reg_path)
+            check("cron: /cron add prompt kind",
+                  "prompt" in out and jobs_now[-1]["kind"] == "prompt"
+                  and jobs_now[-1]["type"] == "weekly", str(out))
+            out = cmd("/cron add whenever :: x")
+            check("cron: /cron add bad spec rejected with hint",
+                  out is not None and "rejected" in out
+                  and "every 30m" in out, str(out))
+            check("cron: rejected add writes nothing",
+                  len(sch.load_jobs(reg_path)) == 2)
+            out = cmd("/cron add daily 09:00")
+            check("cron: /cron add without :: shows usage",
+                  out is not None and "/cron add" in out, str(out))
+            out = cmd("/cron del nope00")
+            check("cron: /cron del miss is honest",
+                  out is not None and "nope00" in out, str(out))
+            out = cmd("/cron del " + jid)
+            check("cron: /cron del removes the job",
+                  "deleted" in str(out)
+                  and all(j["id"] != jid for j in sch.load_jobs(reg_path)))
+            out = cmd("/cron frobnicate")
+            check("cron: /cron unknown subcommand -> usage",
+                  out is not None and "/cron add" in out, str(out))
+            check("cron: unauthorized /cron never answered",
+                  cmd("/cron", uid=999, upd=99) is None)
+
+            # --- fire: message job -> origin chat ---
+            fake.sends.clear()
+            sch.save_jobs(reg_path, [])
+            jl = sch.load_jobs(reg_path)
+            sch.create_job(jl, "every 1m", "ring ring", origin=424242,
+                           now=clock[0])
+            sch.save_jobs(reg_path, jl)
+            svc._cron_check = 0.0
+            svc._maybe_fire_cron()                       # not due yet
+            check("cron: fire leg idle before the window",
+                  fake.sends == [] and "CRON_FIRE"
+                  not in svc.log.read_text())
+            clock[0] += 70
+            svc._cron_check = 0.0
+            svc._maybe_fire_cron()
+            check("cron: due message job delivered to its origin chat",
+                  fake.sends == [("424242", "ring ring")], str(fake.sends))
+            log = svc.log.read_text()
+            check("cron: CRON_FIRE logged with delivery facts",
+                  "CRON_FIRE" in log and "delivered=origin" in log
+                  and "ring ring" in log and "kind=message" in log)
+            fired = sch.load_jobs(reg_path)
+            check("cron: mark persisted before/after execution",
+                  fired[0]["last_fired"] is not None)
+            svc._cron_check = 0.0
+            svc._maybe_fire_cron()                       # within interval
+            check("cron: no duplicate fire inside the interval",
+                  fake.sends == [("424242", "ring ring")])
+
+            # --- throttle: 60s cadence like the evolution leg ---
+            sch.save_jobs(reg_path, [])
+            jl = sch.load_jobs(reg_path)
+            sch.create_job(jl, "every 1m", "throttled", origin=424242,
+                           now=clock[0] - 120)
+            sch.save_jobs(reg_path, jl)
+            svc._cron_check = clock[0]                   # checked just now
+            fires_before = svc.log.read_text().count("CRON_FIRE")
+            svc._maybe_fire_cron()
+            check("cron: fire leg throttled to the cadence",
+                  svc.log.read_text().count("CRON_FIRE") == fires_before
+                  and "throttled" not in [s[1] for s in fake.sends])
+            clock[0] += 61
+            svc._maybe_fire_cron()
+            check("cron: fire leg runs after the cadence window",
+                  "throttled" in [s[1] for s in fake.sends])
+
+            # --- delivery fallbacks: MYCORE_WD_CHAT, then log-only ---
+            sch.save_jobs(reg_path, [])
+            jl = sch.load_jobs(reg_path)
+            sch.create_job(jl, "every 1m", "to wd chat", origin=None,
+                           now=clock[0] - 120)
+            sch.save_jobs(reg_path, jl)
+            _os.environ["MYCORE_WD_CHAT"] = "777000"
+            fake.sends.clear()
+            svc._cron_check = 0.0
+            svc._maybe_fire_cron()
+            check("cron: no origin -> MYCORE_WD_CHAT",
+                  fake.sends == [("777000", "to wd chat")], str(fake.sends))
+            check("cron: wd delivery logged",
+                  "delivered=wd" in svc.log.read_text())
+
+            sch.save_jobs(reg_path, [])
+            jl = sch.load_jobs(reg_path)
+            sch.create_job(jl, "every 1m", "nowhere to go", origin=None,
+                           now=clock[0] - 120)
+            sch.save_jobs(reg_path, jl)
+            _os.environ.pop("MYCORE_WD_CHAT", None)
+            fake.sends.clear()
+            svc._cron_check = 0.0
+            svc._maybe_fire_cron()
+            check("cron: no target at all -> log-only, never an error",
+                  fake.sends == [] and "delivered=none" in svc.log.read_text())
+            check("cron: log-only fire still marks the job",
+                  sch.load_jobs(reg_path)[0]["last_fired"] is not None)
+
+            _os.environ["MYCORE_WD_CHAT"] = "not-an-id"
+            check("cron: garbage MYCORE_WD_CHAT -> None (fail-soft)",
+                  svc._wd_chat_target() is None)
+            _os.environ["MYCORE_WD_CHAT"] = "777000"
+            check("cron: int MYCORE_WD_CHAT -> target",
+                  svc._wd_chat_target() == 777000)
+            _os.environ.pop("MYCORE_WD_CHAT", None)
+
+            # --- prompt job: runs one model turn, delivers its result ---
+            sch.save_jobs(reg_path, [])
+            jl = sch.load_jobs(reg_path)
+            sch.create_job(jl, "every 1m", "summarize my day", kind="prompt",
+                           origin=424242, now=clock[0] - 120)
+            sch.save_jobs(reg_path, jl)
+            fake.sends.clear()
+            svc._cron_check = 0.0
+            svc._maybe_fire_cron()
+            check("cron: prompt job delivers the model reply",
+                  fake.sends == [("424242", "pong")], str(fake.sends))
+
+            # --- dry-run: evaluated, marked, never sent ---
+            sch.save_jobs(reg_path, [])
+            jl = sch.load_jobs(reg_path)
+            sch.create_job(jl, "every 1m", "dry", origin=424242,
+                           now=clock[0] - 120)
+            sch.save_jobs(reg_path, jl)
+            svc.dry_run = True
+            fake.sends.clear()
+            svc._cron_check = 0.0
+            svc._maybe_fire_cron()
+            check("cron: dry-run skips the send but still fires+logs",
+                  fake.sends == [] and "DRYRUN_SEND" in svc.log.read_text()
+                  and "delivered=origin" in svc.log.read_text())
+            svc.dry_run = False
+
+            # --- NL entry end-to-end: speech -> model -> cron tool ---
+            sch.save_jobs(reg_path, [])
+            script = [fake_response(calls=[("cron", {
+                          "action": "create", "spec": "daily 07:30",
+                          "text": "morning stretch"})]),
+                      fake_response(text="scheduled for 07:30 daily")]
+            svc.chat = ScriptedChat(script).chat
+            svc.handle_update(mk_update(7, 111, 424242,
+                                        "remind me to stretch every morning"))
+            nl_jobs = sch.load_jobs(reg_path)
+            check("cron: NL turn -> tool call -> job with origin chat",
+                  len(nl_jobs) == 1 and nl_jobs[0]["origin"] == 424242
+                  and nl_jobs[0]["type"] == "daily"
+                  and nl_jobs[0]["source"] == "model", str(nl_jobs))
+            check("cron: NL turn answered in chat too",
+                  fake.sends[-1][1] == "scheduled for 07:30 daily",
+                  str(fake.sends[-1]))
+            # second turn must not inherit a stale origin
+            svc.chat = lambda messages=None, tools=None, **kw: \
+                fake_response(text="ok")
+            svc.handle_update(mk_update(8, 111, 424242, "hello again"))
+            check("cron: origin context does not leak across turns",
+                  sch.get_origin() is None)
+    finally:
+        if saved_tok is None:
+            _os.environ.pop(POLL_BOT_ENV, None)
+        else:
+            _os.environ[POLL_BOT_ENV] = saved_tok
+        if saved_wd is None:
+            _os.environ.pop("MYCORE_WD_CHAT", None)
+        else:
+            _os.environ["MYCORE_WD_CHAT"] = saved_wd
+        sch.clear_origin()
+
+
 def _sse_body(*frames) -> str:
     """Build an SSE body from chunk dicts — one data line each, then [DONE]."""
     out = []
@@ -1861,6 +2281,7 @@ def main() -> int:
     test_watchdog()
     test_service()
     test_evolution()
+    test_scheduler()
     test_stream()
     test_loop_on_delta()
     test_typing()

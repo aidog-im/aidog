@@ -1,9 +1,15 @@
-"""mycore.tools — tool registry + the 8 core tools (design §14.3).
+"""mycore.tools — tool registry + the 9 core tools (design §14.3 + Phase B2).
 
 Registry exposes OpenAI JSON-schema `tools` for the model boundary and a
 dispatcher for the loop. Handler contract (README): return `str`; exceptions
 become honest `ERROR:` strings — a failing tool never crashes the loop.
 Path tools enforce allowed roots (README contract 4). stdlib only.
+
+The 9th tool (`cron`, v0.5.20) is the natural-language entry: the model
+translates plain speech into a scheduler spec string (mycore.scheduler owns
+one shared grammar, so /cron and the tool can never drift). Its handler
+captures `state_dir` at build_registry() time and resolves the default path
+lazily at call time (env AIDOG_MC_STATE read when the tool actually runs).
 English comments per repo i18n policy.
 """
 from __future__ import annotations
@@ -13,6 +19,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -313,9 +320,64 @@ _STR = {"type": "string"}
 _INT = {"type": "integer"}
 
 
-def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None) -> ToolRegistry:
-    """The 8 core tools (design §14.3). `allowed_roots` overrides path policy
-    (tests use temp dirs; production default = repo + system temp)."""
+def _cron(action: str, spec: str | None, text: str | None, kind: str | None,
+          job_id: str | None, state_dir: str | Path | None) -> str:
+    """The `cron` tool handler (Phase B2). Same spec grammar and registry as
+    /cron — only the entry differs. Returns honest strings; refusals become
+    ToolError -> `ERROR: <reason>` (the model can then correct itself)."""
+    from . import scheduler  # local import: keeps the module graph acyclic
+
+    if not isinstance(action, str):
+        raise ToolError("action must be create | list | delete")
+    path = (Path(state_dir) / scheduler.STATE_FILE_NAME
+            if state_dir is not None else scheduler.default_jobs_path())
+    jobs = scheduler.load_jobs(path)
+    if action == "list":
+        if not jobs:
+            return "no scheduled jobs"
+        now = time.time()
+        lines = []
+        for j in jobs:
+            state = " (done)" if j.get("done") else ""
+            lines.append(f"{j['id']} · {scheduler.describe(j)} · "
+                         f"{j.get('kind')} · next "
+                         f"{scheduler.fmt_beijing(scheduler.next_fire(j, now))}"
+                         f"{state} · {j.get('text', '')[:60]}")
+        return "\n".join(lines)
+    if action == "delete":
+        if not job_id:
+            raise ToolError("delete needs the job id (see list)")
+        if not scheduler.delete_job(jobs, job_id):
+            raise ToolError(f"no job with id {job_id}")
+        try:
+            scheduler.save_jobs(path, jobs)
+        except OSError:
+            raise ToolError("job registry is not writable") from None
+        return f"deleted {job_id}"
+    if action == "create":
+        if not spec or not text:
+            raise ToolError("create needs spec and text")
+        try:
+            job = scheduler.create_job(jobs, spec, text, kind=kind or "message",
+                                       source="model",
+                                       origin=scheduler.get_origin())
+            scheduler.save_jobs(path, jobs)
+        except scheduler.SpecError as e:
+            raise ToolError(str(e)) from None
+        except OSError:
+            raise ToolError("job registry is not writable") from None
+        return (f"scheduled {job['id']}: {scheduler.describe(job)} · "
+                f"{job['kind']} · next "
+                f"{scheduler.fmt_beijing(scheduler.next_fire(job, time.time()))}")
+    raise ToolError(f"action must be create | list | delete (got {action!r})")
+
+
+def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
+                   state_dir: str | Path | None = None) -> ToolRegistry:
+    """The 9 core tools (design §14.3 + cron/Phase B2). `allowed_roots`
+    overrides path policy (tests use temp dirs; production default = repo +
+    system temp). `state_dir` anchors the cron registry (service passes its
+    own state dir; None = resolve AIDOG_MC_STATE at tool-call time)."""
     roots = tuple(allowed_roots) if allowed_roots else DEFAULT_ALLOWED_ROOTS
     r = ToolRegistry()
     r.register("read_file", "Read a text file with line numbers.",
@@ -355,4 +417,21 @@ def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None) -> 
                {"type": "object", "properties": {"query": _STR, "topn": _INT},
                 "required": ["query"]},
                lambda query, topn=3: _skill_route(query, topn))
+    r.register("cron", "Create, list, or delete scheduled jobs (natural-language cron). "
+               "Translate the user's words into spec: 'remind me every day at 8' -> "
+               "'daily 08:00'; 'every 30 minutes' -> 'every 30m'; 'next Monday 09:00' "
+               "-> a 'once' date or 'weekly mon 09:00'. Spec forms: every <N>m|h | "
+               "daily HH:MM | weekly <mon..sun> HH:MM | once YYYY-MM-DD HH:MM "
+               "(Beijing time). kind='message' delivers text verbatim; kind='prompt' "
+               "runs one model turn and delivers its result.",
+               {"type": "object", "properties": {
+                   "action": {"type": "string",
+                              "enum": ["create", "list", "delete"]},
+                   "spec": _STR, "text": _STR,
+                   "kind": {"type": "string",
+                              "enum": ["message", "prompt"]},
+                   "id": _STR},
+                "required": ["action"]},
+               lambda action, spec=None, text=None, kind="message", id=None:
+               _cron(action, spec, text, kind, id, state_dir))
     return r

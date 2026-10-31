@@ -55,6 +55,17 @@ allowlist gate — unauthenticated /commands are ignored like any message):
     /reflect [daily|weekly|monthly]  generate the period skeleton (facts only;
             the Human conclusion section stays the owner's to write)
     /evolution  loop status: schedule, last runs, counts, log tail
+    /cron       natural-language cron job registry (Phase B2):
+            /cron  list jobs (id · spec · kind · next fire · text preview)
+            /cron add [message|prompt] <spec> :: <text>  create a job
+                    (spec: every 30m | daily 08:00 | weekly mon 08:00 |
+                     once YYYY-MM-DD HH:MM — Beijing time; message = the
+                     text is delivered as-is, prompt = one model turn runs
+                     and its result is delivered)
+            /cron del <id>  remove a job
+            Delivery on fire: the origin chat that created the job, else
+            env MYCORE_WD_CHAT, else log-only (never an error — the fire
+            still runs and is recorded as CRON_FIRE in service.log).
 
 Modes:
     --once    fetch at most ONE getUpdates batch (short poll), handle at most
@@ -89,6 +100,7 @@ from pathlib import Path
 
 from . import cli
 from . import evolution
+from . import scheduler
 from .assembly import build_system_stack
 from .loop import run_turn
 from .model import ChatClient
@@ -130,6 +142,12 @@ NO_OUTPUT_LINE = i18n.get(i18n.DEFAULT_LANG, "err.no_output",
                           "(no output — see logs)")
 MODEL_ERR_LINE = i18n.get(i18n.DEFAULT_LANG, "err.model",
                           "(model error — the turn stopped; see service logs)")
+
+# Cron delivery target: env MYCORE_WD_CHAT (int chat id; the same slot the
+# watchdog alerts use — operator-provisioned). Empty/garbage -> the fire
+# still runs and is logged, only the send is skipped (honest log-only).
+WD_CHAT_ENV = "MYCORE_WD_CHAT"
+WD_CHAT_RE = re.compile(r"^-?[0-9]+$")
 INTERNAL_ERR_LINE = i18n.get(i18n.DEFAULT_LANG, "err.internal",
                              "(internal error — the turn stopped; see service logs)")
 
@@ -343,12 +361,13 @@ class ChatService:
         self._stop = False
         self._deny_stamp: dict[str, float] = {}
         self._reflect_check = 0.0       # last evolution cron evaluation (clock)
+        self._cron_check = 0.0          # last scheduler evaluation (clock)
         self.log = ServiceLog(self.state / LOG_NAME, now=now)
         self.lang = self._load_lang()
         # HARD token gate (tg.py): dedicated MYCORE_TG_TOKEN required here too.
         self.tg = TgClient(token=TgClient.polling_token(),
                            token_env=POLL_BOT_ENV, transport=transport)
-        self.registry = build_registry()
+        self.registry = build_registry(state_dir=self.state)
 
     # ------------------------------------------------------------ control ---
     def stop(self) -> None:
@@ -429,6 +448,7 @@ class ChatService:
                     continue
                 errors = 0
                 self._maybe_reflect()          # evolution cron leg (no-op when off)
+                self._maybe_fire_cron()        # scheduler leg (no-op with no due jobs)
                 if once and not updates:
                     break                          # nothing pending: exit 0
                 for upd in updates:
@@ -629,6 +649,8 @@ class ChatService:
             return self._reflect_command(arg)
         if name == "evolution":
             return self._evolution_command()
+        if name == "cron":
+            return self._cron_command(chat_id, arg)
         return self._t("cmd.unknown")
 
     def _lang_command(self, chat_id: int, arg: str) -> str:
@@ -801,6 +823,152 @@ class ChatService:
         except Exception as e:  # noqa: BLE001 — a reflect failure never kills the loop
             self.log.write("REFLECT_ERR", f"err={type(e).__name__}")
 
+    def _cron_command(self, chat_id: int, arg: str) -> str:
+        """`/cron` (list) · `/cron add [kind] <spec> :: <text>` · `/cron del <id>`.
+
+        The structured leg of the dual-driven scheduler (the model `cron`
+        tool shares this grammar and registry). Creation stamps the origin
+        chat so a fired job knows where to answer."""
+        words = arg.strip().split(None, 1)
+        sub = (words[0].lower() if words else "list")
+        rest = words[1].strip() if len(words) > 1 else ""
+        path = self.state / scheduler.STATE_FILE_NAME
+        if sub in ("list", "ls"):
+            try:
+                jobs = scheduler.load_jobs(path)
+            except OSError:
+                return self._t("cmd.cron.fail")
+            if not jobs:
+                return self._t("cmd.cron.empty")
+            now = self._now()
+            lines = [self._t("cmd.cron.list_head", n=len(jobs))]
+            for j in jobs:
+                state = self._t("cmd.cron.done") if j.get("done") else ""
+                lines.append(
+                    f"  {j['id']} · {scheduler.describe(j)} · {j.get('kind')} · "
+                    f"{self._t('cmd.cron.next')} "
+                    f"{scheduler.fmt_beijing(scheduler.next_fire(j, now))}"
+                    f"{state} · {str(j.get('text', ''))[:40]}")
+            return "\n".join(lines)
+        if sub in ("add", "new"):
+            kind = "message"
+            body = rest
+            head, sep, tail = rest.partition("::")
+            if not sep:
+                return self._t("cmd.cron.usage")
+            head_words = head.split()
+            if head_words and head_words[0].lower() in scheduler.KINDS:
+                kind = head_words[0].lower()
+                head = " ".join(head_words[1:])
+            try:
+                job = None
+                jobs = scheduler.load_jobs(path)
+                job = scheduler.create_job(jobs, head.strip(), tail, kind=kind,
+                                           source="command", origin=chat_id,
+                                           now=self._now())
+                scheduler.save_jobs(path, jobs)
+            except scheduler.SpecError as e:
+                self.log.write("CRON_REJECT", f"chat={redact_chat(chat_id)}",
+                               f"reason={str(e)[:60]}")
+                return self._t("cmd.cron.bad_spec", detail=str(e))
+            except OSError:
+                self.log.write("CRON_ERR", "op=add", "err=write_failed")
+                return self._t("cmd.cron.fail")
+            self.log.write("CRON_ADD", f"chat={redact_chat(chat_id)}",
+                           f"id={job['id']}", f"kind={job['kind']}")
+            return self._t("cmd.cron.added", id=job['id'],
+                           spec=scheduler.describe(job), kind=job['kind'],
+                           nxt=scheduler.fmt_beijing(
+                               scheduler.next_fire(job, self._now())))
+        if sub in ("del", "delete", "rm"):
+            job_id = rest.split()[0] if rest.split() else ""
+            if not job_id:
+                return self._t("cmd.cron.usage")
+            try:
+                jobs = scheduler.load_jobs(path)
+                removed = scheduler.delete_job(jobs, job_id)
+                if removed:
+                    scheduler.save_jobs(path, jobs)
+            except OSError:
+                self.log.write("CRON_ERR", "op=del", "err=write_failed")
+                return self._t("cmd.cron.fail")
+            if not removed:
+                return self._t("cmd.cron.del_miss", id=job_id)
+            self.log.write("CRON_DEL", f"chat={redact_chat(chat_id)}",
+                           f"id={job_id}")
+            return self._t("cmd.cron.deleted", id=job_id)
+        return self._t("cmd.cron.usage")
+
+    def _wd_chat_target(self) -> int | None:
+        """Fallback delivery chat: env MYCORE_WD_CHAT when it is a plain
+        integer; unset/garbage -> None (log-only, by design)."""
+        raw = os.environ.get(WD_CHAT_ENV, "").strip()
+        return int(raw) if WD_CHAT_RE.fullmatch(raw) else None
+
+    def _cron_deliver(self, job: dict, text: str) -> str:
+        """One fired job's output -> origin chat, else MYCORE_WD_CHAT, else
+        log-only. Returns the delivery label for CRON_FIRE (observed fact)."""
+        origin = job.get("origin")
+        target = origin if isinstance(origin, int) else self._wd_chat_target()
+        if not isinstance(target, int):
+            return "none"
+        self._send(target, text)
+        return "origin" if target == origin else "wd"
+
+    def _cron_prompt_text(self, job: dict) -> str:
+        """kind=prompt: run ONE fresh model turn (constitution stack + the
+        stored text; tools enabled, no session persistence) and return the
+        reply — honest short lines on any stop, same mapping as _pipeline."""
+        cfg = cli.resolve_model_config()
+        chat_fn = self.chat or ChatClient(cfg).chat
+        messages = build_system_stack() + [{"role": "user",
+                                            "content": job.get("text", "")}]
+        try:
+            res = run_turn(messages, chat_fn, self.registry,
+                           budget_chars=self._budget())
+        except Exception as e:  # noqa: BLE001 — run_turn never raises; belt anyway
+            self.log.write("CRON_ERR", f"id={job.get('id', '?')}",
+                           f"err={type(e).__name__}")
+            return self._t("err.internal")
+        if res.stop == "final":
+            return res.text.strip() or self._t("err.no_output")
+        if res.stop == "max_iters":
+            return self._t("err.max_iters", n=res.iterations)
+        self.log.write("CRON_ERR", f"id={job.get('id', '?')}",
+                       "err=model", f"detail={res.text[:160]}")
+        return self._t("err.model")
+
+    def _maybe_fire_cron(self) -> None:
+        """Scheduler leg (Phase B2): throttled to CRON cadence like the
+        evolution leg; mark-first-then-execute (a crash loses one delivery,
+        never duplicates one); delivery target = origin > MYCORE_WD_CHAT >
+        log-only. A fire failure never kills the poll loop."""
+        nowt = self._now()
+        if nowt - self._cron_check < REFLECT_CHECK_SEC:
+            return
+        self._cron_check = nowt
+        path = self.state / scheduler.STATE_FILE_NAME
+        try:
+            jobs = scheduler.load_jobs(path)
+            due = scheduler.due_jobs(jobs, nowt)
+            if not due:
+                return
+            for job in due:
+                scheduler.mark_fired(job, nowt)
+                scheduler.save_jobs(path, jobs)   # persist BEFORE execution
+                if job.get("kind") == "prompt":
+                    text = self._cron_prompt_text(job)
+                else:
+                    text = str(job.get("text", ""))
+                label = self._cron_deliver(job, text)
+                preview = _scrub_paths(text)[:80]
+                self.log.write("CRON_FIRE", f"id={job.get('id', '?')}",
+                               f"kind={job.get('kind', '?')}",
+                               f"type={job.get('type', '?')}",
+                               f"delivered={label}", f"preview={preview}")
+        except Exception as e:  # noqa: BLE001 — a fire failure never kills the loop
+            self.log.write("CRON_ERR", f"err={type(e).__name__}")
+
     # ------------------------------------------------------------ turn ------
     def _typing_heartbeat(self, chat_id: int):
         """Start a best-effort `typing` indicator for one pipeline turn and
@@ -834,13 +1002,17 @@ class ChatService:
 
         Returns the final reply text (honest short lines on failure); the
         caller performs the single send. Commands never enter here, so the
-        typing heartbeat covers exactly the long part (model + tools).
+        typing heartbeat covers exactly the long part (model + tools), and
+        the scheduler origin is pinned for the whole turn (a `cron` tool
+        call inside it records this chat as the job's delivery target).
         """
         stop_beat = self._typing_heartbeat(chat_id)
+        scheduler.set_origin(chat_id)   # cron tool remembers where it was asked
         try:
             return self._pipeline_body(chat_id, text)
         finally:
             stop_beat()
+            scheduler.clear_origin()
 
     def _pipeline_body(self, chat_id: int, text: str) -> str:
         cfg = self._model_for_chat(chat_id)
