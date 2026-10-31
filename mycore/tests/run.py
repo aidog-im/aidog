@@ -40,6 +40,31 @@ def check(name: str, ok: bool, detail: str = "") -> None:
     print(f"{'PASS' if ok else 'FAIL'}  {name}" + (f"  ({detail})" if detail and not ok else ""))
 
 
+# ------------------------------------------------- car 4b tool-set baseline --
+CORE_TOOLS = frozenset({
+    "read_file", "write_file", "edit_file", "run_bash",
+    "grep", "glob", "http_fetch", "skill_route", "cron",
+    "delegate", "execute_code"})
+BROWSER_TOOLS = frozenset({
+    "browser_open", "browser_snapshot", "browser_click",
+    "browser_type", "browser_screenshot", "browser_close"})
+
+
+def expected_tool_names() -> frozenset[str]:
+    """Core 11 + the six browser_* tools IFF a browser binary is discoverable
+    (car 4b capability-honest registration). The suite must be green both on
+    hosts with a browser and without — and with AIDOG_BROWSER_BIN overridden
+    to a dead path — so every count assertion derives from this, never a
+    literal."""
+    try:
+        from mycore import browser as _br
+        if _br.available():
+            return CORE_TOOLS | BROWSER_TOOLS
+    except Exception:  # noqa: BLE001 — no browser module edge = core only
+        pass
+    return CORE_TOOLS
+
+
 # ------------------------------------------------------------ fake model ----
 
 def fake_response(text=None, calls=None) -> dict:
@@ -129,11 +154,10 @@ def test_registry_and_tools() -> None:
     with tempfile.TemporaryDirectory() as td:
         reg = build_registry(allowed_roots=[td])
         names = reg.names()
-        check("tools: exactly 11 core tools", len(names) == 11, str(names))
-        check("tools: expected set", set(names) == {
-            "read_file", "write_file", "edit_file", "run_bash",
-            "grep", "glob", "http_fetch", "skill_route", "cron",
-            "delegate", "execute_code"}, str(names))
+        exp = expected_tool_names()
+        check("tools: count = core 11 (+browser 6 when discovered)",
+              len(names) == len(exp), str(names))
+        check("tools: expected set", set(names) == set(exp), str(names))
         schema = reg.schema()
         check("tools: schema shape",
               all(t["type"] == "function" and "parameters" in t["function"]
@@ -3145,8 +3169,9 @@ def test_subagent() -> None:
         check("d6: sub tools read-only",
               chat.seen_tools[1] == set(subagent.DEFAULT_READ_ONLY),
               str(sorted(chat.seen_tools[1])))
-        check("d6: parent tools still 11",
-              len(chat.seen_tools[0]) == 11, str(len(chat.seen_tools[0])))
+        check("d6: parent tools = full registry",
+              set(chat.seen_tools[0]) == set(expected_tool_names()),
+              str(sorted(chat.seen_tools[0])))
 
         # 3) grant by name: write_file becomes available to the sub-agent
         p = str(Path(td) / "granted.txt")
@@ -3747,14 +3772,14 @@ for line in sys.stdin:
             "command": f"{sys.executable} -c \"import sys;sys.exit(7)\""}])
         reg2 = build_registry(allowed_roots=[td], mcp_raw=raw_bad)
         check("mcp: dead server skipped",
-              len(reg2.names()) == 11
+              len(reg2.names()) == len(expected_tool_names())
               and any("dead" in n and "SKIPPED" in n
                       for n in reg2.mcp_notes), str(reg2.mcp_notes))
 
         # invalid config -> honest note, never a crash
         reg3 = build_registry(allowed_roots=[td], mcp_raw="{broken")
         check("mcp: invalid config -> note",
-              len(reg3.names()) == 11
+              len(reg3.names()) == len(expected_tool_names())
               and any("invalid" in n for n in reg3.mcp_notes),
               str(reg3.mcp_notes))
 
@@ -5907,6 +5932,336 @@ def test_tg_topics() -> None:
             _os.environ[POLL_BOT_ENV] = saved_tok
 
 
+def test_browser() -> None:
+    """Car 4b browser automation — OFFLINE unit surface: URL policy, @eN ref
+    parsing, binary discovery (env-authoritative), and capability-honest
+    registration. The real CDP wire (launch/navigate/click/screenshot) lives
+    in tmp/e2e_car4b.py — this section never launches a browser."""
+    from mycore import browser as br
+
+    # --- URL policy: http/https only, browser-UI/local-file schemes refused
+    allowed = ("http://127.0.0.1:8790/x", "https://example.com/a?b=1")
+    check("browser: http/https urls pass the policy",
+          all(br._check_url(u) == u for u in allowed), str(allowed))
+    blocked = ("chrome://settings", "about:blank", "file:///etc/passwd",
+               "data:text/html,x", "javascript:alert(1)", "blob:http://x/y",
+               "devtools://x", "view-source:http://x", "ftp://x/y")
+    refused = []
+    for u in blocked:
+        try:
+            br._check_url(u)
+            refused.append(u)
+        except Exception:  # noqa: BLE001 — any error = refusal (ToolError)
+            pass
+    check("browser: blocked schemes all refused", not refused, str(refused))
+    for bad in ("", "   ", "noscheme/path", 42, None):
+        try:
+            br._check_url(bad)
+            check(f"browser: bad url {bad!r} refused", False, "accepted")
+        except Exception:  # noqa: BLE001
+            check(f"browser: bad url {bad!r} refused", True)
+    try:
+        br._check_url("http://")
+        check("browser: hostless url refused", False, "accepted")
+    except Exception:  # noqa: BLE001
+        check("browser: hostless url refused", True)
+
+    # --- @eN ref parsing (positional, snapshot-scoped)
+    check("browser: ref parsing accepts @eN / eN / bare N",
+          br._ref_index("@e1") == 1 and br._ref_index(" e2 ") == 2
+          and br._ref_index("17") == 17, "parse ok")
+    for bad_ref in ("@e0", "abc", "", "@ex", 5, None):
+        try:
+            br._ref_index(bad_ref)
+            check(f"browser: bad ref {bad_ref!r} refused", False, "accepted")
+        except Exception:  # noqa: BLE001
+            check(f"browser: bad ref {bad_ref!r} refused", True)
+
+    # --- discovery: AIDOG_BROWSER_BIN is AUTHORITATIVE (set-but-bad fails loud)
+    saved_env = os.environ.get("AIDOG_BROWSER_BIN")
+    try:
+        os.environ["AIDOG_BROWSER_BIN"] = "/nonexistent/chrome-binary"
+        path, attempts = br.find_binary()
+        check("browser: dead env override -> None + named in attempts",
+              path is None and any("AIDOG_BROWSER_BIN" in a for a in attempts),
+              f"path={path} attempts={attempts}")
+        check("browser: available() honors dead override",
+              br.available() is False)
+        reg = build_registry(allowed_roots=[tempfile.mkdtemp(prefix="br_reg_")])
+        check("browser: no binary -> tools NOT registered + note set",
+              not (set(reg.names()) & set(BROWSER_TOOLS))
+              and bool(getattr(reg, "browser_note", "")),
+              f"note={getattr(reg, 'browser_note', None)!r}")
+        check("browser: hidden tool dispatches honest unknown",
+              reg.dispatch("browser_open", {"url": "http://x"})
+              .startswith("ERROR: unknown tool"))
+
+        # a real executable path (fake, never launched) -> tools register
+        fake_bin = Path(tempfile.mkdtemp(prefix="br_fake_")) / "chrome"
+        fake_bin.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        fake_bin.chmod(0o755)
+        os.environ["AIDOG_BROWSER_BIN"] = str(fake_bin)
+        path2, _ = br.find_binary()
+        reg2 = build_registry(allowed_roots=[tempfile.mkdtemp(prefix="br_reg2_")])
+        got = set(reg2.names()) & set(BROWSER_TOOLS)
+        check("browser: valid override -> all 6 tools registered, no note",
+              path2 == str(fake_bin) and got == set(BROWSER_TOOLS)
+              and getattr(reg2, "browser_note", None) is None,
+              f"path={path2} got={sorted(got)}")
+    finally:
+        if saved_env is None:
+            os.environ.pop("AIDOG_BROWSER_BIN", None)
+        else:
+            os.environ["AIDOG_BROWSER_BIN"] = saved_env
+
+    # --- default discovery consistency (host-dependent result, honest either way)
+    p3, _a3 = br.find_binary()
+    check("browser: find_binary/available agree under default discovery",
+          (p3 is not None) == br.available(), f"path={p3}")
+    reg3 = build_registry(allowed_roots=[tempfile.mkdtemp(prefix="br_reg3_")])
+    check("browser: registry matches default discovery (tools iff binary)",
+          (bool(set(reg3.names()) & set(BROWSER_TOOLS)) == br.available())
+          and (getattr(reg3, "browser_note", None) is None) == br.available(),
+          f"available={br.available()} note={getattr(reg3, 'browser_note', None)!r}")
+
+
+def test_terminal() -> None:
+    """Car 4b terminal backends — grammar, local output contract (byte-stable
+    vs the historical run_bash), honest missing-binary failures, and the
+    settings hot-switch routing in tools._run_bash. Docker/ssh real wire lives
+    in tmp/e2e_car4b.py."""
+    from mycore import terminal as tm
+    from mycore import tools as tools_mod
+
+    # --- parse: the 7 valid forms
+    for spec, kind in (("", "local"), ("local", "local"),
+                       ("docker:image=ubuntu:latest", "docker"),
+                       ("docker:container=aidog-box", "docker"),
+                       ("ssh:me@example.com", "ssh"),
+                       ("ssh:me@10.0.0.5:2222", "ssh"),
+                       ("ssh:me@host;identity=<HOME_DIR>/id_ed25519", "ssh")):
+        try:
+            be = tm.parse(spec)
+            check(f"terminal: parse {spec or '(empty)'}", be.kind == kind,
+                  f"got {be.kind}")
+        except ValueError as e:
+            check(f"terminal: parse {spec or '(empty)'}", False, str(e))
+    be = tm.parse("ssh:me@10.0.0.5:2222")
+    check("terminal: ssh port parsed",
+          be.user == "me" and be.host == "10.0.0.5" and be.port == 2222,
+          str(be))
+    be = tm.parse("ssh:me@host;identity=/k/id")
+    check("terminal: ssh identity path parsed",
+          be.identity == "/k/id" and be.port == 22, str(be))
+
+    # --- parse: invalid forms refused, message never echoes the input
+    canary = "zzCANARYzz"
+    bad_specs = [f"bogus:{canary}", "docker:", "docker:bad=1",
+                 f"docker:image=x;identity=/k{canary}", "ssh://x",
+                 f"ssh:{canary}", "ssh:u@h;password=pw",
+                 "ssh:u@h:99999", "ssh:u@h;identity=relative/path",
+                 "x" * 300, "local; rm -rf /"]
+    for spec in bad_specs:
+        try:
+            tm.parse(spec)
+            check(f"terminal: invalid {spec[:24]!r} refused", False,
+                  "accepted")
+        except ValueError as e:
+            # anti-echo: the input must never appear. Short grammar fragments
+            # ("docker:", len<=7) legitimately substring the FIXED help text —
+            # the canary and every real payload must be absent.
+            check(f"terminal: invalid {spec[:24]!r} refused",
+                  canary not in str(e)
+                  and (spec not in str(e) or len(spec) <= 7), str(e))
+    for spec in (42, None, ["local"]):
+        try:
+            tm.parse(spec)
+            check(f"terminal: non-string {type(spec).__name__} refused", False)
+        except ValueError:
+            check(f"terminal: non-string {type(spec).__name__} refused", True)
+
+    # --- local run: byte-stable contract vs historical _run_bash
+    local = tm.parse("")
+    check("terminal: local echo contract",
+          tm.run(local, "echo hi", 5) == "exit=0\nhi",
+          repr(tm.run(local, "echo hi", 5)))
+    out = tm.run(local, "echo oop >&2; exit 3", 5)
+    check("terminal: local stderr block + exit code",
+          out.startswith("exit=3") and "--- stderr ---" in out
+          and "oop" in out, repr(out))
+    check("terminal: local trailing whitespace rstripped",
+          tm.run(local, "printf 'a  \\n\\n'", 5) == "exit=0\na",
+          repr(tm.run(local, "printf 'a  \\n\\n'", 5)))
+    for args in (("", 5), ("   ", 5), ("echo x", 0), ("echo x", -1),
+                 ("echo x", True)):
+        try:
+            tm.run(local, *args)
+            check(f"terminal: bad run args {args!r} -> TerminalError", False)
+        except tm.TerminalError:
+            check(f"terminal: bad run args {args!r} -> TerminalError", True)
+        except Exception as e:  # noqa: BLE001
+            check(f"terminal: bad run args {args!r} -> TerminalError", False,
+                  type(e).__name__)
+    try:
+        tm.run(local, "sleep 3", 1)
+        check("terminal: timeout raises TerminalError", False, "no error")
+    except tm.TerminalError as e:
+        check("terminal: timeout raises TerminalError",
+              "timed out" in str(e), str(e))
+
+    # --- missing binary (PATH emptied): honest TerminalError, both backends
+    saved_path = os.environ.get("PATH", "")
+    try:
+        os.environ["PATH"] = "/nonexistent-bin-dir"
+        for spec in ("docker:image=ubuntu:latest", "ssh:u@h"):
+            try:
+                tm.run(tm.parse(spec), "echo x", 5)
+                check(f"terminal: missing binary for {spec.split(':')[0]}",
+                      False, "no error")
+            except tm.TerminalError as e:
+                check(f"terminal: missing binary for {spec.split(':')[0]}",
+                      "not found in PATH" in str(e), str(e))
+    finally:
+        os.environ["PATH"] = saved_path
+
+    # --- tools-level routing via the settings seam (monkeypatched, real
+    # web/settings.json never touched)
+    orig_spec_fn = tools_mod._shell_spec
+    try:
+        tools_mod._shell_spec = lambda: ""
+        r = tools_mod._run_bash("echo loc", 5, ("",))
+        check("terminal: run_bash empty spec -> local", r == "exit=0\nloc", r)
+        tools_mod._shell_spec = lambda: f"bogus::{canary}"
+        try:
+            tools_mod._run_bash("echo x", 5, ("",))
+            check("terminal: run_bash invalid spec -> ToolError, no echo",
+                  False, "no error")
+        except Exception as e:  # noqa: BLE001 — tools.ToolError
+            check("terminal: run_bash invalid spec -> ToolError, no echo",
+                  "mycore.shell" in str(e) and canary not in str(e), str(e))
+        tools_mod._shell_spec = lambda: "docker:image=ubuntu:latest"
+        os.environ["PATH"] = "/nonexistent-bin-dir"
+        try:
+            tools_mod._run_bash("echo x", 5, ("",))
+            check("terminal: run_bash docker w/o binary -> ToolError", False)
+        except Exception as e:  # noqa: BLE001
+            check("terminal: run_bash docker w/o binary -> ToolError",
+                  "docker" in str(e).lower(), str(e))
+        os.environ["PATH"] = saved_path
+    finally:
+        tools_mod._shell_spec = orig_spec_fn
+        os.environ["PATH"] = saved_path
+
+    # --- tool description reflects the backend abstraction
+    reg = build_registry(allowed_roots=[tempfile.mkdtemp(prefix="term_reg_")])
+    desc = next((t["function"]["description"] for t in reg.schema()
+                 if t["function"]["name"] == "run_bash"), "")
+    check("terminal: run_bash description names the backend setting",
+          "mycore.shell" in desc, desc[:120])
+
+
+def test_localmodels() -> None:
+    """Car 4b zero-key onboarding — probe() parsing/filtering with an injected
+    _fetch (offline, zero sockets; the wizard leg + real HTTP are covered by
+    tests/setup_wizard_b3.py and tmp/e2e_car4b.py)."""
+    from mycore import localmodels as lm
+
+    # --- payload shapes
+    check("localmodels: ollama shape -> first model name",
+          lm._model_of({"models": [{"name": "qwen:7b"}]}, "ollama")
+          == "qwen:7b")
+    check("localmodels: openai shape -> first id",
+          lm._model_of({"data": [{"id": "llama-3"}]}, "openai")
+          == "llama-3")
+    bad_payloads = (None, {}, {"models": []}, {"data": []},
+                    {"models": [{}]}, {"data": [{"id": "  "}]},
+                    {"models": "nope"}, {"data": [{"id": 42}]}, "str")
+    check("localmodels: malformed payloads -> empty model",
+          all(lm._model_of(p, s) == ""
+              for p in bad_payloads for s in ("ollama", "openai")),
+          str(bad_payloads))
+
+    calls: list[str] = []
+    orig_fetch, orig_probes = lm._fetch, lm.DEFAULT_PROBES
+    saved_env = os.environ.get("AIDOG_LOCAL_MODEL_PROBES")
+    try:
+        # --- env override: comma list, whitespace/trailing comma tolerated,
+        # uniform OpenAI <url>/models shape, kind=local
+        def fake_ok(url: str):
+            calls.append(url)
+            return {"data": [{"id": "m1"}]}
+        lm._fetch = fake_ok
+        os.environ["AIDOG_LOCAL_MODEL_PROBES"] = (
+            "http://127.0.0.1:18100/v1, http://127.0.0.1:18101/v1, ,")
+        found = lm.probe()
+        check("localmodels: override probes comma list -> 2 local entries",
+              len(found) == 2
+              and all(e["kind"] == "local" and e["model"] == "m1"
+                      for e in found)
+              and [e["base_url"] for e in found]
+              == ["http://127.0.0.1:18100/v1", "http://127.0.0.1:18101/v1"],
+              str(found))
+        check("localmodels: override URLs normalized to <url>/models",
+              calls == ["http://127.0.0.1:18100/v1/models",
+                        "http://127.0.0.1:18101/v1/models"], str(calls))
+        calls.clear()
+        os.environ["AIDOG_LOCAL_MODEL_PROBES"] = "http://127.0.0.1:18102/v1/models"
+        lm.probe()
+        check("localmodels: override .../models passed through verbatim",
+              calls == ["http://127.0.0.1:18102/v1/models"], str(calls))
+
+        # --- default probe path: deterministic via monkeypatched DEFAULT_PROBES
+        os.environ.pop("AIDOG_LOCAL_MODEL_PROBES", None)
+        lm.DEFAULT_PROBES = (
+            ("ollama", "http://127.0.0.1:59991/api/tags", "ollama",
+             "http://127.0.0.1:59991/v1"),
+            ("llamacpp", "http://127.0.0.1:59992/v1/models", "openai",
+             "http://127.0.0.1:59992/v1"),
+            ("lmstudio", "http://127.0.0.1:59993/v1/models", "openai",
+             "http://127.0.0.1:59993/v1"))
+        lm._fetch = lambda u: None
+        check("localmodels: all probes dead -> []", lm.probe() == [])
+        lm._fetch = lambda u: ({"models": [{"name": "qwen:7b"}]}
+                               if u.endswith("/api/tags")
+                               else {"data": [{"id": "llama-3"}]})
+        found = lm.probe()
+        check("localmodels: default probes -> per-kind entries + base_url",
+              [e["kind"] for e in found] == ["ollama", "llamacpp", "lmstudio"]
+              and found[0]["base_url"] == "http://127.0.0.1:59991/v1"
+              and found[1]["model"] == "llama-3", str(found))
+        lm._fetch = lambda u: {"models": [{"name": "  "}]}
+        check("localmodels: blank model name counts as not detected",
+              lm.probe() == [], str(lm.probe()))
+
+        # --- never raises: a throwing fetch must not escape probe()
+        def boom(u):
+            raise RuntimeError("exploded")
+        lm._fetch = boom
+        check("localmodels: probe never raises on fetch failure",
+              lm.probe() == [])
+        lm._fetch = lambda u: ["not", "a", "dict"]
+        check("localmodels: non-object payload -> not detected",
+              lm.probe() == [])
+
+        # --- describe: one line per entry, three fields only, no credential keys
+        lines = lm.describe([{"kind": "ollama",
+                              "base_url": "http://127.0.0.1:11434/v1",
+                              "model": "qwen:7b"}])
+        check("localmodels: describe renders kind+url+model",
+              len(lines) == 1 and "ollama" in lines[0]
+              and "11434" in lines[0] and "qwen:7b" in lines[0]
+              and "key" not in lines[0].lower(), str(lines))
+        check("localmodels: describe tolerant of junk/empty",
+              lm.describe([]) == []
+              and lm.describe(["junk", 42]) == [], str(lm.describe(["junk", 42])))
+    finally:
+        lm._fetch, lm.DEFAULT_PROBES = orig_fetch, orig_probes
+        if saved_env is None:
+            os.environ.pop("AIDOG_LOCAL_MODEL_PROBES", None)
+        else:
+            os.environ["AIDOG_LOCAL_MODEL_PROBES"] = saved_env
+
+
 def main() -> int:
     test_model()
     test_registry_and_tools()
@@ -5939,6 +6294,9 @@ def main() -> int:
     test_hooks()
     test_acp()
     test_tg_topics()
+    test_browser()
+    test_terminal()
+    test_localmodels()
     print(f"\n{len(PASS)} pass · {len(FAIL)} fail")
     if FAIL:
         print("failed: " + ", ".join(FAIL))

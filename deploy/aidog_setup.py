@@ -40,6 +40,8 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))  # `from mycore import localmodels` (zero-key)
 SECRETS = REPO / "secrets.env"
 EXAMPLE = REPO / "secrets.env.example"
 SETTINGS = REPO / "web" / "settings.json"
@@ -287,6 +289,43 @@ def cmd_check() -> int:
     return rc
 
 
+def detect_local_model() -> dict | None:
+    """Zero-key onboarding step (car 4b): probe local model servers, offer the
+    hits, and return the chosen entry {kind, base_url, model} — or None to fall
+    through to the manual base_url/model prompts. Interactive wizard only
+    (--check/--yes never reach it); never raises. The miss line is printed only
+    when the probe module was actually importable (honesty: never claim probes
+    that did not run)."""
+    try:
+        from mycore import localmodels  # noqa: PLC0415 — REPO is on sys.path
+    except Exception:
+        return None
+    try:
+        found = localmodels.probe()
+    except Exception:
+        found = []
+    if not isinstance(found, list) or not found:
+        override = os.environ.get("AIDOG_LOCAL_MODEL_PROBES") or ""
+        tried = (", ".join(u.strip() for u in override.split(",") if u.strip())
+                 if override else
+                 "ollama :11434, llama-server :8080, lm-studio :1234")
+        say(f"no local model server detected (tried {tried})")
+        return None
+    say("local model server detected:")
+    for i, line in enumerate(localmodels.describe(found), 1):
+        say(f"  {i}. {line}")
+    raw = read_value(
+        f"use which? [enter = 1, 2..{len(found)}, n = manual setup]", False)
+    if raw is None:
+        return None
+    pick = raw.strip() or "1"
+    if pick.isdigit() and 1 <= int(pick) <= len(found):
+        entry = found[int(pick) - 1]
+        if isinstance(entry, dict) and entry.get("base_url") and entry.get("model"):
+            return entry
+    return None  # 'n' / invalid answer -> manual setup flow
+
+
 def cmd_wizard(boot: bool) -> int:
     provision_secrets()
     say("I'm AiDog setup wizard — values are hidden while typing and never shown back")
@@ -309,37 +348,53 @@ def cmd_wizard(boot: bool) -> int:
         SETTINGS.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(SETTINGS_EXAMPLE, SETTINGS)
         say("created web/settings.json from template")
-    mc = read_settings().get("mycore")
-    if not isinstance(mc, dict):
-        mc = {}
-    cur_base = str(mc.get("base_url") or "http://127.0.0.1:3460/v1")
-    cur_model = str(mc.get("model") or "mimo-v2.6-flash")
-    new_base, new_model = cur_base, cur_model
-    for attempt in range(1, MAX_TRIES + 1):
-        raw = read_value(f"model endpoint base_url [{cur_base}]", False)
-        if raw is None:
-            break
-        new_base = raw or cur_base
-        if URL_RE.match(new_base):
-            break
-        say(f"base_url: invalid — expected http(s)://... (attempt {attempt}/{MAX_TRIES})")
-        new_base = cur_base
-    for attempt in range(1, MAX_TRIES + 1):
-        raw = read_value(f"model name [{cur_model}]", False)
-        if raw is None:
-            break
-        new_model = raw or cur_model
-        if MODEL_RE.match(new_model):
-            break
-        say(f"model: invalid — expected a non-empty token (attempt {attempt}/{MAX_TRIES})")
-        new_model = cur_model
-    if (new_base, new_model) != (cur_base, cur_model):
+    # zero-key onboarding (interactive only): local model server detection,
+    # inserted between settings.json creation and the manual base_url prompt
+    local_choice = detect_local_model()
+    if local_choice is not None:
         data = read_settings()
-        data["mycore"] = {**mc, "base_url": new_base, "model": new_model}
+        prev = data.get("mycore")
+        prev = prev if isinstance(prev, dict) else {}
+        data["mycore"] = {**prev, "base_url": str(local_choice["base_url"]),
+                          "model": str(local_choice["model"])}
         ok, detail = write_settings(data)
+        say(f"using local model server: {local_choice['base_url']} "
+            f"(model: {local_choice['model']}) — no API key needed")
         say(detail)
         if not ok:
             return 1
+    else:
+        mc = read_settings().get("mycore")
+        if not isinstance(mc, dict):
+            mc = {}
+        cur_base = str(mc.get("base_url") or "http://127.0.0.1:3460/v1")
+        cur_model = str(mc.get("model") or "mimo-v2.6-flash")
+        new_base, new_model = cur_base, cur_model
+        for attempt in range(1, MAX_TRIES + 1):
+            raw = read_value(f"model endpoint base_url [{cur_base}]", False)
+            if raw is None:
+                break
+            new_base = raw or cur_base
+            if URL_RE.match(new_base):
+                break
+            say(f"base_url: invalid — expected http(s)://... (attempt {attempt}/{MAX_TRIES})")
+            new_base = cur_base
+        for attempt in range(1, MAX_TRIES + 1):
+            raw = read_value(f"model name [{cur_model}]", False)
+            if raw is None:
+                break
+            new_model = raw or cur_model
+            if MODEL_RE.match(new_model):
+                break
+            say(f"model: invalid — expected a non-empty token (attempt {attempt}/{MAX_TRIES})")
+            new_model = cur_model
+        if (new_base, new_model) != (cur_base, cur_model):
+            data = read_settings()
+            data["mycore"] = {**mc, "base_url": new_base, "model": new_model}
+            ok, detail = write_settings(data)
+            say(detail)
+            if not ok:
+                return 1
 
     # summary (names + lengths only) + format check
     say("— summary —")

@@ -24,6 +24,14 @@ Contracts locked here (regression wall):
   - dispatch: `aidog setup --check/--yes/--no-boot` passes flags through;
     a non-TTY `aidog setup` (no flags) falls back to --yes (never blocks on
     prompts in scripts); --help lists the flags; unknown flags exit 2
+  - zero-key onboarding (car 4b): the INTERACTIVE wizard probes local model
+    servers between settings.json creation and the manual base_url prompt —
+    a live AIDOG_LOCAL_MODEL_PROBES endpoint is adopted (base_url/model in
+    settings, MODEL_API_KEY stays empty, NO manual base_url/model prompt);
+    default probes (ollama :11434 / llama-server :8080 / lm-studio :1234,
+    expected closed here) print one honest miss line and the prompt sequence
+    stays byte-compatible with the manual flow above; probes must stay fast
+    (<3s wall for the whole wizard run)
 English output per repo i18n policy.
 """
 from __future__ import annotations
@@ -35,6 +43,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -64,6 +75,9 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 def run(script: Path, args: list[str], stdin: str = "",
         extra_env: dict | None = None) -> tuple[int, str]:
     env = dict(os.environ)
+    # determinism: an inherited probe override from the operator shell must not
+    # shift prompt sequences — default probing applies unless a test opts in
+    env.pop("AIDOG_LOCAL_MODEL_PROBES", None)
     if extra_env:
         env.update(extra_env)
     p = subprocess.run([sys.executable, str(script), *args],
@@ -78,6 +92,11 @@ def make_repo(t: Path) -> Path:
     (t / "web").mkdir(parents=True, exist_ok=True)
     for name in ("aidog_setup.py", "aidog_persist.py"):
         shutil.copy2(REPO / "deploy" / name, t / "deploy" / name)
+    # zero-key onboarding probe module (namespace package — no mycore/
+    # __init__.py copied, so the import stays light in the fake repo)
+    (t / "mycore").mkdir(exist_ok=True)
+    shutil.copy2(REPO / "mycore" / "localmodels.py",
+                 t / "mycore" / "localmodels.py")
     shutil.copy2(REPO / "secrets.env.example", t / "secrets.env.example")
     shutil.copy2(REPO / "web" / "settings.example.json",
                  t / "web" / "settings.example.json")
@@ -391,6 +410,94 @@ def test_dispatch_flags(t: Path) -> None:
           not (t2 / "deploy" / "install.marker").exists())
 
 
+def test_local_model_detected_adopt(t: Path) -> None:
+    """Case A: live OpenAI-shaped endpoint via AIDOG_LOCAL_MODEL_PROBES ->
+    wizard adopts it (zero-key), manual base_url prompt never appears."""
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 — stdlib handler API
+            if self.path == "/v1/models":
+                body = json.dumps({"data": [{"id": "fake-local-1"}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def log_message(self, *args: object) -> None:  # keep suite output clean
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}/v1"
+    try:
+        t2 = make_repo(sub(t, "local_hit"))
+        # slots (api key empty) + "use which?" answer (Enter = 1) + boot n
+        stdin = "\n".join([TOK_WEB, TOK_TG, TOK_ALLOW, "", TOK_GH, TOK_WD,
+                           "", "n"]) + "\n"
+        t0 = time.monotonic()
+        rc, out = run(setup_py(t2), [], stdin=stdin,
+                      extra_env={"AIDOG_LOCAL_MODEL_PROBES": url})
+        elapsed = time.monotonic() - t0
+        st = json.loads((t2 / "web" / "settings.json").read_text(encoding="utf-8"))
+        check("A: 'local model server detected' printed",
+              "local model server detected" in out, out[:600])
+        check("A: numbered entry shows kind + url + model",
+              f"local {url} (model: fake-local-1)" in out, out[:600])
+        check("A: adopted base_url written to settings",
+              st["mycore"]["base_url"] == url, str(st.get("mycore")))
+        check("A: model taken from endpoint",
+              st["mycore"]["model"] == "fake-local-1", str(st.get("mycore")))
+        check("A: other mycore keys preserved (template)",
+              st["mycore"].get("context_dirs") == ""
+              and st["mycore"].get("upstreams") == ""
+              and st["mycore"].get("mcp") == "", str(st.get("mycore")))
+        check("A: MODEL_API_KEY still empty (zero-key)",
+              own_line(t2 / "secrets.env", "MODEL_API_KEY") is None)
+        check("A: confirmation line (no API key needed)",
+              "using local model server" in out and "no API key needed" in out,
+              out[-600:])
+        check("A: manual base_url prompt ABSENT",
+              "model endpoint base_url" not in out, out[:600])
+        check("A: manual model prompt ABSENT", "model name [" not in out,
+              out[:600])
+        check("A: wizard exit 0", rc == 0, f"rc={rc} {out[-300:]}")
+        check("A: wizard run fast (<3s)", elapsed < 3.0, f"{elapsed:.2f}s")
+        check("A: zero-echo of piped values",
+              no_leak(out, TOK_WEB, TOK_TG, TOK_ALLOW, TOK_GH, TOK_WD))
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_local_model_miss_default(t: Path) -> None:
+    """Case B: default probes all closed -> one honest miss line, and the
+    prompt sequence stays exactly the legacy manual flow."""
+    t2 = make_repo(sub(t, "local_miss"))
+    stdin = full_answers()
+    t0 = time.monotonic()
+    rc, out = run(setup_py(t2), [], stdin=stdin)  # no probe override (default)
+    elapsed = time.monotonic() - t0
+    st = json.loads((t2 / "web" / "settings.json").read_text(encoding="utf-8"))
+    check("B: 'no local model server detected' printed",
+          "no local model server detected" in out, out[:600])
+    check("B: miss line names the three default probes",
+          all(s in out for s in ("ollama :11434", "llama-server :8080",
+                                 "lm-studio :1234")), out[:600])
+    check("B: no selection prompt shown", "use which?" not in out, out[:600])
+    check("B: prompt sequence unchanged (template endpoint kept on Enter)",
+          st["mycore"]["base_url"] == "http://127.0.0.1:3460/v1"
+          and st["mycore"]["model"] == "mimo-v2.6-flash",
+          str(st.get("mycore")))
+    check("B: wizard exit 0 (sequence intact)", rc == 0,
+          f"rc={rc} {out[-300:]}")
+    check("B: summary still reports settings line",
+          "settings mycore.base_url:" in out, out[-400:])
+    check("B: wizard run fast (<3s)", elapsed < 3.0, f"{elapsed:.2f}s")
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="aidog_b3_", dir=str(TMP)) as td:
         base = Path(td)
@@ -408,6 +515,9 @@ def main() -> int:
         test_wizard_eof_graceful(base)
         test_wizard_endpoint_and_boot_yes(base)
         test_dispatch_flags(base)
+
+        test_local_model_detected_adopt(base)
+        test_local_model_miss_default(base)
 
     print(f"\n{len(PASS)} pass · {len(FAIL)} fail")
     if FAIL:

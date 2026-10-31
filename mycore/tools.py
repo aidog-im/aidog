@@ -16,9 +16,9 @@ English comments per repo i18n policy.
 from __future__ import annotations
 
 import fnmatch
+import json
 import os
 import re
-import subprocess
 import tempfile
 import time
 import urllib.error
@@ -224,21 +224,37 @@ def _edit_file(path: str, old_text: str, new_text: str,
     return f"edited {p} (1 replacement){note}"
 
 
+def _shell_spec() -> str:
+    """Effective mycore.shell settings value — read fresh on EVERY call (hot
+    switch, no in-process cache). Missing file/key/bad JSON -> "" = local.
+    Mirrors how mycore.cli/mcp read web/settings.json."""
+    try:
+        doc = json.loads((REPO / "web" / "settings.json").read_text(encoding="utf-8"))
+        mc = doc.get("mycore") if isinstance(doc, dict) else None
+        if isinstance(mc, dict) and isinstance(mc.get("shell"), str):
+            return mc["shell"]
+    except (OSError, ValueError):
+        pass
+    return ""
+
+
 def _run_bash(command: str, timeout: int = BASH_TIMEOUT,
               roots: tuple[str, ...] | list[str] = DEFAULT_ALLOWED_ROOTS) -> str:
-    """Run one shell command in the repo root. Output capped; honest on failure."""
+    """Run one shell command on the configured terminal backend (settings
+    mycore.shell; default local, repo root). Output capped; honest on failure."""
     if not isinstance(command, str) or not command.strip():
         raise ToolError("command must be a non-empty string")
     if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= BASH_TIMEOUT:
         raise ToolError(f"timeout must be an integer in 1..{BASH_TIMEOUT}")
+    from . import terminal  # local import: tools stays import-light (browser pattern)
     try:
-        proc = subprocess.run(command, shell=True, cwd=str(REPO),
-                              capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        raise ToolError(f"command timed out after {timeout}s") from None
-    out = (proc.stdout or "") + (("\n--- stderr ---\n" + proc.stderr) if proc.stderr else "")
-    header = f"exit={proc.returncode}"
-    return f"{header}\n{out}".rstrip() or f"{header} (no output)"
+        backend = terminal.parse(_shell_spec())
+    except ValueError as e:
+        raise ToolError(f"mycore.shell: {e}") from None
+    try:
+        return terminal.run(backend, command, timeout)
+    except terminal.TerminalError as e:
+        raise ToolError(str(e)) from None
 
 
 def _grep(pattern: str, path: str = ".", glob: str = "*",
@@ -561,7 +577,8 @@ def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
                    "path": _STR, "old_text": _STR, "new_text": _STR},
                 "required": ["path", "old_text", "new_text"]},
                lambda path, old_text, new_text: _edit_file(path, old_text, new_text, roots, state_dir))
-    r.register("run_bash", f"Run a shell command in the repo root (<= {BASH_TIMEOUT}s).",
+    r.register("run_bash", f"Run a shell command (<= {BASH_TIMEOUT}s). "
+               "Runs on the configured terminal backend (settings mycore.shell; default local).",
                {"type": "object", "properties": {
                    "command": _STR, "timeout": _INT}, "required": ["command"]},
                lambda command, timeout=BASH_TIMEOUT: _run_bash(command, timeout, roots))
@@ -650,6 +667,48 @@ def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
                                "maximum": 120}}},
                lambda steps=None, code=None, timeout=120:
                    _execute_code(steps, code, timeout, r, roots, state_dir))
+    # --- car 4b: browser automation (capability-honest, like MCP fail-soft) ---
+    # The six browser_* tools register ONLY when a browser binary is
+    # discoverable (fast probe — discovery never launches anything). No
+    # binary -> no fake capability: registry.browser_note carries the reason
+    # instead, and runtime failures still surface as honest ERROR lines.
+    r.browser_note: str | None = None
+    try:
+        from . import browser as browser_mod
+        if browser_mod.available():
+            r.register("browser_open",
+                       "Open an http(s) URL in the local headless browser and wait for the page to load.",
+                       {"type": "object", "properties": {"url": _STR},
+                        "required": ["url"]},
+                       browser_mod.open_url)
+            r.register("browser_snapshot",
+                       "Dump the current page text plus its interactive elements as @e1, @e2, ... refs. "
+                       "Refs are positional: re-snapshot after any DOM change.",
+                       {"type": "object", "properties": {}},
+                       browser_mod.snapshot)
+            r.register("browser_click",
+                       "Click the page element at an @eN ref from the latest browser_snapshot.",
+                       {"type": "object", "properties": {"ref": _STR},
+                        "required": ["ref"]},
+                       browser_mod.click)
+            r.register("browser_type",
+                       "Type text into the text field at an @eN ref; submit=true presses Enter afterwards.",
+                       {"type": "object", "properties": {"ref": _STR, "text": _STR,
+                                                          "submit": {"type": "boolean"}},
+                        "required": ["ref", "text"]},
+                       browser_mod.type_text)
+            r.register("browser_screenshot",
+                       "Save a PNG screenshot of the current page and return its file path.",
+                       {"type": "object", "properties": {}},
+                       browser_mod.screenshot)
+            r.register("browser_close",
+                       "Close the headless browser session and delete its temporary profile.",
+                       {"type": "object", "properties": {}},
+                       browser_mod.close)
+        else:
+            r.browser_note = "browser binary not found"
+    except Exception as e:  # noqa: BLE001 — probe must never break the registry
+        r.browser_note = f"browser unavailable: {type(e).__name__}: {e}"
     # --- car 2-D5: MCP servers (fail-soft: notes, never a startup crash) ---
     r.mcp_notes: list[str] = []
     r.mcp_sessions: list = []

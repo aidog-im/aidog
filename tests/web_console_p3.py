@@ -13,6 +13,7 @@ import os
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -685,6 +686,42 @@ def main() -> int:
     check("POST /api/channels/webhook never echoes the secret",
           wh_val is None or wh_val not in blob)
 
+    # --- car 4b: mycore.shell terminal backend partition (validated by the
+    # grammar owner terminal.parse — the server never re-implements it).
+    # Inside the snapshot block: these writes are restored byte-for-byte. ---
+    if token:
+        s, body = post("/api/settings",
+                       {"mycore": {"shell": "docker:image=ubuntu:latest"}},
+                       token)
+        check("POST mycore valid docker shell spec -> 200", s == 200,
+              f"got {s} {str(body)[:160]}")
+        s, caps_tmp = get("/api/capabilities")
+        tmb = caps_tmp.get("terminal") if isinstance(caps_tmp, dict) else None
+        check("capabilities.terminal reflects the live shell setting",
+              s == 200 and isinstance(tmb, dict)
+              and tmb.get("backend") == "docker"
+              and tmb.get("spec_set") is True,
+              f"terminal={tmb}")
+        s, body = post("/api/settings",
+                       {"mycore": {"shell": "ssh:me@10.0.0.5:2222"}}, token)
+        check("POST mycore valid ssh shell spec -> 200", s == 200,
+              f"got {s} {str(body)[:160]}")
+        s, body = post("/api/settings", {"mycore": {"shell": "bogus"}}, token)
+        check("POST mycore bad shell spec -> 400 + shell reason",
+              s == 400 and "shell" in str(body), f"got {s} {str(body)[:200]}")
+        s, body = post("/api/settings",
+                       {"mycore": {"shell": "ssh:u@h;password=pw"}}, token)
+        check("POST mycore shell password field -> 400 (never accepted)",
+              s == 400 and "shell" in str(body), f"got {s} {str(body)[:200]}")
+        s, body = post("/api/settings", {"mycore": {"shell": ""}}, token)
+        check("POST mycore empty shell (local default) -> 200", s == 200,
+              f"got {s} {str(body)[:160]}")
+        s, caps_tmp = get("/api/capabilities")
+        tmb = caps_tmp.get("terminal") if isinstance(caps_tmp, dict) else None
+        check("capabilities.terminal back to local after empty spec",
+              isinstance(tmb, dict) and tmb.get("backend") == "local"
+              and tmb.get("spec_set") is False, f"terminal={tmb}")
+
     if settings_backup is not None:
         try:
             settings_path.write_text(settings_backup, encoding="utf-8")
@@ -744,6 +781,52 @@ def main() -> int:
           and all(v not in caps_text for v in slot_vals)
           and not leak_keys,
           f"leak_keys={leak_keys} n_slots={len(slot_vals)}")
+
+    # --- car 4b: browser / terminal / local_models catalog blocks ----------
+    brb = caps.get("browser") if isinstance(caps, dict) else None
+    check("GET capabilities browser block (availability bool only)",
+          isinstance(brb, dict) and isinstance(brb.get("available"), bool),
+          f"browser={brb}")
+    browser_tool_names = {"browser_open", "browser_snapshot", "browser_click",
+                          "browser_type", "browser_screenshot", "browser_close"}
+    caps_tool_names = {t.get("name") for t in caps.get("tools", [])
+                       if isinstance(t, dict)} if isinstance(caps, dict) else set()
+    check("capabilities browser.available agrees with registered tools",
+          isinstance(brb, dict)
+          and ((brb.get("available") is True)
+               == (len(browser_tool_names & caps_tool_names) == 6)),
+          f"available={brb and brb.get('available')} "
+          f"tools={sorted(browser_tool_names & caps_tool_names)}")
+    tmb = caps.get("terminal") if isinstance(caps, dict) else None
+    check("GET capabilities terminal block (kind only, raw spec withheld)",
+          isinstance(tmb, dict)
+          and (tmb.get("backend") in ("local", "docker", "ssh", None))
+          and isinstance(tmb.get("spec_set"), bool),
+          f"terminal={tmb}")
+    if isinstance(tmb, dict) and tmb.get("note") is None:
+        shell_raw = json.dumps(caps, ensure_ascii=False)
+        check("capabilities terminal never serializes the raw shell spec",
+              "identity=" not in shell_raw and "password" not in shell_raw,
+              shell_raw[:200])
+    lmb = caps.get("local_models") if isinstance(caps, dict) else None
+    check("GET capabilities local_models block (count + name records)",
+          isinstance(lmb, dict) and isinstance(lmb.get("count"), int)
+          and lmb.get("count") == len(lmb.get("detected") or [])
+          and all(isinstance(e, dict)
+                  and isinstance(e.get("kind"), str)
+                  and isinstance(e.get("base_url"), str)
+                  and isinstance(e.get("model"), str)
+                  for e in (lmb.get("detected") or [])),
+          f"local_models={lmb}")
+    # loopback-only promise: a detected entry never points off-box
+    for _e in ((lmb.get("detected") or []) if isinstance(lmb, dict) else []):
+        _host = urllib.parse.urlsplit(str(_e.get("base_url") or "")).hostname
+        check("capabilities local_models entry is loopback",
+              _host in ("127.0.0.1", "localhost", "::1"),
+              f"host={_host}")
+    check("capabilities terminal/local_models never leak a slot value",
+          all(v not in caps_text for v in slot_vals),
+          "slot value found in catalog")
     caps_doc = Path(__file__).resolve().parent.parent / \
         "docs/features/capabilities.md"
     check("capabilities feature doc exists",

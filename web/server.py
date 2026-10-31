@@ -42,7 +42,8 @@ Routes:
                                    loop as /api/chat (stream + non-stream,
                                    stateless, no client-side tool execution)
   GET  /api/capabilities        -> read-only capability catalog (tools, skills,
-                                   channels, hooks, cron; no auth, no secrets)
+                                   channels, hooks, cron, browser, terminal,
+                                   local models; no auth, no secrets)
   GET  /api/chat/history        -> current console session (read, loopback)
   GET  /api/voice               -> voice engine capability (edge-tts presence)
   POST /api/say                 -> synthesize speech -> audio/mpeg (cached,
@@ -82,7 +83,7 @@ if str(REPO) in sys.path:
     sys.path.remove(str(REPO))
 sys.path.insert(0, str(REPO))
 from lib import i18n  # noqa: E402
-from mycore import cli, evolution, hooks, mcp, modeltier  # noqa: E402  (config + MCP/ hooks grammar)
+from mycore import cli, evolution, hooks, mcp, modeltier, terminal  # noqa: E402  (config + MCP/ hooks/ terminal grammar)
 from mycore.assembly import build_system_stack, resolve_context_dirs  # noqa: E402
 from mycore.loop import run_turn  # noqa: E402
 from mycore.model import ChatClient  # noqa: E402
@@ -189,7 +190,7 @@ ALLOWED_TOP = ("language", "refresh_sec", "sound", "voice_volume",
                "alert_preview", "currency", "fx_rate", "mycore", "usage",
                "evolution", "channels", "hooks")
 USAGE_KEYS = ("metrics_url", "pricing_config", "log_dir")
-MYCORE_KEYS = ("base_url", "model", "context_dirs", "upstreams", "mcp")
+MYCORE_KEYS = ("base_url", "model", "context_dirs", "upstreams", "mcp", "shell")
 MYCORE_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$")
 # Supported UI languages = the discovered locale packs (overlay/locales/*);
 # fallback keeps validation sane if the packs are ever unreadable.
@@ -597,6 +598,21 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                         except ValueError as e:
                             errors.append(f"mycore.mcp: {e}")
                             continue
+                    clean_mc[key] = val
+                    continue
+                if key == "shell":
+                    # terminal backend (car 4b-B): one line, grammar lives in
+                    # mycore.terminal — the validator reports its exact reason.
+                    if not isinstance(val, str) or len(val) > terminal.MAX_SPEC_CHARS \
+                            or "\x00" in val or "\n" in val or "\r" in val:
+                        errors.append("mycore.shell must be one line of at most "
+                                      f"{terminal.MAX_SPEC_CHARS} chars (empty = local)")
+                        continue
+                    try:
+                        terminal.parse(val)
+                    except ValueError as e:
+                        errors.append(f"mycore.shell: {e}")
+                        continue
                     clean_mc[key] = val
                     continue
                 if not isinstance(val, str) or not val or len(val) > 256 or "\x00" in val:
@@ -1743,6 +1759,49 @@ def collect_capabilities() -> dict:
     except Exception as e:  # noqa: BLE001
         sys.stderr.write(f"capabilities cron failed err={type(e).__name__}\n")
         jobs = 0
+    # Browser automation (car 4b): availability probe only — no launch, and
+    # the six tools register in `tools` above IFF this returns True.
+    try:
+        from mycore import browser as _browser
+        browser = {"available": _browser.available()}
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write(f"capabilities browser failed err={type(e).__name__}\n")
+        browser = {"available": False, "note": "browser probe failed"}
+    # Terminal backend (car 4b): parsed KIND of settings mycore.shell only —
+    # the raw spec (user@host, identity path) never serializes here.
+    try:
+        shell_spec = (settings.get("mycore") or {}).get("shell") or ""
+        backend = terminal.parse(str(shell_spec)).kind
+        terminal_blk = {"backend": backend, "spec_set": bool(str(shell_spec).strip())}
+    except ValueError:
+        terminal_blk = {"backend": None, "spec_set": True,
+                        "note": "mycore.shell invalid"}
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write(f"capabilities terminal failed err={type(e).__name__}\n")
+        terminal_blk = {"backend": None, "spec_set": False,
+                        "note": "terminal probe failed"}
+    # Zero-key onboarding (car 4b): local model server detection, names only.
+    # Probes are loopback with a 0.5s cap each; userinfo (if an operator ever
+    # put credentials in an override URL) is stripped before serializing.
+    try:
+        from mycore import localmodels as _localmodels
+        detected = []
+        for entry in _localmodels.probe():
+            url = str(entry.get("base_url") or "")
+            parts = urllib.parse.urlsplit(url)
+            if parts.username or parts.password:
+                host = parts.hostname or ""
+                netloc = (f"[{host}]:{parts.port}" if ":" in host else
+                          f"{host}:{parts.port}" if parts.port else host)
+                url = urllib.parse.urlunsplit(
+                    (parts.scheme, netloc, parts.path, parts.query, ""))
+            detected.append({"kind": str(entry.get("kind") or "local"),
+                             "base_url": url,
+                             "model": str(entry.get("model") or "")})
+        local_models = {"count": len(detected), "detected": detected}
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write(f"capabilities local_models failed err={type(e).__name__}\n")
+        local_models = {"count": 0, "detected": [], "note": "probe failed"}
     return {
         "version": VERSION,
         "mycore": {"model": model, "upstreams_configured": upstreams_ok,
@@ -1752,6 +1811,9 @@ def collect_capabilities() -> dict:
         "channels": channels,
         "hooks": {"events": events, "count": len(events)},
         "cron": {"jobs": jobs},
+        "browser": browser,
+        "terminal": terminal_blk,
+        "local_models": local_models,
     }
 
 

@@ -76,7 +76,7 @@ Rules the tests lock (regression wall in `tests/setup_wizard_b3.py`):
 
 ## 4. Tests
 
-`python3 tests/setup_wizard_b3.py` → **80/80** (offline, stdlib, every write
+`python3 tests/setup_wizard_b3.py` → **99/99** (offline, stdlib, every write
 confined to a throwaway fake repo under `/tmp`; the real `secrets.env` /
 `web/settings.json` are never touched — `REPO` self-derives from the copied
 script's location, and the stub `install.sh` records invocation + propagates
