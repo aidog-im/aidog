@@ -1,6 +1,6 @@
 # I'm AiDog
 
-> A personal embodied AI: a constitution for a personality, curated memory for a life, and a self-developed core that answers to you alone. Permanently free for any use, local-first console, Telegram-first channels.
+> A personal embodied AI: a constitution for a personality, curated memory for a life, and a self-developed core that answers to you alone. Permanently free for any use, local-first console, 9-route channel gateway with Telegram live.
 
 I'm AiDog is a single companion you run yourself — not a platform, not an assistant farm. Three constitutional facts: it is permanently free (no paid tier, no usage fee, no paid feature gate, ever), the console is local-first (state, memory and configuration stay on your own machine), and the core kernel is self-developed in-house rather than wrapped from a third party.
 
@@ -8,15 +8,23 @@ I'm AiDog is a single companion you run yourself — not a platform, not an assi
 
 - Permanently free: no pricing, no paid features, no usage metering.
 - Local-first console: web UI on your own machine for chat, memory, skills, cron and channel configuration.
-- Constitution and curated memory: behavioural rules and long-term memory are versioned assets you control.
-- Skills and automations: skill packs, scheduled tasks and Telegram-driven control.
-- Bring-your-own model: model endpoints and credentials are configured by the operator.
+- Constitution and curated memory: behavioural rules and long-term memory are versioned assets you control — bounded Markdown budgets, archive tiers, a user-profile layer, no vector store you cannot read.
+- Skills and automations: SKILL.md packs screened by a deterministic pre-router (route suite 30/30), natural-language cron that stays fail-closed until enabled, and a self-evolution loop (`/learn`, `/reflect`) with lint-gated writes.
+- Channels: Telegram live, plus nine adapters (Discord / Slack / Email / Webhook / DingTalk / Feishu / WeChat / WhatsApp / Signal) each with an honest per-route status; unconfigured routes stay silent.
+- Media: local speech-to-text voice sessions with fuzzy wake phrases, TTS announcements, BYOK image generation, Telegram photo send.
+- Bring-your-own model: model endpoints and credentials are configured by the operator; zero-key trial path, upstream failover, budget caps.
+- Desktop, profiles, ops: an Electron HUD shell (desktop suite 15/15), fully isolated multi-profiles (isolation gate 63/63), `aidog doctor` health checks (0 FAIL · 0 WARN), watchdog and one-command upgrades.
+- Web3 exchanges: nine venues in one catalog — keyless chain reads (Jupiter, Velora, Hyperliquid, dYdX, GMX, public RPC) beside slot-gated CEX accounts (OKX, Kraken, Binance) behind six `exchange_*` tools. Orders only ever run prepare → human console approval → execute; thresholds fail closed (default 0 = every plan waits for a person), market orders never auto-approve, and withdrawals / on-chain transfers / transaction signing do not exist in the core at all. With no slot configured the order tool never registers.
+- Activation & operations: the console's Overview ACTIVATION card mirrors `aidog setup --check` (required slots, endpoint reachability, service state) with FIX deep-links; a credential-slot editor writes runtime slots with values never echoed; doctor-run, service-restart and update controls live in the panel.
+- Evidence (the same numbers shown in the site's fact strip): core tests 1180/1180 · console smoke 234/234 · skill router 30/30 · memory 58/58 · setup wizard 99/99 · profile isolation 63/63 · desktop shell 15/15 · doctor 0 FAIL · 0 WARN · 12 real-machine E2E suites · 536 locale keys per pack · 25 registered tools · 31 capability documents · 28 self-developed modules ≈ 13.4k LOC.
+- Current release: 0.5.41.
 
 ## Interfaces
 
-- Web console: streaming chat UI plus settings, memory, cron, skills and channel management.
+- Web console: streaming chat UI plus settings, memory, cron, skills and channel management on `127.0.0.1`.
 - Telegram bot: first-class messaging channel with streaming replies and typing indicators.
 - OpenAI-compatible API: the local console exposes `GET /v1/models` and `POST /v1/chat/completions` (streaming and non-streaming) behind a Bearer token, so OpenAI-style tooling can point at it.
+- Console ops endpoints (loopback): `GET /api/setup` (readiness rows, presence/format words only), `POST /api/doctor/run`, `POST /api/service/restart`, `POST /api/update/apply`, `GET /api/version` — every write behind the Bearer token, no value ever serialized.
 
 ## Live stats
 
@@ -27,6 +35,7 @@ I'm AiDog is a single companion you run yourself — not a platform, not an assi
 - [Home](https://aidog.im/#home): positioning and facts.
 - [Start](https://aidog.im/#start): install and first-run commands.
 - [Skills](https://aidog.im/#skills): what the skill system does.
+- [Capabilities](https://aidog.im/#capabilities): the card-by-card feature inventory, including the Web3 approval gate.
 - [Console](https://aidog.im/#console): the local-first web console.
 - [Models](https://aidog.im/#models): model configuration.
 - [Security](https://aidog.im/#security): credential discipline and approval gates.

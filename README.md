@@ -178,10 +178,10 @@ Every release is cut only after these run green on a clean tree:
 | Desktop shell (`node --test`) | **15/15** |
 | `aidog doctor` | **0 FAIL · 0 WARN** (honest environment WARN only when egress is fully gone) |
 | Publish gate (deny-by-default manifest) | **READY** |
-| Real-machine E2E | profiles **18/18** · channels **8/8** · domestic channels **44/44** · pipeline **35/35** · web3 read-only **33/33** · web3 approval **61/61** · frontend coverage **62/62** · frontend UI **33/33** · activation **81/81** · activation UI **50/50** |
+| Real-machine E2E | profiles **18/18** · channels **8/8** · domestic channels **44/44** · pipeline **35/35** · web3 read-only **33/33** · web3 approval **61/61** · frontend coverage **62/62** · frontend UI **33/33** · activation **81/81** · activation UI **50/50** · settings matrix **57/57** + UI **17/17** |
 
 Locale packs: `en` (default) + `zh`, **536 keys** each, parity lint in CI;
-the marketing site ships its own **165-key** bilingual pack.
+the marketing site ships its own **216-key** bilingual pack.
 
 ## Documentation
 

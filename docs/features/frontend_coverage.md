@@ -229,6 +229,32 @@ the restart handler logs a tmux session name and a return code only.
   run last, with `boot_services.sh start` recovery** (5) · L10 production
   health + byte identity (3). Run: `python3 tmp/e2e_activation.py` (rc 0 = 0
   fail).
+- **`tmp/e2e_settings_matrix.py`** (settings-matrix addendum, 0.5.40
+  close-out of reconcile §5) — isolated profile, never production: **57
+  checks · 6 legs (L1–L6)** — L1 `mycore.base_url`/`mycore.model` write →
+  live `/api/capabilities` `mycore.model` + a legal `upstreams` chain flips
+  `upstreams_configured` + a grammar-broken one refused 400 with the exact
+  rule (9) · L2 the 7 `media.*` keys → `capabilities.media` (`stt.model=small`,
+  `tts.active=byok` + usable, `image.configured`) + `wake_phrases` read-back
+  (7) · L3 the 7 top-level keys (`language` `refresh_sec` `sound`
+  `voice_volume` `alert_preview` `currency` `fx_rate`) → per-key read-back
+  + `/api/usage` `display_fx` CNY native path with the structure intact
+  (12) · L4 `MODEL_API_KEY` / `CHANNEL_SLACK_TOKEN` / `TTS_API_KEY`
+  set → length → clear (`set:false`) round trips with a zero-sentinel sweep
+  over the responses and `/api/capabilities`, then a byte-restored
+  `secrets.env` (16) · L5 `mycore.context_dirs` + `mycore.mcp` →
+  `mcp_servers.count/names`, broken JSON 400, both cleared (9) · L6
+  production health + `secrets.env`/`web/settings.json` byte identity (3).
+  Run: `python3 tmp/e2e_settings_matrix.py` (rc 0 = 0 fail).
+- **`tmp/e2e_settings_matrix_ui.js`** — Playwright against an isolated
+  named-profile console spawned by the script: **17 checks · U0–U6** — U1
+  `#mycContextDirs` + a legal `#mycMcp` array → SAVE → Bearer
+  `GET /api/settings` read-back (+ the restart-hint chip), U2 a broken JSON
+  array → the server's 400 detail rendered verbatim in `#saveState` with the
+  store untouched (all-or-nothing), U3 zh repaint of the new and a
+  pre-existing control, U4 no token/slot value in the DOM or any input
+  value, U5 zero `pageerror`, U6 production console health. Run:
+  `PW_PATH=<HOME_DIR>/_npx/e41f203b7505f1fb/node_modules/playwright node tmp/e2e_settings_matrix_ui.js`.
 - Standing gates (after the activation car): `mycore/tests/run.py` **1180** ·
   `tests/web_console_p3.py` **234** · `tests/source_lang_check.py` **0/66**
   (locale packs **536/536**). The 0.5.39 baseline of this page was

@@ -158,10 +158,29 @@ for url in https://aidog.im/ https://www.aidog.im/; do
   fi
 done
 # assets reachable over the real domain
-for a in assets/style.css assets/main.js i18n/en.json; do
+for a in assets/style.css assets/main.js i18n/en.json i18n/zh.json; do
   code=$(pget "https://aidog.im/$a" /tmp/deploy_site_asset)
   [ "$code" = "200" ] || { echo "DEPLOY_SITE: asset FAIL /$a (http $code)" >&2; fail=1; }
 done
+
+# --- site-pack parity: en/zh key sets must be identical (mirrors tmp/shoot_site.js)
+code_en=$(pget https://aidog.im/i18n/en.json /tmp/deploy_site_en.json)
+code_zh=$(pget https://aidog.im/i18n/zh.json /tmp/deploy_site_zh.json)
+if [ "$code_en" = "200" ] && [ "$code_zh" = "200" ] && python3 - <<'PYPAR'
+import json
+en = json.load(open("/tmp/deploy_site_en.json"))
+zh = json.load(open("/tmp/deploy_site_zh.json"))
+only_en = sorted(set(en) - set(zh))
+only_zh = sorted(set(zh) - set(en))
+assert len(en) == len(zh) and not only_en and not only_zh, (only_en, only_zh)
+print(len(en))
+PYPAR
+then
+  echo "DEPLOY_SITE: VERIFY OK i18n parity (en/zh key sets identical)"
+else
+  echo "DEPLOY_SITE: VERIFY FAIL i18n parity (http en=$code_en zh=$code_zh or key-set drift)" >&2
+  fail=1
+fi
 
 # --- AI-readable surface: llms.txt / robots.txt / sitemap / manifest / icons
 llms_code=$(pget https://aidog.im/llms.txt /tmp/deploy_site_llms.txt)
@@ -169,6 +188,18 @@ if [ "$llms_code" = "200" ] && head -n 1 /tmp/deploy_site_llms.txt | grep -qx "#
   echo "DEPLOY_SITE: VERIFY OK /llms.txt (200, H1 '# I'm AiDog')"
 else
   echo "DEPLOY_SITE: VERIFY FAIL /llms.txt (http $llms_code, H1 mismatch or missing)" >&2
+  fail=1
+fi
+# --- llms.txt must carry the new capability/Web3/gate facts (capability car M1-M5)
+if grep -q "## Product" /tmp/deploy_site_llms.txt \
+   && grep -q "nine venues" /tmp/deploy_site_llms.txt \
+   && grep -q "prepare → human console approval → execute" /tmp/deploy_site_llms.txt \
+   && grep -q "ACTIVATION card" /tmp/deploy_site_llms.txt \
+   && grep -q "1180/1180" /tmp/deploy_site_llms.txt \
+   && grep -q "aidog.im/#capabilities" /tmp/deploy_site_llms.txt; then
+  echo "DEPLOY_SITE: VERIFY OK /llms.txt facts (capabilities, web3 gate, activation, gates)"
+else
+  echo "DEPLOY_SITE: VERIFY FAIL /llms.txt facts (capability/Web3/gate lines missing)" >&2
   fail=1
 fi
 for a in robots.txt sitemap.xml manifest.webmanifest assets/icons/icon-512.png assets/icons/apple-touch-icon.png; do

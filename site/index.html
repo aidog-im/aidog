@@ -9,6 +9,18 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="assets/icons/apple-touch-icon.png">
 <meta name="theme-color" content="#2892ff">
+<link rel="canonical" href="https://aidog.im/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="I'm AiDog">
+<meta property="og:title" content="I'm AiDog — a personal embodied AI">
+<meta property="og:description" content="A personal embodied AI: a constitution for a personality, curated memory for a life, and a self-developed core that answers to you alone. Permanently free, local-first.">
+<meta property="og:url" content="https://aidog.im/">
+<meta property="og:image" content="https://aidog.im/assets/icons/icon-512.png">
+<meta property="og:image:alt" content="I'm AiDog logo">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="I'm AiDog — a personal embodied AI">
+<meta name="twitter:description" content="A personal embodied AI: a constitution for a personality, curated memory for a life, and a self-developed core that answers to you alone. Permanently free, local-first.">
+<meta name="twitter:image" content="https://aidog.im/assets/icons/icon-512.png">
 <link rel="stylesheet" href="assets/style.css?v=20261025">
 </head>
 <body>
@@ -23,6 +35,7 @@
     <a href="#home" class="nav-link active" data-i18n="nav.home">Home</a>
     <a href="#start" class="nav-link" data-i18n="nav.start">Start</a>
     <a href="#skills" class="nav-link" data-i18n="nav.skills">Skills</a>
+    <a href="#capabilities" class="nav-link" data-i18n="nav.capabilities">Capabilities</a>
     <a href="#console" class="nav-link" data-i18n="nav.console">Console</a>
     <a href="#models" class="nav-link" data-i18n="nav.models">Models</a>
     <a href="#security" class="nav-link" data-i18n="nav.security">Security</a>
@@ -79,7 +92,14 @@
       <span class="fact"><b>30/30</b> <span data-i18n="facts.router">skill router</span></span>
       <span class="fact"><b>58/58</b> <span data-i18n="facts.memory">memory suite</span></span>
       <span class="fact"><b>0F/0W</b> <span data-i18n="facts.doctor">doctor check</span></span>
-      <span class="fact"><b>en / zh</b> <span data-i18n="facts.i18n">locale packs</span></span>
+      <span class="fact"><b>12</b> <span data-i18n="facts.e2e">real-machine E2E suites</span></span>
+      <span class="fact"><b>99/99</b> <span data-i18n="facts.setup">setup wizard</span></span>
+      <span class="fact"><b>63/63</b> <span data-i18n="facts.profiles">profile isolation</span></span>
+      <span class="fact"><b>15/15</b> <span data-i18n="facts.desktop">desktop shell</span></span>
+      <span class="fact"><b>25</b> <span data-i18n="facts.tools">registered tools</span></span>
+      <span class="fact"><b>31</b> <span data-i18n="facts.docs">capability docs</span></span>
+      <span class="fact"><b>≈13.4k</b> <span data-i18n="facts.loc">lines of core code</span></span>
+      <span class="fact"><b>536</b> <span data-i18n="facts.i18n">locale keys · en + zh each</span></span>
     </div>
   </div>
 </section>
@@ -163,7 +183,7 @@
     <div class="step">
       <span class="step-num">3</span>
       <h4 data-i18n="start.step3Title">Fill the slots</h4>
-      <p data-i18n="start.step3Body">The guided wizard prompts for every credential — hidden input on a terminal, values never echoed; output names slots and lengths only.</p>
+      <p data-i18n="start.step3Body">The guided wizard prompts for every credential — hidden input on a terminal, values never echoed; output names slots and lengths only. The console's Overview ACTIVATION card mirrors the same check, each row with a FIX deep-link.</p>
       <div class="cmd">
         <code>aidog setup</code>
         <button class="copy-btn" type="button" data-i18n="start.copy" aria-label="copy command">Copy</button>
@@ -212,10 +232,59 @@
   </div>
 </section>
 
+<!-- ============================================ CAPABILITIES -->
+<section class="section" id="capabilities">
+  <div class="section-head reveal in">
+    <span class="section-index">03</span>
+    <h2 data-i18n="caps.title">Capabilities</h2>
+    <p class="section-sub" data-i18n="caps.sub">What the product actually does, card by card — every line comes from the release gates and the capability docs, nothing invented. The full docs open with the public release.</p>
+  </div>
+
+  <div class="feature-grid reveal in">
+    <div class="feature"><h4 data-i18n="caps.c1T">Streaming chat everywhere</h4><p data-i18n="caps.c1B">Console chat streams by SSE and Telegram replies stream behind a typing heartbeat, so an answer reaches you as it is written.</p></div>
+    <div class="feature"><h4 data-i18n="caps.c2T">Voice sessions & media BYOK</h4><p data-i18n="caps.c2B">Local speech-to-text sessions with fuzzy wake phrases, TTS announcements through your own engine key, BYOK image generation and Telegram photo send.</p></div>
+    <div class="feature"><h4 data-i18n="caps.c3T">Skill workshop</h4><p data-i18n="caps.c3B">Skills ship as SKILL.md with industry-standard frontmatter; the deterministic router picks the TOP3 candidates before any body loads — 30/30.</p></div>
+    <div class="feature"><h4 data-i18n="caps.c4T">Two-layer memory</h4><p data-i18n="caps.c4B">Curated long-term memory in bounded Markdown budgets with archive tiers, plus a user-profile layer — memory suite 58/58, no vector store you cannot read.</p></div>
+    <div class="feature"><h4 data-i18n="caps.c5T">Natural-language cron & self-evolution</h4><p data-i18n="caps.c5B">Schedule in plain language — /cron ship the report tomorrow 9am parses into a job that stays fail-closed until you enable it — while /learn and /reflect grow the loop behind lint-gated writes.</p></div>
+    <div class="feature"><h4 data-i18n="caps.c6T">9-route channel gateway</h4><p data-i18n="caps.c6B">Telegram is live; nine adapters — Discord / Slack / Email / Webhook / DingTalk / Feishu / WeChat / WhatsApp / Signal — each reports an honest status and stays silent while unconfigured.</p></div>
+    <div class="feature"><h4 data-i18n="caps.c7T">Desktop HUD shell</h4><p data-i18n="caps.c7B">An Electron frameless shell with transparency slider, always-on-top and tray — Linux packaging verified, Win/macOS honestly not built yet; desktop suite 15/15.</p></div>
+    <div class="feature"><h4 data-i18n="caps.c8T">Multi-profile isolation</h4><p data-i18n="caps.c8B">AIDOG_PROFILE selects fully isolated profiles — settings, secrets, state and body kept apart — proven by a 63/63 isolation gate and an 18-leg real-machine E2E.</p></div>
+    <div class="feature"><h4 data-i18n="caps.c9T">Terminal backends & code runs</h4><p data-i18n="caps.c9B">The shell backend is grammar-checked local, Docker or SSH; execute_code folds into at most 8 steps with checkpointed file writes you can restore.</p></div>
+    <div class="feature"><h4 data-i18n="caps.c10T">Subagents & MCP</h4><p data-i18n="caps.c10B">Up to three isolated parallel delegates with fresh context, plus an MCP client for stdio and HTTP servers with tool allow/deny filtering.</p></div>
+    <div class="feature"><h4 data-i18n="caps.c11T">Hooks & context files</h4><p data-i18n="caps.c11B">Six lifecycle events can run your own command on a timeout — the child gets only PATH and HOME, never a credential — and context dirs pull shared files into a turn.</p></div>
+    <div class="feature"><h4 data-i18n="caps.c12T">OpenAI-compatible gateway</h4><p data-i18n="caps.c12B">The loopback console exposes GET /v1/models and POST /v1/chat/completions — streaming and non-streaming — behind a Bearer token for OpenAI-style tooling.</p></div>
+  </div>
+
+  <div class="empty-card reveal in">
+    <h3 class="empty-title" data-i18n="caps.web3Title">Web3 — orders only through a human gate</h3>
+    <p class="empty-body" data-i18n="caps.web3Sub">Nine venues in one catalog: keyless chain reads (Jupiter, Velora, Hyperliquid, dYdX, GMX, public RPC) beside slot-gated CEX accounts (OKX, Kraken, Binance), all behind six exchange_* tools. Public market data needs no credential; with no slot configured, the order tool never registers at all.</p>
+    <div class="pipeline">
+      <div class="pnode">
+        <span class="pnode-ic" aria-hidden="true">◇</span>
+        <h4 data-i18n="caps.w3p1T">1 · Prepare</h4>
+        <p data-i18n="caps.w3p1B">exchange_prepare_order is a dry run: it stores a plan — venue, side, symbol, quantity, price — and touches nothing.</p>
+      </div>
+      <div class="parrow" aria-hidden="true">▸</div>
+      <div class="pnode">
+        <span class="pnode-ic" aria-hidden="true">◈</span>
+        <h4 data-i18n="caps.w3p2T">2 · Approve</h4>
+        <p data-i18n="caps.w3p2B">You review the plan in the console and approve or reject it behind the local Bearer token. Thresholds ship at 0, so every plan waits for a human.</p>
+      </div>
+      <div class="parrow" aria-hidden="true">▸</div>
+      <div class="pnode">
+        <span class="pnode-ic" aria-hidden="true">◉</span>
+        <h4 data-i18n="caps.w3p3T">3 · Execute</h4>
+        <p data-i18n="caps.w3p3B">exchange_execute_order takes a plan id and nothing else — every field is read back from the stored plan, then re-checked fail-closed against the day's ledger. Market orders never auto-approve at any threshold.</p>
+      </div>
+    </div>
+    <p class="arch-note" data-i18n="caps.web3Note">Withdrawals, on-chain transfers and transaction signing do not exist in the core at all — no function, no endpoint, no settings key can move funds off a venue. The core suite asserts that absence against the source.</p>
+  </div>
+</section>
+
 <!-- ============================================ CONSOLE -->
 <section class="section" id="console">
   <div class="section-head reveal">
-    <span class="section-index">03</span>
+    <span class="section-index">04</span>
     <h2 data-i18n="console.title">Console</h2>
     <p class="section-sub" data-i18n="console.sub">Local Web Console Preview — see the panel you get after installing, before you download anything.</p>
   </div>
@@ -264,6 +333,18 @@
           </div>
 
           <div class="mock-ov">
+            <div class="mcard mc-span3">
+              <h3><span data-i18n="console.secActivation">ACTIVATION</span><span class="gal-count">– / 6</span></h3>
+              <div class="panel-row">
+                <span class="mini"><i class="m-dot" aria-hidden="true"></i><span class="m-name">web_token</span><span class="m-state">–</span></span>
+                <span class="mini"><i class="m-dot" aria-hidden="true"></i><span class="m-name">model_key</span><span class="m-state">–</span></span>
+                <span class="mini"><i class="m-dot" aria-hidden="true"></i><span class="m-name">tg_token</span><span class="m-state">–</span></span>
+                <span class="mini"><i class="m-dot" aria-hidden="true"></i><span class="m-name">tg_allowlist</span><span class="m-state">–</span></span>
+                <span class="mini"><i class="m-dot" aria-hidden="true"></i><span class="m-name">model_endpoint</span><span class="m-state">–</span></span>
+                <span class="mini"><i class="m-dot" aria-hidden="true"></i><span class="m-name">service</span><span class="m-state">–</span></span>
+              </div>
+            </div>
+
             <div class="mcard mc-span3">
               <h3><span data-i18n="console.secServices">Services</span><span class="gal-count">– / 6</span></h3>
               <div class="panel-row">
@@ -342,13 +423,16 @@
     <div class="feature"><h4 data-i18n="console.f1T">Five panels, one glance</h4><p data-i18n="console.f1B">Status, settings, usage, events and voice — a situational console, not an admin warehouse.</p></div>
     <div class="feature"><h4 data-i18n="console.f2T">Zero-dependency local server</h4><p data-i18n="console.f2B">Serves on 127.0.0.1 with plain standard library code; write operations require your local access token.</p></div>
     <div class="feature"><h4 data-i18n="console.f3T">Telegram + console, en/zh</h4><p data-i18n="console.f3B">Chat where you already are, inspect where it runs. Both faces speak English and Chinese.</p></div>
+    <div class="feature"><h4 data-i18n="console.f4T">Activation card in the Overview</h4><p data-i18n="console.f4B">The first Overview card mirrors the wizard's check — required slots, endpoint reachability, service state — and every failing row carries a FIX deep-link.</p></div>
+    <div class="feature"><h4 data-i18n="console.f5T">Credential-slot editor</h4><p data-i18n="console.f5B">32 runtime slots are editable from Settings; values are write-only and never echoed — output names slots and lengths.</p></div>
+    <div class="feature"><h4 data-i18n="console.f6T">Ops buttons, not a terminal</h4><p data-i18n="console.f6B">Run doctor, restart the chat service and apply an update from the panel; an upgrade banner appears the moment a newer release exists.</p></div>
   </div>
 </section>
 
 <!-- ============================================ MODELS -->
 <section class="section" id="models">
   <div class="section-head reveal">
-    <span class="section-index">04</span>
+    <span class="section-index">05</span>
     <h2 data-i18n="models.title">Models &amp; Transparency</h2>
     <p class="section-sub" data-i18n="models.sub">We will publish how this product actually runs — which models serve it and how much compute it consumes. No estimates, no marketing charts: only what the software itself reports.</p>
   </div>
@@ -392,7 +476,7 @@
 <!-- ============================================ SECURITY -->
 <section class="section" id="security">
   <div class="section-head reveal">
-    <span class="section-index">05</span>
+    <span class="section-index">06</span>
     <h2 data-i18n="security.title">Security &amp; Trust</h2>
     <p class="section-sub" data-i18n="security.sub">Local-first by construction — the quiet guarantees, stated plainly.</p>
   </div>
@@ -456,7 +540,7 @@
 <!-- ============================================ ARCHITECTURE -->
 <section class="section" id="architecture">
   <div class="section-head reveal">
-    <span class="section-index">06</span>
+    <span class="section-index">07</span>
     <h2 data-i18n="arch.title">Architecture</h2>
     <p class="section-sub" data-i18n="arch.sub">Three layers, strictly separated — so the core underneath can be swapped without losing who you are.</p>
   </div>
@@ -494,6 +578,8 @@
     </div>
     <div class="footer-links">
       <span class="footer-free" data-i18n="footer.free">permanently free</span>
+      <a href="#capabilities" data-i18n="footer.caps">Capabilities</a>
+      <a href="llms.txt">llms.txt</a>
       <a href="https://github.com/aidog-im/aidog" target="_blank" rel="noopener">GitHub</a>
       <span class="footer-dim" data-i18n="footer.aidogim">aidog.im</span>
       <span class="footer-dim visits-wrap" id="visitsWrap" hidden><span data-i18n="footer.views">Page views:</span> <span id="visits"></span></span>
