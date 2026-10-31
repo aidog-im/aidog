@@ -44,6 +44,18 @@ def get(path: str) -> tuple[int, dict | list | str]:
         return 0, f"{type(e).__name__}: {e}"
 
 
+def get_raw(path: str) -> tuple[int, str, bytes]:
+    """GET returning (status, content-type, body-bytes) — for NON-JSON routes
+    (the bridge Worker template), whose body must not be parsed."""
+    try:
+        with urllib.request.urlopen(BASE + path, timeout=8) as r:
+            return r.status, r.headers.get("Content-Type", ""), r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers.get("Content-Type", ""), e.read()
+    except Exception as e:  # noqa: BLE001
+        return 0, "", f"{type(e).__name__}: {e}".encode()
+
+
 def get_auth(path: str, bearer: str) -> tuple[int, dict | list | str]:
     """GET with an Authorization header (optional-auth legs) — same error
     handling as get(); the token is never printed."""
@@ -491,6 +503,187 @@ def main() -> int:
     s, body = post("/api/settings", {"mycore": {"unknown": "x"}}, token)
     check("POST mycore unknown key -> 400", s == 400, f"got {s}")
 
+    # --- car 6 (line 5 / D9): the bridge settings block + its two read-only
+    #     routes. The block is written then reset to the fail-closed default
+    #     right here, so the leg leaves web/settings.json exactly as found. ---
+    s, body = post("/api/settings", {"bridge": {"enabled": "yes"}}, token)
+    check("POST bridge non-boolean enabled -> 400", s == 400, f"got {s}")
+    s, body = post("/api/settings",
+                   {"bridge": {"worker_url": "https://n.workers.dev/deep"}},
+                   token)
+    check("POST bridge worker URL with a path -> 400 + reason",
+          s == 400 and "worker_url" in str(body), f"got {s} {body}")
+    s, body = post("/api/settings", {"bridge": {"allow": ["bad host"]}}, token)
+    check("POST bridge malformed allow entry -> 400 + reason",
+          s == 400 and "allow" in str(body), f"got {s} {body}")
+    s, body = post("/api/settings", {"bridge": {"unknown": 1}}, token)
+    check("POST bridge unknown key -> 400", s == 400, f"got {s}")
+    s, body = post("/api/settings",
+                   {"bridge": {"enabled": True,
+                               "worker_url": "https://n.workers.dev",
+                               "allow": ["api.example.com",
+                                         "*.internal.example.com"],
+                               "allow_auth": [], "max_bytes": 65536}}, token)
+    check("POST bridge valid block -> 200", s == 200, f"got {s} {body}")
+    s, bst = get("/api/bridge/status")
+    check("GET /api/bridge/status -> 200 with the routing verdict",
+          s == 200 and isinstance(bst, dict)
+          and bst.get("enabled") is True and bst.get("routing") is True
+          and bst.get("allow") == ["api.example.com", "*.internal.example.com"]
+          and bst.get("worker_url") == "https://n.workers.dev"
+          and isinstance(bst.get("audit"), list)
+          and bst.get("audit_file") == "bridge_audit.jsonl"
+          and bst.get("max_bytes") == 65536,
+          f"got {s} {str(bst)[:300]}")
+    s, body = post("/api/settings",
+                   {"bridge": {"enabled": False, "worker_url": "",
+                               "allow": [], "allow_auth": [],
+                               "max_bytes": 1048576}}, token)
+    check("bridge reset to the fail-closed default -> 200", s == 200,
+          f"got {s} {body}")
+    s, bst = get("/api/bridge/status")
+    check("bridge off -> routing false, nothing proxied",
+          s == 200 and bst.get("enabled") is False
+          and bst.get("routing") is False and bst.get("allow") == [],
+          str(bst)[:200])
+    s, _ct, tpl_bytes = get_raw("/api/bridge/template")
+    tpl = tpl_bytes.decode("utf-8", "replace")
+    check("GET /api/bridge/template -> 200, the real Worker source",
+          s == 200 and "text/javascript" in _ct and "ALLOW" in tpl
+          and "hostAllowed" in tpl and "RATE_MAX" in tpl,
+          f"got {s} ctype={_ct} len={len(tpl_bytes)}")
+    s, _ct, readme_bytes = get_raw("/api/bridge/template?file=readme")
+    check("GET /api/bridge/template?file=readme -> 200",
+          s == 200 and "markdown" in _ct
+          and "allow-list" in readme_bytes.decode("utf-8", "replace"),
+          f"got {s} ctype={_ct}")
+    s, body = get("/api/bridge/template?file=nope")
+    check("GET /api/bridge/template unknown file -> 404", s == 404, f"got {s}")
+
+    # --- car 7 (D11 restraint): the leash read face + the pause switch -----
+    s, ctl = get("/api/control")
+    check("GET /api/control shape (no auth, no secrets)",
+          s == 200 and isinstance(ctl, dict)
+          and isinstance(ctl.get("paused"), bool)
+          and isinstance(ctl.get("stop_seq"), int)
+          and isinstance(ctl.get("budget"), dict)
+          and isinstance(ctl.get("gate"), dict),
+          f"got {s} keys={sorted(ctl) if isinstance(ctl, dict) else ctl}")
+    check("GET /api/control starts unpaused after boot",
+          isinstance(ctl, dict) and ctl.get("paused") is False,
+          str(ctl.get("paused")))
+    bud = ctl.get("budget") if isinstance(ctl, dict) else {}
+    check("GET /api/control budget blocks off by default",
+          isinstance(bud, dict)
+          and bud.get("limits") == {"usd_day": 0.0, "token_day": 0}
+          and bud.get("usd", {}).get("state") == "off"
+          and bud.get("tokens", {}).get("state") == "off",
+          str(bud)[:200])
+    check("GET /api/control gate allows a fresh turn",
+          isinstance(ctl, dict) and ctl.get("gate", {}).get("allowed") is True,
+          str(ctl.get("gate")))
+
+    # --- car 7: POST /api/control gates + actions --------------------------
+    s, body = post("/api/control", {"action": "stop"}, None)
+    check("POST /api/control no token -> 401", s == 401, f"got {s}")
+    s, body = post("/api/control", {"action": "explode"}, token)
+    check("POST /api/control unknown action -> 400 + details",
+          s == 400 and isinstance(body, dict)
+          and isinstance(body.get("details"), list)
+          and "action" in str(body.get("details")), f"got {s} {body}")
+    s, body = post("/api/control", {"action": "pause", "reason": "x" * 300}, token)
+    check("POST /api/control overlong reason -> 400", s == 400, f"got {s}")
+    # pause -> a NEW chat turn is refused with the honest code; always resume.
+    s, body = post("/api/control", {"action": "pause", "reason": "smoke"}, token)
+    check("POST /api/control pause -> 200 + state echo",
+          s == 200 and isinstance(body, dict)
+          and body.get("ok") is True
+          and body.get("control", {}).get("paused") is True,
+          f"got {s} {body}")
+    s, ctl2 = get("/api/control")
+    check("pause visible on the read face (fail-closed switch)",
+          s == 200 and ctl2.get("paused") is True
+          and ctl2.get("gate", {}).get("allowed") is False
+          and ctl2.get("gate", {}).get("code") == "paused",
+          str(ctl2.get("gate")))
+    s, body = post("/api/chat", {"text": "hi"}, token)
+    check("paused -> POST /api/chat refused 409 with gate code",
+          s == 409 and isinstance(body, dict)
+          and body.get("error") == "paused"
+          and isinstance(body.get("details"), list)
+          and body.get("details"), f"got {s} {body}")
+    s, body = post("/api/control", {"action": "resume"}, token)
+    check("POST /api/control resume -> 200 (the human fail-closed click)",
+          s == 200 and isinstance(body, dict)
+          and body.get("control", {}).get("paused") is False,
+          f"got {s} {body}")
+    s, ctl3 = get("/api/control")
+    check("resume re-opens the gate",
+          s == 200 and ctl3.get("paused") is False
+          and ctl3.get("gate", {}).get("allowed") is True,
+          str(ctl3.get("gate")))
+    # STOP only moves the counter (no turn running -> no side effect beyond it)
+    s0 = ctl3.get("stop_seq")
+    s, body = post("/api/control", {"action": "stop"}, token)
+    s, ctl4 = get("/api/control")
+    check("POST /api/control stop bumps stop_seq (baseline semantics)",
+          s == 200 and isinstance(body, dict) and body.get("ok") is True
+          and ctl4.get("stop_seq") == s0 + 1,
+          f"seq {s0} -> {ctl4.get('stop_seq')}")
+    check("stop alone never pauses (stop != pause)",
+          ctl4.get("paused") is False, str(ctl4.get("paused")))
+
+    # --- car 7: guardrails settings block (grammar in mycore.leash) --------
+    s, body = post("/api/settings", {"guardrails": {"usd_day": 5,
+                                                     "token_day": 250000}}, token)
+    check("guardrails valid write -> 200", s == 200, f"got {s} {body}")
+    s, st = get("/api/settings")
+    check("guardrails read back equal",
+          s == 200 and st.get("guardrails") == {"usd_day": 5.0,
+                                                "token_day": 250000},
+          str(st.get("guardrails")))
+    s, ctl5 = get("/api/control")
+    check("control view follows the new caps (states still ok/unknown)",
+          s == 200 and ctl5.get("budget", {}).get("limits")
+          == {"usd_day": 5.0, "token_day": 250000}
+          and ctl5.get("budget", {}).get("tokens", {}).get("state")
+          in ("ok", "unknown"), str(ctl5.get("budget"))[:200])
+    for bad, needle in [({"usd_day": -1}, "usd_day"),
+                        ({"token_day": True}, "token_day"),
+                        ({"nope": 1}, "nope")]:
+        s, body = post("/api/settings", {"guardrails": bad}, token)
+        det = str(body.get("details")) if isinstance(body, dict) else ""
+        check(f"guardrails refused: {needle}",
+              s == 400 and needle in det and "guardrails" in det,
+              f"got {s} {det[:120]}")
+    s, _ = post("/api/settings", {"guardrails": {"usd_day": 0,
+                                                  "token_day": 0}}, token)
+    check("guardrails restored to OFF", s == 200, f"got {s}")
+
+    # --- car 7: obedience settings block (grammar in mycore.assembly) -----
+    s, body = post("/api/settings",
+                   {"obedience": {"rules": ["always cite a source"],
+                                  "forbidden": ["never touch prod"]}}, token)
+    check("obedience valid write -> 200", s == 200, f"got {s} {body}")
+    s, st = get("/api/settings")
+    check("obedience read back equal",
+          s == 200 and st.get("obedience")
+          == {"rules": ["always cite a source"],
+              "forbidden": ["never touch prod"]},
+          str(st.get("obedience")))
+    for bad, needle in [({"rules": "x"}, "rules"),
+                        ({"rules": ["a", "a"]}, "duplicate"),
+                        ({"nope": []}, "nope"),
+                        ({"rules": ["  lead"]}, "rules")]:
+        s, body = post("/api/settings", {"obedience": bad}, token)
+        det = str(body.get("details")) if isinstance(body, dict) else ""
+        check(f"obedience refused: {needle}",
+              s == 400 and "obedience" in det,
+              f"got {s} {det[:120]}")
+    s, _ = post("/api/settings",
+                {"obedience": {"rules": [], "forbidden": []}}, token)
+    check("obedience restored to empty (stack unchanged)", s == 200, f"got {s}")
+
     # --- car 1-D1/D4: context_dirs + upstreams (empty = off must be legal,
     # malformed must be refused with the parser's exact reason) ---
     s, body = post("/api/settings", {"mycore": {"context_dirs": ""}}, token)
@@ -607,6 +800,9 @@ def main() -> int:
               and mine.get("available") is True
               and isinstance(mine.get("requests"), int)
               and isinstance(mine.get("pricing"), dict)
+              # car 5-D7 item 3: the measured prompt-cache hit rate rides along
+              # (value is null when nothing reported an input count)
+              and "cached_ratio" in mine
               and "display" in mine, str(mine)[:300])
         # per-key probe: model slots only, endpoint required, unset = 400
         s, body = post("/api/mycore/upstreams/test",
@@ -635,8 +831,8 @@ def main() -> int:
               f"got {s} {body}")
         s, secs = get("/api/secrets")
         _rows = secs.get("slots") if isinstance(secs, dict) else None
-        check("GET /api/secrets catalog UNCHANGED (34 rows, no model slots)",
-              isinstance(_rows, list) and len(_rows) == 34
+        check("GET /api/secrets catalog UNCHANGED (38 rows, no model slots)",
+              isinstance(_rows, list) and len(_rows) == 38
               and not any(str(r.get("name", "")).startswith("MODEL_UP_K")
                           for r in _rows),
               f"rows={len(_rows) if isinstance(_rows, list) else _rows}")
@@ -1430,6 +1626,49 @@ def main() -> int:
           and bool(str(q.get("error") or "").strip()),
           f"got {s} {str(q)[:200]}")
 
+    # --- Extensions car (Phase B): GET /api/quotes — keyless, READ-ONLY.
+    # Validation runs BEFORE any network I/O, so the three 400s are offline
+    # by construction. The valid-symbol leg accepts either a real 200 payload
+    # or an honest upstream failure (404/429/502/504) — the route must never
+    # answer 500 and must never invent a number — so this smoke stays green
+    # with or without internet, and counts are stable either way. ---
+    s, q = get("/api/quotes?market=jpy&symbol=sh600519")
+    check("GET /api/quotes unknown market -> 400 + honest details",
+          s == 400 and isinstance(q, dict)
+          and "market" in str(q.get("error") or "")
+          and "cn|us" in str(q.get("details")),
+          f"got {s} {str(q)[:160]}")
+    s, q = get("/api/quotes?market=cn&symbol=600519")
+    check("GET /api/quotes cn symbol without prefix -> 400 + format hint",
+          s == 400 and isinstance(q, dict)
+          and "sh600519" in str(q.get("details")),
+          f"got {s} {str(q)[:160]}")
+    s, q = get("/api/quotes?market=us&symbol=12345")
+    check("GET /api/quotes non-ticker symbol -> 400 + honest error",
+          s == 400 and isinstance(q, dict)
+          and bool(str(q.get("error") or "").strip()),
+          f"got {s} {str(q)[:160]}")
+    s, q = get("/api/quotes?market=cn&symbol=sh600519")
+    if s == 200 and isinstance(q, dict) and q.get("ok") is True:
+        check("GET /api/quotes 200 payload {ok, name, price, ts, source}",
+              isinstance(q.get("price"), (int, float))
+              and isinstance(q.get("name"), str) and bool(q.get("name"))
+              and isinstance(q.get("ts"), int)
+              and q.get("source") in ("sina", "yahoo")
+              and q.get("market") == "cn",
+              str({k: q.get(k) for k in ("name", "price", "ts", "source")})[:160])
+    else:
+        check("GET /api/quotes honest upstream answer (offline ok, no 500)",
+              s in (404, 429, 502, 504) and isinstance(q, dict)
+              and bool(str(q.get("error") or "").strip()),
+              f"got {s} {str(q)[:160]}")
+    q_text = json.dumps(q, ensure_ascii=False) if isinstance(q, dict) else str(q)
+    q_leak = re.findall(r'"[^"\"]*(?:token|secret|password|api_key|apikey)'
+                        r'[^"\"]*"\s*:', q_text, flags=re.I)
+    check("GET /api/quotes response carries no credential material",
+          not q_leak and all(v not in q_text for v in slot_vals),
+          f"leak_keys={q_leak}")
+
     # --- W2: /api/exchange/plans — GET is a plain read (no token, same as
     # every GET), POST is THE approval surface behind Bearer WEB_TOKEN.
     # Every POST below targets an unknown plan id or a rejected action, so
@@ -1774,7 +2013,8 @@ def main() -> int:
     _prod_map = dict(re.findall(r"(?m)^([A-Za-z0-9_]+)=(\S[^\r\n]*)$",
                                 _prod_bytes.decode("utf-8", "replace")))
     _leak_vals = [v for v in _prod_map.values() if len(v.strip()) >= 6]
-    _groups = {"core", "gateway", "web3", "channels", "media", "connectors"}
+    _groups = {"core", "gateway", "web3", "channels", "media", "connectors",
+               "connections", "backup"}
 
     # --- 1.1 GET /api/secrets: catalog shape, presence only, no values ----
     s, secs = get("/api/secrets")
@@ -1786,10 +2026,10 @@ def main() -> int:
         and isinstance(r.get("set"), bool)
         and isinstance(r.get("writable"), bool)
         for r in _rows)
-    check("GET /api/secrets shape (34 rows, name/group/set/length/writable)",
+    check("GET /api/secrets shape (38 rows, name/group/set/length/writable)",
           s == 200 and isinstance(secs, dict)
-          and isinstance(_rows, list) and len(_rows) == 34
-          and len(set(_row_names)) == 34 and _row_keys_ok
+          and isinstance(_rows, list) and len(_rows) == 38
+          and len(set(_row_names)) == 38 and _row_keys_ok
           and isinstance(secs.get("writable"), bool),
           f"s={s} rows={len(_rows) if isinstance(_rows, list) else _rows} "
           f"keys_ok={_row_keys_ok}")
@@ -1973,7 +2213,7 @@ def main() -> int:
         _grows = _g[1].get("slots") if _g else None
         check("secrets GET (in-process, temp file) reports presence, no values",
               _g is not None and _g[0] == 200
-              and isinstance(_grows, list) and len(_grows) == 34
+              and isinstance(_grows, list) and len(_grows) == 38
               and all(r.get("length") is None for r in _grows)
               and _g[1].get("writable") is True
               and "p3-again" not in json.dumps(_g[1])
@@ -1982,6 +2222,424 @@ def main() -> int:
     finally:
         _srv.SECRETS = _real_secrets_const
         _shutil.rmtree(_tmpdir, ignore_errors=True)
+
+    # --- 1.2b backup / restore plane (CKX-P1, car 3): the ladder over HTTP,
+    # prod-safe by construction — the only authenticated export below asks for
+    # the SETTINGS section, so no credential value ever crosses this lane's
+    # wire; the value-reading legs run in-process on a TEMP secrets file. ---
+    s, body = get("/api/backup/export")
+    check("GET /api/backup/export no token -> 401", s == 401, f"got {s}")
+    s, body = get_auth("/api/backup/export", "wrong-token-not-the-real-one")
+    check("GET /api/backup/export wrong token -> 401", s == 401, f"got {s}")
+    s, body = get_auth("/api/backup/export?include=bogus",
+                       token) if token else (0, {})
+    check("GET /api/backup/export unknown include -> 400 details",
+          s == 400 and isinstance(body, dict)
+          and any("include" in str(d) for d in body.get("details", [])),
+          f"got {s} {str(body)[:120]}")
+    if token:
+        s, body = get_auth("/api/backup/export?include=settings", token)
+        _btext = json.dumps(body, ensure_ascii=False) if isinstance(body, dict) else ""
+        check("GET /api/backup/export settings-only -> envelope, no secrets section",
+              s == 200 and isinstance(body, dict)
+              and body.get("ok") is True
+              and body.get("schema") == "aidog.backup.v1"
+              and body.get("schemaVersion") == "1"
+              and isinstance(body.get("created"), int)
+              and set(body.get("payload") or {}) == {"settings"}
+              and "WEB_TOKEN" not in _btext
+              and all(v not in _btext for v in _leak_vals),
+              f"got {s} keys={sorted((body or {}).get('payload') or {})}")
+        s, body = post("/api/backup/restore", {"payload": {},
+                                                "apply": {}}, None)
+        check("POST /api/backup/restore no token -> 401", s == 401, f"got {s}")
+        s, body = post("/api/backup/restore",
+                       {"schema": "other.v1", "schemaVersion": "1",
+                        "payload": {"settings": {}},
+                        "apply": {"settings": True}}, token)
+        check("POST /api/backup/restore schema mismatch -> 400 (nothing written)",
+              s == 400 and isinstance(body, dict)
+              and any("schema" in str(d) for d in body.get("details", [])),
+              f"got {s} {str(body)[:120]}")
+        s, body = post("/api/backup/restore",
+                       {"schema": "aidog.backup.v1", "schemaVersion": "1",
+                        "payload": {"settings": {}}, "apply": {}}, token)
+        check("POST /api/backup/restore with no section selected -> 400",
+              s == 400 and isinstance(body, dict)
+              and any("at least one section" in str(d)
+                      for d in body.get("details", [])),
+              f"got {s} {str(body)[:120]}")
+
+    # --- 1.2c backup value legs in-process: TEMP secrets file, never prod ---
+    _bdir = Path(_tempfile.mkdtemp(prefix="p3_backup_"))
+    _bsec = _bdir / "secrets.env"
+    _bsec.write_text("WEB_TOKEN=temp-gate-token-0123456789\n"
+                     "MODEL_API_KEY=p3-backup-sentinel-value\n",
+                     encoding="utf-8")
+    _bsec.chmod(0o600)
+    _real_backup_secrets = _srv.SECRETS
+
+    def _backup_call(route: str, doc, bearer: str | None = None, path: str = ""):
+        """Run one backup Handler method in-process (same module-surgery box
+        as 1.2): the request path rides along because the export reads its
+        `include` from the query string."""
+        raw = json.dumps(doc).encode() if doc is not None else b""
+        h = _srv.Handler.__new__(_srv.Handler)
+        h.headers = {"Content-Length": str(len(raw))}
+        if bearer is not None:
+            h.headers["Authorization"] = f"Bearer {bearer}"
+        h.rfile = _io.BytesIO(raw)
+        h.path = path or route
+        box: dict = {}
+        h._json = lambda obj, code=200: box.setdefault("res", (code, obj))
+        getattr(h, route)()
+        return box.get("res")
+
+    try:
+        _srv.SECRETS = _bsec
+        _r = _backup_call("_handle_backup_export", None,
+                          "temp-gate-token-0123456789",
+                          path="/api/backup/export?include=secrets")
+        _rp = ((_r[1] or {}).get("payload") or {}) if _r else {}
+        check("in-process export returns the allow-listed slot value + envelope",
+              _r is not None and _r[0] == 200
+              and _r[1].get("schema") == "aidog.backup.v1"
+              and (_rp.get("secrets") or {}).get("MODEL_API_KEY")
+              == "p3-backup-sentinel-value"
+              and "WEB_TOKEN" not in (_rp.get("secrets") or {}),
+              f"res={_r and _r[0]} sections={sorted(_rp)}")
+        check("in-process export carries no token and no section log line",
+              "temp-gate-token-0123456789" not in json.dumps(_r[1]),
+              "token leaked into the export document")
+        _r = _backup_call("_handle_backup_restore",
+                          {"schema": "aidog.backup.v1",
+                           "schemaVersion": "1",
+                           "payload": {"secrets": {
+                               "MODEL_API_KEY": "p3-backup-restored-value"}},
+                           "apply": {"secrets": True}},
+                          "temp-gate-token-0123456789",
+                          path="/api/backup/restore")
+        check("in-process restore applies the section and reads it back",
+              _r is not None and _r[0] == 200 and _r[1].get("ok") is True
+              and _r[1].get("secrets", {}).get("set") == 1
+              and _srv.read_env_slot("MODEL_API_KEY")
+              == "p3-backup-restored-value"
+              and "p3-backup-restored-value" not in json.dumps(_r[1]),
+              f"res={_r}")
+        _r = _backup_call("_handle_backup_restore",
+                          {"schema": "aidog.backup.v1",
+                           "schemaVersion": "1",
+                           "payload": {"secrets": {
+                               "AIDOG_TG_ALLOWED_USERS": "not-a-user-id",
+                               "MODEL_API_KEY": "p3-backup-second-value"}},
+                           "apply": {"secrets": True}},
+                          "temp-gate-token-0123456789",
+                          path="/api/backup/restore")
+        _rfail = ((_r[1] or {}).get("secrets") or {}).get("failed") or []
+        check("in-process restore: a refused slot is an honest partial 503",
+              _r is not None and _r[0] == 503 and _r[1].get("ok") is False
+              and len(_rfail) == 1
+              and _rfail[0].get("name") == "AIDOG_TG_ALLOWED_USERS"
+              and "not-a-user-id" not in json.dumps(_r[1])
+              and _srv.read_env_slot("MODEL_API_KEY")
+              == "p3-backup-second-value",
+              f"res={_r and _r[0]} failed={_rfail}")
+    finally:
+        _srv.SECRETS = _real_backup_secrets
+        _shutil.rmtree(_bdir, ignore_errors=True)
+    _bytes_bk = _prod_secrets.read_bytes() if _prod_secrets.exists() else b""
+    check("prod secrets.env untouched by the backup lane",
+          _bytes_bk == _prod_bytes, f"changed={_bytes_bk != _prod_bytes}")
+
+    # --- 1.2c2 agent backup control face (CKX-P2, car 8) --------------------
+    # Lives in its own temp STATE dir (AIDOG_MC_STATE covers both the cron
+    # registry and the local call meter, since both resolve through
+    # profile_paths.state_dir) and its own temp SETTINGS file, so nothing
+    # here can reach the production registry, the production meter or the
+    # production config. The passphrase is an ENV override for the duration
+    # and is swept out of every payload below — a value never serializes.
+    _agdir = Path(_tempfile.mkdtemp(prefix="p3_agent_"))
+    _ag_settings = _agdir / "settings.json"
+    _ag_settings.write_text(json.dumps(
+        {"zzz_handwritten": "kept",
+         "mycore": {"mcp": '[{"name":"demo","transport":"http",'
+                           '"url":"http://127.0.0.1:9/x"}]'}}), encoding="utf-8")
+    _ag_state = _agdir / "state"
+    _ag_state.mkdir(exist_ok=True)
+    _ag_pw = "p3-ckx-passphrase-SENTINEL-42"
+    _ag_keep = (os.environ.get("AIDOG_MC_STATE"),
+                os.environ.pop("AIDOG_CKX_PASSWORD", None),
+                _srv.SETTINGS_FILE)
+    try:
+        os.environ["AIDOG_MC_STATE"] = str(_ag_state)
+        os.environ["AIDOG_CKX_PASSWORD"] = _ag_pw
+        _srv.SETTINGS_FILE = _ag_settings
+
+        # --- read face: shape, presence-only, zero echo -------------------
+        # The LIVE process resolves its own state dir and its own settings,
+        # so the wire-level leg proves only the contract shape; every
+        # state-dependent fact is asserted in-process below, on the seams.
+        s, doc = get("/api/backup/agent")
+        check("GET /api/backup/agent wire shape (fixed 5 keys, no auth)",
+              s == 200 and isinstance(doc, dict)
+              and set(doc) == {"node", "password_slot", "quota", "scheduled",
+                               "mcp"}
+              and isinstance((doc.get("node") or {}).get("ok"), bool)
+              and isinstance((doc.get("password_slot") or {}).get("set"), bool)
+              and isinstance(doc.get("quota"), dict)
+              and (doc.get("quota") or {}).get("cap") == 1000
+              and doc.get("quota", {}).get("state") in ("ok", "warn", "over"),
+              f"got {s} {str(doc)[:200]}")
+        _ag_text = json.dumps(doc, ensure_ascii=False)
+        check("GET /api/backup/agent carries no value, no path, no prompt",
+              _ag_pw not in _ag_text
+              and _srv.CKX_SCHEDULE_PROMPT not in _ag_text
+              and "/tmp" not in _ag_text and "/mnt" not in _ag_text,
+              "leak in the agent status payload")
+
+        # in-process (seams installed): the passphrase gate reads true here
+        _r = _srv_call("_handle_backup_agent_get", None, None)
+        check("agent read face: slot set + meter at 0 + nothing scheduled",
+              _r is not None and _r[0] == 200
+              and (_r[1].get("password_slot") or {}).get("set") is True
+              and (_r[1].get("quota") or {}).get("used") == 0
+              and _r[1].get("scheduled") is None
+              and (_r[1].get("node") or {}).get("ok") is True,
+              f"res={_r}")
+
+        # --- write face: ladder ------------------------------------------
+        _r = _srv_call("_handle_backup_agent_post", {"action": "schedule"}, None)
+        check("POST /api/backup/agent no bearer -> 401",
+              _r is not None and _r[0] == 401, f"res={_r}")
+        _r = _srv_call("_handle_backup_agent_post", {"action": "frobnicate"},
+                       token)
+        check("POST /api/backup/agent unknown action -> 400 names the ladder",
+              _r is not None and _r[0] == 400
+              and "quota_reset" in str(_r[1].get("details")), f"res={_r}")
+        _r = _srv_call("_handle_backup_agent_post",
+                       {"action": "schedule", "spec": "whenever"}, token)
+        check("POST agent bad spec -> 400 with the scheduler's own grammar",
+              _r is not None and _r[0] == 400
+              and "daily 08:00" in str(_r[1].get("details")), f"res={_r}")
+        check("no agent leg wrote the production cron registry or meter",
+              _prod_bytes == (_prod_secrets.read_bytes()
+                               if _prod_secrets.exists() else b""),
+              "prod secrets changed")
+
+        # --- schedule round trip in the temp registry ---------------------
+        _r = _srv_call("_handle_backup_agent_post",
+                       {"action": "schedule", "spec": "daily 03:00"}, token)
+        _job = (_r[1] or {}).get("job") if _r else None
+        check("agent schedule -> 200 with a prompt job named ckx-backup",
+              _r is not None and _r[0] == 200 and isinstance(_job, dict)
+              and _job.get("name") == "ckx-backup"
+              and _job.get("kind") == "prompt"
+              and _job.get("spec") == "daily 03:00"
+              and _job.get("origin") is None, f"res={_r}")
+        check("agent schedule stores the metadata-only prompt text",
+              isinstance(_job, dict)
+              and "backup_run" in str(_job.get("text"))
+              and "Never print" in str(_job.get("text"))
+              and _ag_pw not in str(_job.get("text")),
+              str((_job or {}).get("text"))[:80])
+        _r = _srv_call("_handle_backup_agent_post",
+                       {"action": "schedule", "spec": "daily 03:00"}, token)
+        check("agent schedule twice -> idempotent 200 already=true",
+              _r is not None and _r[0] == 200
+              and (_r[1] or {}).get("already") is True, f"res={_r}")
+        _r = _srv_call("_handle_backup_agent_post",
+                       {"action": "schedule", "spec": "daily 05:00"}, token)
+        check("agent schedule with a different spec -> 409, nothing rewritten",
+              _r is not None and _r[0] == 409
+              and "daily 03:00" in str(_r[1].get("details")), f"res={_r}")
+        _r = _srv_call("_handle_backup_agent_get", None, None)
+        check("read face shows the schedule after the write",
+              _r is not None and _r[0] == 200
+              and isinstance((_r[1].get("scheduled") or {}).get("spec"), str)
+              and _r[1]["scheduled"]["spec"] == "daily 03:00"
+              and _r[1]["scheduled"]["kind"] == "prompt"
+              and _r[1]["scheduled"]["name"] == "ckx-backup",
+              str((_r[1] if _r else None) and _r[1].get("scheduled")))
+        _r = _srv_call("_handle_backup_agent_post",
+                       {"action": "unschedule"}, token)
+        check("agent unschedule -> 200 removed by the fixed label",
+              _r is not None and _r[0] == 200
+              and (_r[1] or {}).get("removed") == "ckx-backup", f"res={_r}")
+        _r = _srv_call("_handle_backup_agent_post",
+                       {"action": "unschedule"}, token)
+        check("agent unschedule again -> 404 (honest absence)",
+              _r is not None and _r[0] == 404, f"res={_r}")
+
+        # --- quota gate + meter reset -------------------------------------
+        _meter = _ag_state / "ckx_calls.jsonl"
+        with _meter.open("w", encoding="utf-8") as fh:
+            for _ in range(1000):
+                fh.write('{"ts":1,"kind":"backup"}\n')
+        _r = _srv_call("_handle_backup_agent_post",
+                       {"action": "schedule", "spec": "daily 03:00"}, token)
+        check("agent schedule refused at the call-quota cap (D12 gate)",
+              _r is not None and _r[0] == 409
+              and "1000" in str(_r[1].get("details")), f"res={_r}")
+        _r = _srv_call("_handle_backup_agent_post",
+                       {"action": "quota_reset"}, token)
+        check("agent quota_reset -> 200 with a zeroed local meter",
+              _r is not None and _r[0] == 200
+              and (_r[1].get("quota") or {}).get("used") == 0, f"res={_r}")
+        check("reset wrote the TEMP meter only",
+              _meter.exists() and _meter.stat().st_size == 0
+              and not (_ag_state.parent.parent / "ckx_calls.jsonl").exists(),
+              "meter escaped the temp state dir")
+
+        # --- MCP switch: only the ckx entry moves -------------------------
+        _r = _srv_call("_handle_backup_agent_post",
+                       {"action": "mcp_on"}, token)
+        _mc_raw = (json.loads(_ag_settings.read_text(encoding="utf-8"))
+                   .get("mycore") or {}).get("mcp")
+        _mc_entries = json.loads(_mc_raw) if str(_mc_raw).strip() else []
+        check("agent mcp_on -> 200, ckx appended, the demo server survives",
+              _r is not None and _r[0] == 200
+              and [e.get("name") for e in _mc_entries] == ["demo", "ckx"]
+              and _mc_entries[1].get("env")
+              == {"AIDOG_CKX_PASSWORD": "$AIDOG_CKX_PASSWORD"}
+              and any("ckx_decrypt" in str(d)
+                      for d in (_mc_entries[1].get("deny") or [])),
+              f"res={_r} entries={[e.get('name') for e in _mc_entries]}")
+        check("agent mcp_on preserves an unknown hand-written settings key",
+              json.loads(_ag_settings.read_text(encoding="utf-8"))
+              .get("zzz_handwritten") == "kept", "key dropped")
+        _r = _srv_call("_handle_backup_agent_post",
+                       {"action": "mcp_on"}, token)
+        check("agent mcp_on twice never duplicates the entry",
+              _r is not None and _r[0] == 200
+              and [e.get("name") for e in json.loads(
+                  (json.loads(_ag_settings.read_text(encoding="utf-8"))
+                   ["mycore"]["mcp"]))] == ["demo", "ckx"], f"res={_r}")
+        _r = _srv_call("_handle_backup_agent_get", None, None)
+        check("agent read face reports mcp enabled after mcp_on",
+              _r is not None and _r[0] == 200
+              and (_r[1].get("mcp") or {}).get("enabled") is True
+              and (_r[1].get("password_slot") or {}).get("set") is True,
+              f"res={_r}")
+        _r = _srv_call("_handle_backup_agent_post",
+                       {"action": "mcp_off"}, token)
+        _mc_raw2 = (json.loads(_ag_settings.read_text(encoding="utf-8"))
+                    .get("mycore") or {}).get("mcp")
+        check("agent mcp_off -> 200, only the ckx entry removed",
+              _r is not None and _r[0] == 200
+              and [e.get("name") for e in json.loads(_mc_raw2)] == ["demo"],
+              f"res={_r} raw={_mc_raw2}")
+        _r = _srv_call("_handle_backup_agent_post",
+                       {"action": "mcp_off"}, token)
+        check("agent mcp_off twice -> idempotent changed=false",
+              _r is not None and _r[0] == 200
+              and (_r[1] or {}).get("changed") is False, f"res={_r}")
+
+        # --- mcp_on pre-flight: the passphrase slot gate ------------------
+        os.environ.pop("AIDOG_CKX_PASSWORD", None)
+        _r = _srv_call("_handle_backup_agent_post",
+                       {"action": "mcp_on"}, token)
+        check("agent mcp_on without the passphrase slot -> 409 + the slot name",
+              _r is not None and _r[0] == 409
+              and "AIDOG_CKX_PASSWORD" in str(_r[1].get("details"))
+              and _ag_pw not in json.dumps(_r[1]), f"res={_r}")
+        _r = _srv_call("_handle_backup_agent_post",
+                       {"action": "schedule", "spec": "daily 03:00"}, token)
+        check("agent schedule without the passphrase slot -> 409",
+              _r is not None and _r[0] == 409, f"res={_r}")
+        os.environ["AIDOG_CKX_PASSWORD"] = _ag_pw
+
+        # --- zero-echo sweep over every agent response --------------------
+        _leaked = []
+        for _doc in ({"action": "schedule"}, {"action": "unschedule"},
+                     {"action": "quota_reset"}, {"action": "mcp_off"},
+                     {"action": "schedule", "spec": "daily 03:00"}):
+            _rr = _srv_call("_handle_backup_agent_post", _doc, token)
+            if _rr and _ag_pw in json.dumps(_rr[1], ensure_ascii=False):
+                _leaked.append(str(_doc))
+        _gg = _srv_call("_handle_backup_agent_get", None, None)
+        if _gg and _ag_pw in json.dumps(_gg[1], ensure_ascii=False):
+            _leaked.append("get")
+        check("agent face zero-echo: the passphrase value never serializes",
+              not _leaked, ",".join(_leaked))
+        # clean up the temp schedule the sweep may have re-created
+        _srv_call("_handle_backup_agent_post", {"action": "unschedule"}, token)
+    finally:
+        for _k, _v in (("AIDOG_MC_STATE", _ag_keep[0]),
+                       ("AIDOG_CKX_PASSWORD", _ag_keep[1])):
+            if _v is None:
+                os.environ.pop(_k, None)
+            else:
+                os.environ[_k] = _v
+        _srv.SETTINGS_FILE = _ag_keep[2]
+        _shutil.rmtree(_agdir, ignore_errors=True)
+    check("prod secrets.env untouched by the agent-backup lane",
+          (_prod_secrets.read_bytes() if _prod_secrets.exists() else b"")
+          == _prod_bytes, "prod secrets changed")
+
+    # --- 1.2d car 4 (D6) decision plane: settings row + intent route -------
+    # Everything here is OFF by default: the settings block proves the shape,
+    # the endpoints row proves presence-only key facts, and the intent route
+    # proves the honest "no fast path" envelope (no vendor call is ever made
+    # by this lane — an ACTIVE endpoint is reported as an envelope, not probed).
+    s, set_doc = get("/api/settings")
+    dec_blk = (set_doc.get("mycore") or {}).get("decision") \
+        if isinstance(set_doc, dict) else None
+    check("GET /api/settings carries mycore.decision (off by default)",
+          s == 200 and isinstance(dec_blk, dict)
+          and dec_blk.get("enabled") is False
+          and dec_blk.get("url") == "" and dec_blk.get("model") == ""
+          and dec_blk.get("router_model") == "",
+          f"block={dec_blk}")
+    s, ep = get("/api/mycore/endpoints")
+    dec_row = ep.get("decision") if isinstance(ep, dict) else None
+    check("GET /api/mycore/endpoints carries the decision row (presence only)",
+          s == 200 and isinstance(dec_row, dict)
+          and dec_row.get("key_slot") == "DECISION_API_KEY"
+          and isinstance(dec_row.get("key_set"), bool)
+          and isinstance(dec_row.get("active"), bool)
+          and dec_row.get("reason") in ("", "disabled", "no_key")
+          and "value" not in dec_row,
+          f"row={dec_row}")
+    if token:
+        for bad_doc, want in (
+                ({"enabled": "yes"}, "enabled must be a boolean"),
+                ({"nope": 1}, "unknown mycore.decision key"),
+                ({"enabled": True, "url": "javascript:alert(1)"},
+                 "url must be an http(s) base URL"),
+                ({"enabled": True, "router_model": "has space"},
+                 "router_model must be a model id")):
+            s, body = post("/api/settings",
+                           {"mycore": {"decision": bad_doc}}, token)
+            check(f"POST settings decision: {want[:38]} -> 400",
+                  s == 400 and isinstance(body, dict)
+                  and any(want in str(d) for d in body.get("details", [])),
+                  f"got {s} {str(body)[:120]}")
+        s, body = post("/api/settings",
+                       {"mycore": {"decision": {"enabled": False, "url": "",
+                                                "model": "",
+                                                "router_model": ""}}}, token)
+        check("POST settings decision (defaults) -> 200",
+              s == 200 and isinstance(body, dict) and body.get("ok") is True,
+              f"got {s} {str(body)[:120]}")
+        s, body = post("/api/extensions/intent",
+                       {"text": "check BTC price"}, token)
+        if isinstance(dec_row, dict) and dec_row.get("active"):
+            check("POST /api/extensions/intent answers an honest envelope",
+                  s == 200 and isinstance(body, dict) and "available" in body,
+                  f"got {s} {str(body)[:120]}")
+        else:
+            check("POST /api/extensions/intent (client off) -> available:false",
+                  s == 200 and isinstance(body, dict)
+                  and body.get("available") is False
+                  and body.get("reason") in ("disabled", "no_key"),
+                  f"got {s} {str(body)[:120]}")
+    s, body = post("/api/extensions/intent", {"text": "check BTC price"}, None)
+    check("POST /api/extensions/intent no token -> 401", s == 401, f"got {s}")
+    s, body = post("/api/extensions/intent", {"text": ""}, token)
+    check("POST /api/extensions/intent empty text -> 400",
+          s == 400 and isinstance(body, dict)
+          and any("text" in str(d) for d in body.get("details", [])),
+          f"got {s} {str(body)[:120]}")
 
     # --- 1.3 capabilities additions: names only ---
     s, caps2 = get("/api/capabilities")
@@ -2001,9 +2659,9 @@ def main() -> int:
     _kt = (caps2.get("mycore") or {}).get("known_tools") \
         if isinstance(caps2, dict) else None
     from mycore.tools import KNOWN_TOOL_NAMES as _KTN
-    check("GET capabilities mycore.known_tools == 26 sorted names",
-          isinstance(_kt, list) and len(_kt) == 26
-          and _kt == sorted(_KTN) and len(set(_kt)) == 26,
+    check("GET capabilities mycore.known_tools == 27 sorted names",
+          isinstance(_kt, list) and len(_kt) == 27
+          and _kt == sorted(_KTN) and len(set(_kt)) == 27,
           f"n={len(_kt) if isinstance(_kt, list) else _kt}")
 
     # --- 1.4 GET /api/cron: read-only sanitized job list ---
@@ -2730,6 +3388,50 @@ def main() -> int:
               _r is not None and _row.get("set") is False
               and _row.get("ok") is None
               and _row.get("reason") == "not_set", f"{_row}")
+        # --- car 6 (D10): the two Connections slots. Shape rules offline;
+        #     the LIVE leg points the endpoint seams at a closed port, so the
+        #     honest "could not reach" answer is produced with zero real
+        #     network and the value never appears in any outcome. ---
+        for _cname in ("CLOUDFLARE_API_TOKEN", "GITHUB_TOKEN"):
+            _r = _c_call("_handle_slot_verify", {"name": _cname}, _GATE)
+            _row = (_r[1].get("results") or [None])[0] if _r else None
+            check(f"in-process verify unset {_cname} -> not_set",
+                  _r is not None and _row.get("set") is False
+                  and _row.get("ok") is None
+                  and _row.get("reason") == "not_set", f"{_row}")
+        _c_call("_handle_secrets_write",
+                {"name": "CLOUDFLARE_API_TOKEN", "value": "short"}, _GATE)
+        _r = _c_call("_handle_slot_verify",
+                     {"name": "CLOUDFLARE_API_TOKEN"}, _GATE)
+        _row = (_r[1].get("results") or [None])[0] if _r else None
+        check("in-process verify a short Cloudflare token -> bad_format, no value echo",
+              _r is not None and _row.get("ok") is False
+              and _row.get("reason") == "bad_format"
+              and "short" not in json.dumps(_r[1]), f"{_row}")
+        _saved_probe_env = {k: os.environ.get(k) for k in
+                            ("AIDOG_CF_API_URL", "AIDOG_GH_API_URL")}
+        try:
+            os.environ["AIDOG_CF_API_URL"] = "http://127.0.0.1:9/client/v4"
+            os.environ["AIDOG_GH_API_URL"] = "http://127.0.0.1:9"
+            for _cn, _cv in (("CLOUDFLARE_API_TOKEN", "cf-" + "x" * 24),
+                             ("GITHUB_TOKEN", "gh_" + "y" * 30)):
+                _c_call("_handle_secrets_write",
+                        {"name": _cn, "value": _cv}, _GATE)
+                _r = _c_call("_handle_slot_verify", {"name": _cn}, _GATE)
+                _row = (_r[1].get("results") or [None])[0] if _r else None
+                check(f"in-process verify {_cn} -> live level, honest network reason",
+                      _r is not None and _row.get("level") == "live"
+                      and _row.get("reason") in ("network", "upstream_error")
+                      and _cv not in json.dumps(_r[1])
+                      and "127.0.0.1" not in str(_row.get("detail")),
+                      f"{_row}")
+        finally:
+            for _ek, _ev in _saved_probe_env.items():
+                if _ev is None:
+                    os.environ.pop(_ek, None)
+                else:
+                    os.environ[_ek] = _ev
+            _c_write_secrets()          # drop both slots again
         _r = _c_call("_handle_slot_verify", {"name": "NOT_A_SLOT"}, _GATE)
         check("in-process verify unknown slot -> 400",
               _r is not None and _r[0] == 400, f"{_r}")
@@ -2739,12 +3441,15 @@ def main() -> int:
             if isinstance(_rows_all, list) else []
         _live_levels = {x.get("name") for x in (_rows_all or [])
                         if isinstance(x, dict) and x.get("level") == "live"}
-        check("in-process verify all -> 34 rows (33 editable + WEB_TOKEN)",
-              _r is not None and _r[0] == 200 and len(_rows_all) == 34
-              and len(set(_all_names)) == 34, f"n={len(_rows_all or [])}")
-        check("in-process verify all -> only the 4 probe slots claim live",
-              _live_levels == {"AIDOG_COMMUNITY_PAT", "AIDOG_GH_PAT",
-                               "MYCORE_TG_TOKEN", "MODEL_API_KEY"},
+        check("in-process verify all -> 38 rows (37 editable + WEB_TOKEN)",
+              _r is not None and _r[0] == 200 and len(_rows_all) == 38
+              and len(set(_all_names)) == 38, f"n={len(_rows_all or [])}")
+        check("in-process verify all -> only probe slots claim live",
+              {"AIDOG_COMMUNITY_PAT", "AIDOG_GH_PAT", "MYCORE_TG_TOKEN",
+               "MODEL_API_KEY"} <= _live_levels
+              and _live_levels <= {"AIDOG_COMMUNITY_PAT", "AIDOG_GH_PAT",
+                                   "MYCORE_TG_TOKEN", "MODEL_API_KEY",
+                                   "CLOUDFLARE_API_TOKEN", "GITHUB_TOKEN"},
               str(sorted(_live_levels)))
         check("in-process verify all -> zero credential echo across the batch",
               all(v not in json.dumps(_r[1]) for v in _c_leaks),

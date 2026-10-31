@@ -165,9 +165,13 @@ def read(days: int = READ_DAYS) -> dict:
     """Aggregate the last `days` daily files (UTC day names, today included).
 
     Returns {days:[...], rows:int, truncated:bool, requests, ok, fail,
-    in_tokens, out_tokens, cached, by_endpoint:[...], by_model:[...],
+    in_tokens, out_tokens, cached, cached_ratio, by_endpoint:[...], by_model:[...],
     by_day:{day: {...}}} — token totals count ONLY rows that reported them
-    (`no_usage` rows are counted separately, never guessed as 0)."""
+    (`no_usage` rows are counted separately, never guessed as 0).
+    `cached_ratio` (car 5-D7 item 3) is the provider-reported prompt-cache hit
+    rate = cached / in_tokens over the window, rounded to 4 decimals, or None
+    when nothing reported an input count — a measured fact, never a target and
+    never a promise; we still send no cache directive of our own."""
     with _lock:
         d = _dir
     if d is None:
@@ -197,6 +201,7 @@ def read(days: int = READ_DAYS) -> dict:
         "in_tokens": 0,
         "out_tokens": 0,
         "cached": 0,
+        "cached_ratio": None,
         "no_usage": 0,
         "by_endpoint": [],
         "by_model": [],
@@ -246,6 +251,8 @@ def read(days: int = READ_DAYS) -> dict:
     agg["by_endpoint"] = [{"ep": k, **v} for k, v in sorted(eps.items())]
     agg["by_model"] = [{"model": k, **v} for k, v in sorted(models.items())]
     agg["by_day"] = dict(sorted(daymap.items()))
+    if agg["in_tokens"] > 0:
+        agg["cached_ratio"] = round(agg["cached"] / agg["in_tokens"], 4)
     return agg
 
 

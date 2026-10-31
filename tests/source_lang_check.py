@@ -38,6 +38,10 @@ SCAN_SUFFIXES = (".py", ".sh", ".js")
 INLINE_MARKER = "i18n-allow"
 
 # Directory names never scanned (runtime state, caches, vendored blobs).
+# `vendor` = third-party code shipped byte-exact (web/static/vendor/): it is
+# not our source, it carries the upstream's own message tables — which may
+# legitimately hold non-English strings — and the publish leak scan still
+# runs over it like any other tracked file.
 # Nested sibling repos moved into this directory (owner decree 2026-10-28) hold
 # their own CJK and upstream-brand material BY DESIGN — they are independent git
 # repos and must stay invisible to this lint exactly as .gitignore keeps them
@@ -45,7 +49,7 @@ INLINE_MARKER = "i18n-allow"
 SKIP_DIR_NAMES = {".git", "__pycache__", "node_modules", ".venv", "venv",
                   "data", "tmp", ".screenshots", ".voice", ".pi",
                   "aidog-internal", "aidog-skills", "aidog-public",
-                  "_public_meta"}
+                  "_public_meta", "vendor"}
 # Path prefixes exempt from the scan (relative, POSIX-style).
 ALLOW_PREFIXES = ("overlay/locales/", "tests/runs/", "docs/")
 # Data files named explicitly for documentation (outside SCAN_SUFFIXES today,

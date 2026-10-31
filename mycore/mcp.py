@@ -27,7 +27,9 @@ Config (empty = off, zero behavior change):
      "deny":  ["*delete*"]}          # deny patterns, applied after allow
   Secrets stay env SLOT NAMES only (car 1 modeltier discipline): a $SLOT that
   is not set fails that server with an honest note — never a literal secret
-  in settings.
+  in settings. Resolution is process env FIRST, then the profile secrets.env
+  own-line slot (car 8, same fallback as model._slot_key), so an operator who
+  only writes the console never has to export the value by hand.
 
 Trust model: an MCP tool runs with whatever rights its own server has —
 the allowed-roots policy of our path tools does NOT apply to remote tools
@@ -224,15 +226,20 @@ def parse_config(raw: str | None) -> list[ServerConfig]:
 
 
 def resolve_slot(value: str, server: str, field_name: str) -> str:
-    """Resolve one `$SLOT` reference from the environment. A literal (no $
-    prefix) passes through; a missing slot is an honest per-server failure —
-    never a default, never a logged value."""
+    """Resolve one `$SLOT` reference: process env first, then the profile
+    `secrets.env` own-line slot (car 8 — the same env-then-file fallback
+    model._slot_key and envslots.wd_chat_target already use). A literal (no
+    `$` prefix) passes through; a missing slot is an honest per-server
+    failure — never a default, never a logged value."""
     m = _SLOT_RE.match(value)
     if not m:
         return value
     slot = m.group(1)
-    got = os.environ.get(slot)
-    if got is None or got == "":
+    got = os.environ.get(slot) or ""
+    if not got:
+        from . import envslots   # local import: keeps the module graph acyclic
+        got = envslots.slot_value(slot)
+    if not got:
         raise McpError(f"{field_name} slot '{slot}' is not set "
                        f"(mcp server '{server}')")
     return got

@@ -23,7 +23,7 @@ contract, [event_hooks.md](event_hooks.md), [channels.md](channels.md) and
 |---|---|
 | Config carrier | the concrete key / slot / env var the feature reads |
 | Console state (after this car) | `configurable` = the console can change it · `read-only` = the console renders state but cannot change it (and that is by design) · `designed elsewhere` = the carrier is CLI/env by design — see the second table, **not** a console gap · `not applicable` = the feature has no config carrier to expose |
-| E2E evidence | legs of `tmp/e2e_frontend_coverage.py` (backend, isolated profile — `L1..L8`) and `tmp/e2e_frontend_ui.js` (Playwright, isolated console — `U1..U7`), plus the activation car's `tmp/e2e_activation.py` (`L1..L10`) and `tmp/e2e_activation_ui.js` (`U0..U9`) — same letters, different file, so every cell names the file it means — plus the standing gate suites |
+| E2E evidence | legs of `tmp/e2e_frontend_coverage.py` (backend, isolated profile — `L1..L8`) and `tmp/e2e_frontend_ui.js` (Playwright, isolated console — `U1..U8`), plus the activation car's `tmp/e2e_activation.py` (`L1..L10`) and `tmp/e2e_activation_ui.js` (`U0..U9`) — same letters, different file, so every cell names the file it means — plus the standing gate suites |
 
 Values are compared inside the test process and never printed; no credential
 value appears in any payload, DOM, log or failure detail.
@@ -52,7 +52,7 @@ value appears in any payload, DOM, log or failure detail.
 | profiles | env `AIDOG_PROFILE` `AIDOG_PROFILES_DIR` `AIDOG_MC_STATE` · CLI `aidog profile …` | **read-only** — profile name appended to the status line (unchanged) | not re-exercised by this car · `tests/profile_f.py`, `tmp/e2e_car_f.py` | Runtime path seam resolves at launch — a console switch would fork state |
 | subagents | settings `mycore.models` (same whitelist as `/model`) · `delegate` tool | **configurable** — Settings `#mycModels` comma list (0.5.40, schema-validated ≤32 ids); the per-turn model choice stays in the picker/CLI | `tmp/e2e_activation.py` `L2` · `tmp/e2e_activation_ui.js` `U6` | Previously listed as "designed elsewhere" — the list itself is console-managed now |
 | terminal_backends | settings `mycore.shell` (local / docker / ssh grammar) | **configurable** — Settings `#mycShell` | `L3` (write → `capabilities.terminal.backend`) · `U1` (field → read-back) | The raw spec never serializes into capabilities |
-| tool_toggles | env `MYCORE_TOOLS_OFF` > settings `mycore.tools_off` (1..32) | **configurable** — Settings `#toolsOffList` checkbox grid rendered from `capabilities.mycore.known_tools` (25 names) | `L3` (write → `capabilities.tools` shrinks) | Unknown names are refused before any write |
+| tool_toggles | env `MYCORE_TOOLS_OFF` > settings `mycore.tools_off` (1..32) | **configurable** — Settings `#toolsOffList` checkbox grid rendered from `capabilities.mycore.known_tools` (27 names) | `L3` (write → `capabilities.tools` shrinks) | Unknown names are refused before any write |
 | tts_engines | env `AIDOG_TTS_URL` > settings `media.tts_*` · slot `TTS_API_KEY` | **configurable** — Settings → Media engine/endpoint/model + `TTS_API_KEY` row | `L1` `U2` | `media.tts.byok` presence is now visible through the slot row |
 | voice_announcements | settings `voice_volume` `alert_preview` `sound` | **configurable** (unchanged) | not re-exercised by this car · `tests/web_console_p3.py` voice legs | — |
 | voice_session | settings `media.stt_model` `media.wake_phrases` | **configurable** (unchanged) | not re-exercised by this car · `run.py::test_stt`, `tmp/e2e_car4c.py` | No credential slot exists for STT |
@@ -61,11 +61,13 @@ value appears in any payload, DOM, log or failure detail.
 ## 2. Designed CLI/env — not console gaps
 
 These carriers are CLI/env **by design**. Their absence from the console is a
-documented boundary, not missing coverage:
+documented boundary, not missing coverage (re-verified round B: the
+`checkpoints` row has since gained a console *read/restore* face — 0.5.51 —
+while its carrier itself stays CLI/env):
 
 | Feature | Carrier (by design) | Console state | Notes |
 |---|---|---|---|
-| checkpoints | env `AIDOG_MC_STATE` · TG `/checkpoint` · CLI `python3 -m mycore.checkpoint --list/--restore` | designed elsewhere | Pre-write byte snapshots; restore is an explicit operator action |
+| checkpoints | env `AIDOG_MC_STATE` · TG `/checkpoint` · CLI `python3 -m mycore.checkpoint --list/--restore` | **read-only list + restore action** since 0.5.51 (creation stays CLI/env) — Overview `#ckptList` renders id/when/size/relative path/hash only and `ckpt.restoreBtn` posts `POST /api/checkpoints {action:"restore"}` | Pre-write byte snapshots; snapshot **bytes** never render (§4) — the console may list and restore, it never displays a snapshot's contents |
 | setup_wizard | CLI `aidog setup` writes 6 slots + `mycore.{base_url,model}` | designed elsewhere **+ console mirror (0.5.40)** — Overview `#actCard` renders the wizard's own `--check` semantics (required/format/endpoint/service, `ready` = the same 0/2/1 pending rule) with fix deep-links; the guided *writing* flow stays CLI | Guided CLI wizard, no GUI installer; zero-echo asserted by `tests/setup_wizard_b3.py`, pattern parity by `tmp/e2e_activation.py` `L1` and `tests/web_console_p3.py` |
 | site_visibility | Cloudflare Pages + KV via `deploy/deploy_site.sh` | designed elsewhere | Marketing site is a separate surface with its own checks |
 | desktop_client | env `AIDOG_REPO` `AIDOG_WEB_PORT` · `npx electron .` | designed elsewhere | The shell *hosts* the console; the HUD is its own page |
@@ -79,10 +81,10 @@ documented boundary, not missing coverage:
 
 | Endpoint | Auth | Contract |
 |---|---|---|
-| `GET /api/secrets` | loopback, optional `Bearer WEB_TOKEN` | `{"slots":[{name, group, set, length}], "writable": bool}` — 32 writable slots in six groups (`core` `gateway` `web3` `channels` `media` `connectors`) plus `WEB_TOKEN` presence-only (`writable:false`); `length` is `null` unless a valid Bearer is supplied — invalid/absent token omits lengths, never a 401 |
+| `GET /api/secrets` | loopback, optional `Bearer WEB_TOKEN` | `{"slots":[{name, group, set, length}], "writable": bool}` — 37 writable slots in eight groups (`core` `gateway` `web3` `channels` `media` `connectors` `connections` `backup`) plus `WEB_TOKEN` presence-only (`writable:false`); `length` is `null` unless a valid Bearer is supplied — invalid/absent token omits lengths, never a 401 |
 | `POST /api/secrets` | `Bearer WEB_TOKEN` (503 when the slot is absent) | `{name, value}` → `{ok, changed, slot{name, group, set, length}}`; `value:""` clears; atomic own-line rewrite, mode 0600; 400 on unknown name / `WEB_TOKEN` / control chars / >4096 / leading-trailing whitespace — all before any write |
 | `GET /api/cron` | loopback, no auth | `{"jobs":[{id,type,spec,text,kind,source,origin,created_at,last_fired,done,due,next}], "count": N}` from the scheduler registry; fixed field whitelist (no absolute path), corrupt/absent file → `{"jobs":[],"count":0}` |
-| `GET /api/capabilities` (extended) | loopback, no auth | top-level `env_overrides` (env var **names** only) + `mycore.known_tools` (25 names, the checkbox grid source) |
+| `GET /api/capabilities` (extended) | loopback, no auth | top-level `env_overrides` (env var **names** only) + `mycore.known_tools` (27 names, the checkbox grid source) |
 | `GET /api/settings` (extended) | loopback, no auth | always carries the `evolution` (4 keys) and `hooks` partitions now — absence-as-default is gone |
 
 **New controls**
@@ -209,10 +211,13 @@ the restart handler logs a tmux session name and a return code only.
   three states (3) · L8 production console healthy + files byte-identical
   (3). Run: `python3 tmp/e2e_frontend_coverage.py` (rc 0 = 0 fail).
 - **`tmp/e2e_frontend_ui.js`** — Playwright against an isolated console
-  spawned by the script: **33 checks · U0–U7** — settings save round trip,
+  spawned by the script: **45 checks · U0–U8** — settings save round trip,
   credential set/clear + DOM/storage value scan, evolution editor, exchange
-  caps, `#capGrid`/`#cronList`, zh pack parity, zero `pageerror`, production
-  health. Run: `PW_PATH=<playwright node path> node tmp/e2e_frontend_ui.js`.
+  caps, `#capGrid`/`#cronList`, zh pack parity, **U8 the Backup & Restore
+  card**: lazy CKX SDK injection, in-page round-trip verified before the
+  `.ckx` download, preview → confirm restore of every section, wrong
+  passphrase refused, no backup plaintext in web storage, zero
+  `pageerror`, production health. Run: `PW_PATH=<playwright node path> node tmp/e2e_frontend_ui.js`.
 - **`tmp/e2e_activation_ui.js`** — Playwright against an isolated **named**-
   profile console spawned by the script (so the RESTART button can only hit
   the absent `aidog_svc_<name>` session — it can never kill production):
@@ -253,7 +258,7 @@ the restart handler logs a tmux session name and a return code only.
   production health + `secrets.env`/`web/settings.json` byte identity (3).
   Run: `python3 tmp/e2e_settings_matrix.py` (rc 0 = 0 fail).
 - **`tmp/e2e_settings_matrix_ui.js`** — Playwright against an isolated
-  named-profile console spawned by the script: **17 checks · U0–U6** — U1
+  named-profile console spawned by the script: **20 checks · U0–U6** — U1
   `#mycContextDirs` + a legal `#mycMcp` array → SAVE → Bearer
   `GET /api/settings` read-back (+ the restart-hint chip), U2 a broken JSON
   array → the server's 400 detail rendered verbatim in `#saveState` with the
@@ -261,7 +266,72 @@ the restart handler logs a tmux session name and a return code only.
   pre-existing control, U4 no token/slot value in the DOM or any input
   value, U5 zero `pageerror`, U6 production console health. Run:
   `PW_PATH=<playwright node path> node tmp/e2e_settings_matrix_ui.js`.
-- Standing gates (after the community car): `mycore/tests/run.py` **1773** ·
-  `tests/web_console_p3.py` **334** · `tests/source_lang_check.py` **0/73**
-  (locale packs **979/979**). The 0.5.39 baseline of this page was
+- Standing gates (after the CKX-P2 agent-backup car): `mycore/tests/run.py` **2045** ·
+  `tests/web_console_p3.py` **432** · `tests/ckx_roundtrip.mjs` **28** ·
+  `tests/source_lang_check.py` **0/78**
+  (locale packs **1189/1189**). The 0.5.39 baseline of this page was
   1168 · 197 · 480/480.
+
+## 6. Round B re-verification (UX round 2, 2026-10-30)
+
+`docs/design/ux_round2_design.md` B3 asked for a fresh column-by-column check
+of "implemented ↔ configurable in the console". Method, machine-verified in
+this session:
+
+1. Every `#id` and class / `[data-*]` selector claimed in §1–§4 was resolved
+   against the shipped `web/static/index.html` + `web/static/app.js`:
+   **46/46 ids resolve** (`#cronDelBtn` exists as a per-row template string)
+   and **12/12 selectors are still present**. No row claims a control that
+   does not exist — the 0.5.39/0.5.40 half of the matrix is accurate.
+2. Every capability page in `docs/features/` was matched against the matrix,
+   and every feature shipped by cars 1–8 (all eight land in 0.5.58) was
+   checked the same way: **5 capability pages had no row** (missions, model_gateway,
+   sniff, skills_ecosystem, community_posting) and the post-0.5.40 cars were
+   unlisted too — the matrix had simply stopped at 0.5.40. They now carry
+   their row in §6.1.
+3. **One stale row corrected:** §2 listed `checkpoints` as *designed
+   elsewhere* (CLI/TG only), but since 0.5.51 the console renders `#ckptList`
+   (metadata only) and posts `POST /api/checkpoints {action:"restore"}`.
+   Snapshot **creation** is still CLI/TG by design — the row says so now.
+
+**Gap outcome:** every gap this pass found is a *discoverability or design*
+gap, not a missing editor, with one real exception (no one-click model
+discovery — the whitelist is a manual text field). §6.1 documents what was
+implemented but never listed; §6.2 names what is still missing and which
+round owns it.
+
+### 6.1 Rows added — implemented + console-facing, previously unlisted
+
+| Feature | Config carrier (concrete keys / slots) | Console state | E2E evidence | Notes |
+|---|---|---|---|---|
+| backup_ckx (CKX-P1, car 3) | browser-side vendored CKX SDK · `WEB_TOKEN` write gate · `<state>/backups/` | **configurable** — Settings `#backupCard`: sections + passphrase → in-page encrypt with a round-trip self-check → `.ckx` download; file + passphrase → `POST /api/backup/restore` (preview → confirm) | `tmp/e2e_frontend_ui.js` U8 · smoke `1.2b` / `1.2c` | plaintext crosses this browser and the local loopback only; the passphrase is never sent to the server |
+| agent_backup (CKX-P2, car 8) | slot `AIDOG_CKX_PASSWORD` · cron job `ckx-backup` · local meter `<state>/ckx_calls.jsonl` · `mycore.mcp` ckx entry | **configurable** — the same card's AGENT BACKUP block (`#agSpec` `#agSched` `#agUnsched` `#agMcp` `#agReset`) + quota bar, all painted from `GET /api/backup/agent` | `tmp/e2e_car8_ui.js` **22/22** · smoke `1.2c2` | slot presence only, no value renders; the meter counts locally (warn 800 / refuse 1000) and upstream billing stays authoritative |
+| guardrails (car 7, D11) | settings `guardrails.{usd_day, token_day}` | **configurable** — Settings `#guardCard` (`#grUsdDay` `#grTokenDay`) + live TODAY row from `GET /api/control` | `tmp/e2e_car7_ui.js` C4 (21/21) · smoke `car 7: guardrails settings block` | 0/0 = off, the documented default; grammar lives in `mycore.leash` |
+| obedience_rules (car 7, D11) | settings `obedience.{rules, forbidden}` | **configurable** — Settings `#obedCard` (`#obRules` `#obForbidden`) | `tmp/e2e_car7_ui.js` C5/C6 · smoke `car 7: obedience settings block` | injected under the constitution; the conflict disclosure is part of the message |
+| leash_control (car 7, D11) | runtime control state (`POST /api/control {action: stop\\|pause\\|resume}`) | **configurable (action, not a setting)** — Overview `#ctlStopBtn` `#ctlPauseBtn` + `#tailState` chip | `tmp/e2e_car7_ui.js` C1–C3 · smoke `car 7: leash read face` + `POST /api/control gates` | fail-closed: pause refuses new turns until a human resumes |
+| decision_routing (car 4, D6) | settings `decision.{enabled,url,…}` | **configurable** — Settings Model card `#decToggle` `#decUrl` `#decModel` `#decRouter` `#decStatus` | smoke `1.2d car 4 (D6) decision plane: settings row + intent route` | the four Jev call sites sit behind this switch |
+| connections_bridge (car 6, D9/D10) | settings `bridge.{…}` · provider token slots (`connections` group) | **configurable** — Settings `#connectionsCard` (TEST per provider) + `#bridgeCard` (`#bridgeSave`, template download, status read) | smoke `car 6 (line 5 / D9): the bridge settings block + its two read-only routes` | the connector stays optional; the product never embeds it by default |
+| model_gateway (0.5.55) | settings `mycore.endpoints` (+ existing `mycore.upstreams`) | **configurable** — Settings Model card endpoint manager `#mycEndpoints` `#epAddBtn` `#epSaveChk` + per-row TEST, source chip from `GET /api/mycore/endpoints` | `tmp/e2e_gateway_ui.js` **25/25** · smoke `v0.5.55 gateway car: structured endpoints + rotation + rate caps` | primary row stays read-only by design; env overrides are shown, never written |
+| missions (0.5.44) | mission state + `POST /api/mission` actions | **configurable** — Settings `#missionCard` (start / pause / resume / stop, milestones, red lines) + Overview `#orchCard` read-only orchestration view | `tmp/e2e_mission.py` · `tmp/e2e_mission_orch.py` · `tmp/e2e_mission_pause.py` | a console `stop` never sends the final report (documented in missions.md) |
+| sniff (SNIFF) | settings `mycore.sniff.{interval,quiet_hours,digest_cap,sources,rules}` | **configurable** — SNIFF board `#view-sniff`: add source / add rule / SWEEP NOW / PAUSE via `POST /api/sniff` | smoke `SNIFF car: the sense board partition` + `SNIFF board API: read model + the two write actions` | sources are read-only by construction — sensing never actuates |
+| skills_ecosystem | env `AIDOG_SKILL_DIRS` · skill packs in the repo | **read-only** — Skills armory (`GET /api/skills`) + availability projection (`GET /api/skills/remote`) rendered in the Orchestration card | `tmp/e2e_skills_catalog.py` · `tmp/e2e_skills_remote.py` | installing a skill is a repo/pack action by design; the console shows what is mounted and what is missing |
+| community_posting (0.5.54) | `AIDOG_COMMUNITY_PAT` slot · `mycore.community` settings | **configurable** — Discussions view: `#commNew` → `POST /api/discussions/create`, `#commPost` → `POST /api/discussions/comment`, category list from `GET /api/discussions/categories` | smoke `0.5.54 in-app community car: routes, gates and slot verification` | a missing/unverified token disables posting honestly instead of failing silently |
+| extensions (car 2, line 2 IA) | keyless quote sources · `#extIntent` → `POST /api/extensions/intent` · SNIFF links | **read-mostly** — Extensions tabs (Finance / Home / Vehicle): keyless quote probe + intent router; Home and Vehicle are links into the SNIFF board by ruling | smoke `Extensions car (Phase B): GET /api/quotes` + the `POST /api/extensions/intent` legs | no key is required for quotes; the two nav tabs are the thin path to SNIFF |
+
+### 6.2 Gaps found — none is a missing editor
+
+| Gap | State today | Routed to |
+|---|---|---|
+| **No one-click model discovery** — `#mycModels` is a manual comma-separated list; `GET {base}/v1/models` is never used | the only true functional gap in this pass | **D1** (design §5.4, independent, zero token) |
+| **No usage-ledger toggle in the console**, and the site still promises "only if you opt in" | the collection pipeline itself does not exist yet | **D2** — ruling 1: the same car ships the toggle *and* rewrites `security.s4B` / `models.p1B`, or the site would publish a lie |
+| **No `USER_curated` "what it knows about you" panel** | the file exists and the model edits it; no user-facing read surface | **D4** |
+| **Tail / mood is a text chip** (`#tailState`), no state visual | text only | **D3** |
+| Two-tier Settings (Guided/Advanced), sticky dirty-card save bar, plain-language Overview, ≥32 px controls / ≥11 px labels, title-case lint, ≤640 px row stacking, `credRow` placeholder truncation | audit P3, P6–P10 | **round C** (console half) |
+| Home skills shelf contradicts `/skills`; models chart is a placeholder; `.reveal` needs JS; hero/quick-start rewrites | site side | **round C** (S1–S8, gated on the copy draft being approved first) |
+
+Discoverability itself — the reason this round exists — was fixed in round B:
+the Backup card now sits right after Console, belongs to the Credentials
+filter too (`data-setgroup="general creds"`), carries the CKX
+verified-integrator badge chained to `https://cryptokey.im/registry`, and
+Overview has an OPEN pointer that reveals it. Proved by `tmp/ux2b_probe.js`
+(12/12).

@@ -1,5 +1,6 @@
 """mycore.tools — tool registry + the 11 core tools (design §14.3 + Phase B2
-+ car 2: delegate / execute_code).
++ car 2: delegate / execute_code) plus the always-registered faces added since
+(generate_image, community_post, exchange_markets, backup_run).
 
 Registry exposes OpenAI JSON-schema `tools` for the model boundary and a
 dispatcher for the loop. Handler contract (README): return `str`; exceptions
@@ -21,6 +22,7 @@ English comments per repo i18n policy.
 from __future__ import annotations
 
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -29,6 +31,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
@@ -36,11 +39,47 @@ from typing import Callable
 
 REPO = Path(__file__).resolve().parent.parent
 from lib import profile_paths as pp  # noqa: E402  (car F: per-profile settings)
+from . import bridge as _bridge  # noqa: E402  (car 6: user-owned bridge)
 
 DEFAULT_ALLOWED_ROOTS = (str(REPO), tempfile.gettempdir())
-MAX_RESULT_CHARS = 24000          # tool output cap (context budget discipline)
+MAX_RESULT_CHARS = 24000          # ABSOLUTE ceiling — never exceeded, ever
 COMPRESS_THRESHOLD = 6000         # results above this compress first (car 4a-M3)
 BASH_TIMEOUT = 120
+
+# Car 5-D7 item 1 (design §4.2 "tool-result budgets by field"): the old single
+# 24000-char cap was a worst-case ceiling, not a budget. Every tool now has its
+# OWN cap, all well below the ceiling, and a repeated byte-identical result is
+# replaced by a short pointer instead of being re-sent.
+#   * DEFAULT_RESULT_CAP applies to any tool not listed below (incl. MCP tools,
+#     whose own 300-500 char truncation already keeps them under it).
+#   * RESULT_CAPS is per tool = "per field": a file read is information-dense,
+#     a grep dump is not, so each gets the budget its content warrants.
+#   * RESULT_CAP_ENV (unset = the per-tool caps; 0 = LEGACY single 24000 cap;
+#     N in 1..24000 = override every cap with N) is the rollback switch — one
+#     env var restores the exact pre-car-5 behaviour without a redeploy.
+DEFAULT_RESULT_CAP = 6000
+RESULT_CAP_ENV = "MYCORE_TOOL_CAP"
+RESULT_CAPS: dict[str, int] = {
+    # information-dense reads keep the largest slice
+    "read_file": 12000, "http_fetch": 8000, "run_bash": 8000,
+    "execute_code": 8000, "delegate": 8000,
+    # search/structured output: bounded, the model can narrow and re-query
+    "grep": 6000, "glob": 4000, "browser_snapshot": 6000,
+    "skill_route": 2000, "cron": 3000,
+    # short confirmations / small payloads
+    "write_file": 4000, "edit_file": 4000,
+    "generate_image": 4000, "connector_search": 4000,
+    "community_post": 4000, "exchange_markets": 4000,
+    "exchange_portfolio": 4000, "exchange_orders": 4000,
+    "exchange_prepare_order": 4000, "exchange_execute_order": 4000,
+    "exchange_plans": 4000,
+    "browser_open": 4000, "browser_click": 4000, "browser_type": 4000,
+    "browser_screenshot": 4000, "browser_close": 4000}
+# Same-session dedupe: a result at least this long must be byte-identical to be
+# suppressed (content-addressed, so an edited file / a changed quote never
+# collides). The store keeps only (seq, chars, tool) per hash — bounded memory.
+DEDUPE_MIN_CHARS = 500
+DEDUPE_MAX_ENTRIES = 64
 
 # Per-tool kill switch (docs/features/tool_toggles.md): every tool name
 # build_registry CAN register across all modes — the 11 core tools plus the
@@ -49,9 +88,14 @@ BASH_TIMEOUT = 120
 # so they are deliberately NOT part of this catalog (the console validator
 # refuses them; capability-honest registration still governs their presence).
 KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
-    # the 11 core tools (design §14.3 + Phase B2 cron + car 2 delegation)
+    # the 11 pre-car-8 tools (design §14.3 + Phase B2 cron + car 2 delegation)
     "read_file", "write_file", "edit_file", "run_bash", "grep", "glob",
     "http_fetch", "skill_route", "cron", "delegate", "execute_code",
+    # car 8 (CKX-P2): the deterministic agent backup. Always registered —
+    # configuration resolves at CALL time, so an absent Node runtime or an
+    # empty passphrase slot surfaces as an honest ERROR line (owner contract:
+    # no registration gate), never as a silently missing capability.
+    "backup_run",
     # car 4b: browser automation (registered only when a browser binary is
     # discoverable — the toggle names them anyway so config stays declarative)
     "browser_open", "browser_snapshot", "browser_click", "browser_type",
@@ -96,6 +140,12 @@ class ToolRegistry:
         # Progress sink (car 4a-M3): web binds an SSE emitter per turn;
         # MCP tool handlers read it during their own call window only.
         self._progress_sink: Callable[[dict], None] | None = None
+        # Car 5-D7 dedupe window: one entry per byte-identical result seen by
+        # THIS registry (a registry is one session window for the service and
+        # one turn for the console, which rebuilds it per request — honest and
+        # never cross-session, so two users can never see each other's pointer).
+        self._seen: OrderedDict[str, tuple[int, int, str]] = OrderedDict()
+        self._seen_seq = 1
 
     def register(self, name: str, description: str, parameters: dict,
                  handler: Callable[..., str]) -> None:
@@ -162,7 +212,31 @@ class ToolRegistry:
             return f"ERROR: {type(e).__name__} in '{name}'"
         if not isinstance(result, str):
             result = str(result)
-        return finalize_result(result)
+        dup = self._duplicate_of(name, result)
+        if dup is not None:
+            return dup
+        return finalize_result(result, result_cap(name))
+
+    def _duplicate_of(self, name: str, result: str) -> str | None:
+        """Car 5-D7: pointer text when `result` is byte-identical to an earlier
+        result of this registry, else None. Errors are never deduped (an ERROR
+        string is the live verdict, not a payload), and results below
+        DEDUPE_MIN_CHARS are never worth a pointer."""
+        if len(result) < DEDUPE_MIN_CHARS or result.startswith("ERROR:"):
+            return None
+        key = hashlib.sha1(result.encode("utf-8", "replace")).hexdigest()
+        hit = self._seen.get(key)
+        if hit is not None:
+            seq, chars, who = hit
+            self._seen.move_to_end(key)
+            return (f"[duplicate result: byte-identical to output #{seq} from "
+                    f"'{who}' earlier in this window ({chars} chars, "
+                    f"sha1 {key[:12]}); full text suppressed]")
+        self._seen[key] = (self._seen_seq, len(result), name)
+        self._seen_seq += 1
+        while len(self._seen) > DEDUPE_MAX_ENTRIES:
+            self._seen.popitem(last=False)
+        return None
 
 
 # ------------------------------------------------------------ path safety ---
@@ -187,9 +261,28 @@ def resolve_inside(path_str: str, roots: tuple[str, ...] | list[str]) -> Path:
 
 # -------------------------------------------------------------- core tools ---
 
+# Car 8 (CKX-P2, design §8 faithfulness): the credential store is refused by
+# the STRUCTURED path tools — read, grep, write, edit. The scheduled/MCP
+# backup route needs the passphrase only as `envslots -> child env`, so no
+# tool ever has a reason to open the file, and a model that asks gets an
+# honest refusal instead of a value. `run_bash` is a different, declared
+# trust boundary (it runs with the operator's own rights — docs/features/
+# tool_toggles.md says the roots policy is not a sandbox), so this gate does
+# not pretend to cover it: it closes the paths whose whole job is handing
+# file content to the model.
+SECRET_STORE_NAME = "secrets.env"
+SECRET_STORE_REASON = "secrets.env is not accessible to tools (credential discipline)"
+
+
+def _is_secret_store(p: Path) -> bool:
+    return p.name == SECRET_STORE_NAME
+
+
 def _read_file(path: str, offset: int = 0, limit: int = 200,
                roots: tuple[str, ...] | list[str] = DEFAULT_ALLOWED_ROOTS) -> str:
     p = resolve_inside(path, roots)
+    if _is_secret_store(p):
+        raise ToolError(SECRET_STORE_REASON)
     if not p.is_file():
         raise ToolError(f"not a file: {p}")
     try:
@@ -222,6 +315,8 @@ def _write_file(path: str, content: str,
                 roots: tuple[str, ...] | list[str] = DEFAULT_ALLOWED_ROOTS,
                 state_dir: str | Path | None = None) -> str:
     p = resolve_inside(path, roots)
+    if _is_secret_store(p):
+        raise ToolError(SECRET_STORE_REASON)
     if p.is_dir():
         raise ToolError(f"is a directory: {p}")
     if not isinstance(content, str):
@@ -240,6 +335,8 @@ def _edit_file(path: str, old_text: str, new_text: str,
                state_dir: str | Path | None = None) -> str:
     """Exact-string replace; `count` defaults to 1 (must match exactly once)."""
     p = resolve_inside(path, roots)
+    if _is_secret_store(p):
+        raise ToolError(SECRET_STORE_REASON)
     if not p.is_file():
         raise ToolError(f"not a file: {p}")
     if not isinstance(old_text, str) or not old_text:
@@ -304,9 +401,12 @@ def _grep(pattern: str, path: str = ".", glob: str = "*",
         raise ToolError(f"bad regex: {e}") from None
     base = resolve_inside(path, roots)
     if base.is_file():
+        if _is_secret_store(base):
+            raise ToolError(SECRET_STORE_REASON)
         files = [base]
     else:
-        files = [p for p in sorted(base.rglob(glob)) if p.is_file()]
+        files = [p for p in sorted(base.rglob(glob))
+                 if p.is_file() and not _is_secret_store(p)]
     hits: list[str] = []
     for f in files:
         try:
@@ -381,11 +481,28 @@ def _glob(pattern: str, path: str = ".",
 
 def _http_fetch(url: str, timeout: int = 20,
                 max_chars: int = 8000) -> str:
-    """GET a URL and return text (cap applied). Loopback/http(s) only."""
+    """GET a URL and return text (cap applied). Loopback/http(s) only.
+
+    Car 6 (line 5, ruling D9): a target whose host is on the USER-owned
+    bridge allow-list is fetched through the user's Worker first. If the
+    bridge cannot answer, the request falls back to a direct fetch and says
+    so in a leading marker line — honest, never a silent success. The bridge
+    is off by default, so the stock behaviour is byte-identical to before.
+    """
     if not isinstance(url, str) or not url.startswith(("http://", "https://")):
         raise ToolError("url must start with http:// or https://")
     if isinstance(max_chars, bool) or not isinstance(max_chars, int) or not 1 <= max_chars <= 40000:
         raise ToolError("max_chars must be an integer in 1..40000")
+    note = ""
+    if _bridge.route(url) is not None:
+        try:
+            bridged = _bridge.proxy_get(url, timeout=min(timeout, 60))
+            return bridged if len(bridged) <= max_chars \
+                else bridged[:max_chars] + "\n... [truncated]"
+        except _bridge.BridgeError as e:
+            # A bridge outage falls back to a direct request and MARKS it: a
+            # failed proxied attempt is never mistaken for a bridge success.
+            note = f"... [bridge {e.reason} - fetched directly instead]\n"
     req = urllib.request.Request(url, method="GET",
                                  headers={"User-Agent": "mycore/0.4 (fetch)"})
     try:
@@ -395,7 +512,7 @@ def _http_fetch(url: str, timeout: int = 20,
         raise ToolError(f"HTTP {e.code} from {url}") from None
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         raise ToolError(f"fetch failed: {type(e).__name__}") from None
-    text = raw.decode("utf-8", errors="replace")
+    text = note + raw.decode("utf-8", errors="replace")
     return text if len(text) <= max_chars else text[:max_chars] + "\n... [truncated]"
 
 
@@ -445,12 +562,43 @@ def compress_output(text: str) -> str:
     return "\n".join(folded)
 
 
-def finalize_result(result: str) -> str:
-    """Post-process one tool result (car 4a-M3): compress first when above
-    COMPRESS_THRESHOLD — with a single honest English note
-    `[compressed {before}→{after} chars]`, never silently — then apply the
-    hard MAX_RESULT_CHARS truncation unchanged. When truncation fires, both
-    notes are preserved (compression note first, truncation marker last)."""
+def result_cap(name: str) -> int:
+    """Effective character cap for ONE tool's result (car 5-D7 item 1).
+
+    Precedence: env RESULT_CAP_ENV ("0" = the old single 24000 cap for every
+    tool = exact rollback; any other digit = override every cap) > RESULT_CAPS
+    for a known tool > DEFAULT_RESULT_CAP. Always clamped to the absolute
+    ceiling, never raises, never reads anything but one env var."""
+    raw = os.environ.get(RESULT_CAP_ENV)
+    s = raw.strip() if isinstance(raw, str) else ""
+    if s:
+        if s == "0":
+            return MAX_RESULT_CHARS
+        if s.isascii() and s.isdigit() and 1 <= int(s) <= MAX_RESULT_CHARS:
+            return int(s)
+    return min(RESULT_CAPS.get(name, DEFAULT_RESULT_CAP), MAX_RESULT_CHARS)
+
+
+def _cut_at_line(text: str, cap: int) -> str:
+    """Cut `text` to `cap` chars at a LINE boundary when one sits in the last
+    10% of the window (a log/JSON/markdown payload stays readable instead of
+    ending mid-token); otherwise cut exactly at `cap`. The trim is bounded by
+    10% of the cap — no more content is dropped than that."""
+    if cap <= 0 or len(text) <= cap:
+        return text
+    window = text[:cap]
+    nl = window.rfind("\n", int(cap * 0.9), cap)
+    return window[:nl] if nl >= 0 else window
+
+
+def finalize_result(result: str, cap: int = MAX_RESULT_CHARS) -> str:
+    """Post-process one tool result (car 4a-M3 + car 5-D7): compress first when
+    above COMPRESS_THRESHOLD — with a single honest English note
+    `[compressed {before}→{after} chars]`, never silently — then apply the hard
+    `cap` truncation (line-boundary aware, see _cut_at_line) with
+    `... [truncated at {cap} chars]` last. Defaults keep the historical
+    MAX_RESULT_CHARS behaviour, so callers that pass no cap are unchanged;
+    dispatch passes the per-tool cap."""
     notes = ""
     if len(result) > COMPRESS_THRESHOLD:
         compact = compress_output(result)
@@ -458,9 +606,9 @@ def finalize_result(result: str) -> str:
             notes += (f"\n... [compressed {len(result)}→{len(compact)} "
                       "chars]")
             result = compact
-    if len(result) > MAX_RESULT_CHARS:
-        return (result[:MAX_RESULT_CHARS] + notes
-                + f"\n... [truncated at {MAX_RESULT_CHARS} chars]")
+    if len(result) > cap:
+        return (_cut_at_line(result, cap) + notes
+                + f"\n... [truncated at {cap} chars]")
     return result + notes
 
 
@@ -581,6 +729,24 @@ def _execute_code(steps: list | None, code: str | None, timeout: int,
                                     state_dir=state_dir)
     except execute_code.ExecError as e:
         raise ToolError(str(e)) from None
+
+
+def _backup_run(state_dir: str | Path | None) -> str:
+    """The `backup_run` handler (car 8, CKX-P2): one full export -> encrypt
+    -> verify -> in-memory round-trip, returning metadata as JSON.
+
+    Every expected failure inside `mycore.ckxbackup` is a short CkxError
+    reason with no path, no passphrase and no payload in it, so it becomes an
+    honest `ERROR: <reason>` line the model can act on. The success payload
+    carries the artifact handle (repo-relative name, never a machine path)
+    and the local call meter, and nothing else — the whole point of this tool
+    is that the plaintext and the passphrase never cross its boundary."""
+    from . import ckxbackup  # local import: keeps the module graph acyclic
+    try:
+        meta = ckxbackup.run_backup(state_dir)
+    except ckxbackup.CkxError as e:
+        raise ToolError(str(e)) from None
+    return json.dumps(meta, ensure_ascii=False)
 
 
 def _generate_image(prompt: str, size: str = "1024x1024") -> str:
@@ -927,6 +1093,30 @@ def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
                                "maximum": 120}}},
                lambda steps=None, code=None, timeout=120:
                    _execute_code(steps, code, timeout, r, roots, state_dir))
+    # --- car 8 (CKX-P2): the deterministic agent backup ----------------------
+    # Registers ALWAYS: every gate (Node runtime, passphrase slot, loopback
+    # export, local call meter) is resolved at CALL time and answers an honest
+    # ERROR line — the owner contract is no registration gate, so an
+    # unconfigured host sees "why not" instead of a silently absent tool.
+    # No arguments on purpose: the model can neither pick the payload scope
+    # (the server's own export allowlist decides) nor the destination (the
+    # state backups dir) nor the passphrase (envslots -> child env only).
+    # The result is METADATA ONLY — file name, size, sha256, booleans, quota.
+    r.register("backup_run",
+               "Run ONE encrypted backup of this console (credentials, "
+               "settings and memory — the server's own export allowlist) "
+               "into the local backups directory with the vendored CKX "
+               "tooling, then verify the container and prove a round-trip "
+               "digest before reporting success. Returns METADATA ONLY "
+               "(file, bytes, sha256, verified, roundtrip, ms, quota) — "
+               "never file contents and never the passphrase, which stays "
+               "in the AIDOG_CKX_PASSWORD slot and reaches only the child "
+               "process environment. Fails honestly when the Node runtime "
+               "is missing or too old, the slot is empty, the console "
+               "export endpoint is unreachable, or the free-call quota is "
+               "exhausted.",
+               {"type": "object", "properties": {}},
+               lambda: _backup_run(state_dir))
     # --- car 4b: browser automation (capability-honest, like MCP fail-soft) ---
     # The six browser_* tools register ONLY when a browser binary is
     # discoverable (fast probe — discovery never launches anything). No

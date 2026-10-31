@@ -18,7 +18,7 @@ you — by **name**, never by value — exactly what still needs a human.
 ## Quick start
 
 ```bash
-git clone <product-repo-url> aidog && cd aidog   # public repo: no credentials required
+git clone https://github.com/aidog-im/aidog.git aidog && cd aidog   # public repo: no credentials required
 bash deploy/install.sh                           # <- the one command
 aidog setup                                      # guided wizard: fill the slots it lists
 aidog setup --check                              # any time: read-only status (0/2/1)

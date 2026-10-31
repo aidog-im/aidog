@@ -883,6 +883,11 @@ h1, h2, h3, h4, .serif {
 .footer-links a:hover { color: #fff; }
 .footer-free { color: var(--coral); }
 .footer-dim { opacity: .7; }
+/* CKX verified-integrator badge — links back to https://cryptokey.im/registry */
+.footer-ckx { display: flex; justify-content: center; margin-top: 18px; }
+.footer-ckx a { display: inline-flex; opacity: .9; transition: opacity .2s; }
+.footer-ckx a:hover, .footer-ckx a:focus-visible { opacity: 1; }
+.footer-ckx img { display: block; height: 34px; width: auto; }
 .footer-fine { display: flex; justify-content: space-between; gap: 20px;
   flex-wrap: wrap; margin-top: 22px; padding-top: 16px;
   border-top: 1px solid rgba(255, 255, 255, .1);

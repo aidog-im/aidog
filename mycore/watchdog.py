@@ -52,6 +52,22 @@ RESTART_TIMEOUT = 60
 # long triggers a TG alert (tunable — one constant, seconds).
 MISSION_STALE_SEC = 900
 
+# Car 7 (D11 watch escalation): escalation policy constants.
+#   L1 = a target went down (recorded on the transition).
+#   L2 = ESCALATE_AFTER consecutive FAILED restarts -> circuit breaker
+#        OPENS: automatic restarts HALT until the target recovers or a human
+#        intervenes (never silent: reminders keep firing on the throttle).
+#   L3 = the L2 circuit stayed open for L3_AFTER_SEC -> "needs a human"
+#        escalation, re-notified on the throttle cadence.
+#   recovery -> circuit closed, counters reset, a level-0 record closes the
+#        chain so the console sees the full story (L1 -> L2 -> L3 -> clear).
+# Every transition is dual-written: TG via notify() (log-only when no chat
+# id — honest, never faked) AND the state journal the console event stream
+# reads (`escalations` in the state JSON).
+DEFAULT_ESCALATE_AFTER = 3         # failed restarts before the circuit opens
+L3_AFTER_SEC = 1800                # seconds a closed L2 circuit -> L3
+ESC_JOURNAL_MAX = 20               # journal records kept in the state file
+
 # States the heartbeat watches (design 3.2 + car 3 spec): a user-paused or
 # not-yet-started mission is never an alert.
 MISSION_WATCH_STATES = ("running", "degraded", "paused_approve")
@@ -68,6 +84,10 @@ class TargetState:
     last_restart: float = 0.0
     restart_attempts: int = 0
     last_alert: float = 0.0
+    # Car 7 (D11): escalation level (0 = clear, 1 = down, 2 = circuit open,
+    # 3 = needs a human) + when level 2 opened (drives the L3 timer).
+    esc_level: int = 0
+    esc_since: float = 0.0
 
 
 @dataclass
@@ -78,6 +98,7 @@ class WatchConfig:
     targets: list[dict] = field(default_factory=list)
     chat_id: str = ""                 # notify target ("" = log-only)
     heartbeat_bj: str = "09:00"        # daily Beijing-time heartbeat HH:MM
+    escalate_after: int = DEFAULT_ESCALATE_AFTER   # car 7: L2 circuit after N
 
     @classmethod
     def load(cls, path: str | Path, chat_id: str = "") -> "WatchConfig":
@@ -108,11 +129,14 @@ class WatchConfig:
             throttle_sec=int(doc.get("throttle_sec", DEFAULT_THROTTLE)),
             targets=targets, chat_id=chat_id,
             heartbeat_bj=str(doc.get("heartbeat_bj", "09:00")),
+            escalate_after=int(doc.get("escalate_after", DEFAULT_ESCALATE_AFTER)),
         )
         if not 5 <= cfg.interval_sec <= 3600:
             raise WatchConfigError("interval_sec must be 5..3600")
         if not 30 <= cfg.throttle_sec <= 3600:
             raise WatchConfigError("throttle_sec must be 30..3600")
+        if not 1 <= cfg.escalate_after <= 20:
+            raise WatchConfigError("escalate_after must be 1..20")
         return cfg
 
 
@@ -193,6 +217,7 @@ class Watchdog:
         # resolved at check time so env/profile seams stay authoritative).
         self.missions_path = Path(missions_path) if missions_path else None
         self.states: dict[str, TargetState] = {t["name"]: TargetState() for t in cfg.targets}
+        self._esc: list[dict] = []        # car 7: escalation journal (state file)
         self._load_state()
         self._last_heartbeat_day = ""
         # Last [MISSION HEARTBEAT] alert per mission id (in-memory on purpose:
@@ -210,12 +235,20 @@ class Watchdog:
             if name in self.states and isinstance(st, dict):
                 self.states[name] = TargetState(**{
                     k: st.get(k, getattr(TargetState(), k))
-                    for k in ("state", "since", "last_restart", "restart_attempts", "last_alert")})
+                    for k in ("state", "since", "last_restart", "restart_attempts",
+                              "last_alert", "esc_level", "esc_since")})
         self._last_heartbeat_day = doc.get("heartbeat_day", "")
+        # Car 7 (D11): the escalation journal rides the same state file —
+        # the console event stream reads it (dual write with TG notify).
+        recs = doc.get("escalations")
+        if isinstance(recs, list):
+            self._esc = [r for r in recs[-ESC_JOURNAL_MAX:]
+                         if isinstance(r, dict)][-ESC_JOURNAL_MAX:]
 
     def _save_state(self) -> None:
         doc = {"targets": {n: st.__dict__ for n, st in self.states.items()},
-               "heartbeat_day": self._last_heartbeat_day}
+               "heartbeat_day": self._last_heartbeat_day,
+               "escalations": self._esc[-ESC_JOURNAL_MAX:]}
         try:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
             tmp = self.state_path.with_suffix(".tmp")
@@ -223,6 +256,20 @@ class Watchdog:
             os.replace(tmp, self.state_path)
         except OSError as e:
             self._log(f"[wd] state save failed: {type(e).__name__}")
+
+    # ------------------------------------------------- escalation (car 7) --
+    def _escalate(self, level: int, target: str, attempt: int,
+                  reason: str, text: str) -> None:
+        """One escalation transition -> DUAL WRITE: (1) TG via notify() —
+        log-only when no chat id, never faked; (2) a journal record in the
+        state file that GET /api/events renders as the console's chain
+        (L?/attempt/why, real timestamp). Level 0 = recovery/clear."""
+        self._esc.append({"ts": round(self._now(), 3), "level": int(level),
+                          "target": str(target)[:64],
+                          "attempt": int(attempt),
+                          "reason": str(reason)[:200]})
+        del self._esc[:-ESC_JOURNAL_MAX]
+        self.notify(text)
 
     # ---------------------------------------------------------- notify -----
     def notify(self, text: str) -> None:
@@ -261,8 +308,13 @@ class Watchdog:
                 self._log(f"[wd] {name}: {st.state or 'unknown'} -> {cur}")
             if cur == "up":
                 if st.state == "down":
-                    self.notify(f"🟢 mycore wd · {name} recovered "
-                                f"(attempts={st.restart_attempts})")
+                    # Car 7 (D11): recovery closes the escalation chain in
+                    # the journal too (L? -> L0), same text as before.
+                    self._escalate(0, name, st.restart_attempts, "recovered",
+                                   f"🟢 mycore wd · {name} recovered "
+                                   f"(attempts={st.restart_attempts})")
+                    st.esc_level = 0
+                    st.esc_since = 0.0
                 st.state = "up"
                 st.restart_attempts = 0
                 st.since = now
@@ -281,10 +333,34 @@ class Watchdog:
                 st.since = now
                 st.restart_attempts = 0
                 st.last_alert = now
-                self.notify(f"🔴 mycore wd · {name} is DOWN — "
-                            + ("dry-run: no action" if self.cfg.dry_run else "restarting"))
+                st.esc_level = 1              # L1: the target is down
+                st.esc_since = 0.0
+                self._escalate(1, name, 0, "target down",
+                               f"🔴 mycore wd · {name} is DOWN — "
+                               + ("dry-run: no action" if self.cfg.dry_run
+                                  else "restarting"))
             throttle_ok = (now - st.last_restart) >= self.cfg.throttle_sec
-            if throttle_ok:
+            if st.esc_level >= 2:
+                # Car 7 (D11): circuit breaker is OPEN — automatic restarts
+                # are HALTED (never silent: reminders keep firing, L3 lands
+                # once the open circuit outlives L3_AFTER_SEC).
+                if st.esc_level == 2 and (now - st.esc_since) >= L3_AFTER_SEC:
+                    st.esc_level = 3
+                    st.last_alert = now
+                    self._escalate(
+                        3, name, st.restart_attempts,
+                        "circuit open too long — manual restart required",
+                        f"🆘 mycore wd · L3 {name} still down after "
+                        f"{L3_AFTER_SEC}s with the circuit OPEN — manual "
+                        f"restart required ({st.restart_attempts} failed "
+                        f"attempt(s))")
+                elif (now - st.last_alert) >= self.cfg.throttle_sec:
+                    st.last_alert = now
+                    self.notify(f"⚠️ mycore wd · {name} still down "
+                                f"(L{st.esc_level}, circuit OPEN, "
+                                f"{st.restart_attempts} failed attempt(s); "
+                                f"automatic restart halted)")
+            elif throttle_ok:
                 st.last_restart = now
                 st.restart_attempts += 1
                 if self.cfg.dry_run:
@@ -307,6 +383,20 @@ class Watchdog:
                         # Persistent failure must keep alerting (never silent).
                         self.notify(f"⚠️ mycore wd · {name} restart FAILED "
                                     f"(attempt {st.restart_attempts}): {detail}")
+                        # Car 7 (D11): L2 — N consecutive REAL failures open
+                        # the circuit breaker (automatic restarts halt).
+                        if st.esc_level < 2 and st.restart_attempts >= self.cfg.escalate_after:
+                            st.esc_level = 2
+                            st.esc_since = now
+                            self._escalate(
+                                2, name, st.restart_attempts,
+                                f"{st.restart_attempts} consecutive restart "
+                                f"failures — circuit open",
+                                f"🛑 mycore wd · L2 {name}: "
+                                f"{st.restart_attempts} consecutive restart "
+                                f"failures — automatic restart HALTED "
+                                f"(circuit open); manual attention required: "
+                                f"{detail}")
                     else:
                         self.notify(f"🔄 mycore wd · {name} restart issued, verifying…")
             elif (now - st.last_alert) >= self.cfg.throttle_sec:

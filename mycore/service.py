@@ -117,13 +117,15 @@ from pathlib import Path
 from . import channels as channels_mod
 from . import checkpoint
 from . import cli
+from . import decision
 from . import envslots
 from . import evolution
 from . import hooks as hooks_mod
+from . import leash
 from . import mission as mission_mod
 from . import scheduler
 from . import sniff
-from .assembly import build_system_stack, resolve_context_dirs
+from .assembly import build_system_stack, resolve_context_dirs, resolve_user_rules
 from .loop import run_turn
 from .model import ChatClient
 from .session import Session
@@ -400,6 +402,7 @@ class ChatService:
         self._mission_check = 0.0       # last mission tick evaluation (clock)
         self._chan_check = 0.0          # last channel inbound poll (clock)
         self._sniff_check = 0.0         # last SENSE sweep/delivery evaluation
+        self._hold_state: dict[str, str] = {}   # car 7: gate log dedupe (leg -> code)
         self.log = ServiceLog(self.state / LOG_NAME, now=now)
         self.lang = self._load_lang()
         # HARD token gate (tg.py): dedicated MYCORE_TG_TOKEN required here too.
@@ -459,6 +462,26 @@ class ChatService:
     def _t(self, key: str, **kw) -> str:
         """Localized user-visible string for the service-wide language."""
         return i18n.fmt(self.lang, key, **kw)
+
+    # ------------------------------------------------- leash (car 7, D11) ---
+    def _leash_hold(self, leg: str, code: str, ctx: dict) -> None:
+        """One LEASH_HOLD log line per hold STATE CHANGE per leg — the poll
+        loop re-checks every cadence, so per-cycle lines would flood the log.
+        The resume transition is logged once too (LEASH_RUN)."""
+        if self._hold_state.get(leg, "") == code:
+            return
+        self._hold_state[leg] = code
+        if code:
+            self.log.write("LEASH_HOLD", f"leg={leg}", f"reason={code}",
+                           f"detail={leash.block_detail(code, ctx)[:160]}")
+        else:
+            self.log.write("LEASH_RUN", f"leg={leg}")
+
+    def _gate(self, turns: bool = True) -> tuple[bool, str, dict]:
+        """The car-7 gate over the LIVE settings doc. `turns=True` = pause +
+        today's budget (new-turn entries); `turns=False` = pause only (the
+        pure automatic legs — sniff/reflect spend no model tokens)."""
+        return leash.gate(self._settings_doc(), turns=turns)
 
     # -------------------------------------------------------------- loop ----
     def run(self, once: bool = False) -> int:
@@ -1000,6 +1023,12 @@ class ChatService:
         if nowt - self._reflect_check < REFLECT_CHECK_SEC:
             return
         self._reflect_check = nowt
+        # Car 7 (D11): the pause switch holds every automatic leg (owner's
+        # kill switch); the budget never silences the reflection loop.
+        ok, code, ctx = self._gate(turns=False)
+        self._leash_hold("reflect", "" if ok else code, ctx)
+        if not ok:
+            return
         try:
             cfg = self._evolution_cfg()
             if not cfg.get("enabled"):
@@ -1186,12 +1215,15 @@ class ChatService:
         reply — honest short lines on any stop, same mapping as _pipeline."""
         cfg = cli.resolve_model_config()
         chat_fn = self.chat or ChatClient(cfg).chat
-        messages = build_system_stack(context_dirs=resolve_context_dirs()) \
+        messages = build_system_stack(context_dirs=resolve_context_dirs(),
+                                      user_rules=resolve_user_rules()) \
             + [{"role": "user",
                 "content": job.get("text", "")}]
+        stop_base = leash.stop_baseline()   # car 7: STOP can kill this turn too
         try:
             res = run_turn(messages, chat_fn, self.registry,
-                           budget_chars=self._budget())
+                           budget_chars=self._budget(),
+                           should_stop=lambda: leash.stop_requested(stop_base))
         except Exception as e:  # noqa: BLE001 — run_turn never raises; belt anyway
             self.log.write("CRON_ERR", f"id={job.get('id', '?')}",
                            f"err={type(e).__name__}")
@@ -1200,6 +1232,9 @@ class ChatService:
             return res.text.strip() or self._t("err.no_output")
         if res.stop == "max_iters":
             return self._t("err.max_iters", n=res.iterations)
+        if res.stop == "aborted":           # car 7: operator STOP, honest line
+            self.log.write("CRON_ABORT", f"id={job.get('id', '?')}")
+            return self._t("err.stopped")
         self.log.write("CRON_ERR", f"id={job.get('id', '?')}",
                        "err=model", f"detail={res.text[:160]}")
         return self._t("err.model")
@@ -1218,6 +1253,13 @@ class ChatService:
             jobs = scheduler.load_jobs(path)
             due = scheduler.due_jobs(jobs, nowt)
             if not due:
+                return
+            # Car 7 (D11): gate BEFORE mark-first — a held job stays due and
+            # fires after the hold clears (pause holds everything; budget
+            # holds the prompt turns it would spend tokens on).
+            ok, code, ctx = self._gate()
+            self._leash_hold("cron", "" if ok else code, ctx)
+            if not ok:
                 return
             for job in due:
                 scheduler.mark_fired(job, nowt)
@@ -1256,6 +1298,12 @@ class ChatService:
         if nowt - self._sniff_check < SNIFF_CHECK_SEC:
             return
         self._sniff_check = nowt
+        # Car 7 (D11): the global pause switch holds the sense sweep too
+        # (the pause switch holds automatic actions); the budget never silences it.
+        ok, code, ctx = self._gate(turns=False)
+        self._leash_hold("sniff", "" if ok else code, ctx)
+        if not ok:
+            return
         try:
             mc = self._settings_doc().get("mycore")
             raw = mc.get("sniff") if isinstance(mc, dict) else None
@@ -1354,6 +1402,12 @@ class ChatService:
         if nowt - self._mission_check < MISSION_TICK_SEC:
             return
         self._mission_check = nowt
+        # Car 7 (D11): a held mission tick executes NO slice (mark-first
+        # stays intact — we return before any state mutation).
+        ok, code, ctx = self._gate()
+        self._leash_hold("mission", "" if ok else code, ctx)
+        if not ok:
+            return
         path = self.state / mission_mod.STATE_FILE_NAME
         try:
             doc = mission_mod.load(path)
@@ -1485,8 +1539,10 @@ class ChatService:
             cur_id = cur.get("id") if cur is not None else None
         prompt = mission_mod.build_slice_prompt(rec, mode=mode)
         # constitution stack: assembly puts SOUL.md first; the goal text only
-        # ever enters the USER layer (design 3.3).
-        messages = build_system_stack(context_dirs=resolve_context_dirs()) \
+        # ever enters the USER layer (design 3.3). Car 7: operator rules ride
+        # the same stack (a slice obeys the same priority order as a chat).
+        messages = build_system_stack(context_dirs=resolve_context_dirs(),
+                                      user_rules=resolve_user_rules()) \
             + [{"role": "user", "content": prompt}]
         chat_fn = self.chat or ChatClient(cli.resolve_model_config()).chat
         try:
@@ -1756,18 +1812,37 @@ class ChatService:
         `chat_id`; None = chat-level session (unchanged behavior). Cross-topic
         context transfer is v1 out of scope: topics are isolated on purpose.
         """
+        # Car 7 (D11): the gate runs BEFORE the typing beat — a held turn
+        # answers one honest line and never reaches the model.
+        allowed, code, ctx = self._gate()
+        if not allowed:
+            self.log.write("TURN_HELD", f"chat={redact_chat(chat_id)}",
+                           f"reason={code}")
+            if code == "paused":
+                return self._t("err.paused")
+            return self._t("err.budgetUsd" if code == "budget_usd"
+                           else "err.budgetTokens",
+                           used=(f"{float(ctx.get('used') or 0):.2f}"
+                                 if code == "budget_usd"
+                                 else f"{int(ctx.get('used') or 0):,}"),
+                           limit=(f"{float(ctx.get('limit') or 0):.2f}"
+                                  if code == "budget_usd"
+                                  else f"{int(ctx.get('limit') or 0):,}"))
+        stop_base = leash.stop_baseline()   # car 7: STOP kills THIS turn
         stop_beat = self._typing_heartbeat(chat_id)
         scheduler.set_origin(chat_id)   # cron tool remembers where it was asked
         self._fire_hooks("turn_start", chat_id)
         try:
-            return self._pipeline_body(chat_id, text, session_key=session_key)
+            return self._pipeline_body(chat_id, text, session_key=session_key,
+                                       stop_base=stop_base)
         finally:
             stop_beat()
             scheduler.clear_origin()
             self._fire_hooks("turn_end", chat_id)
 
     def _pipeline_body(self, chat_id: int, text: str,
-                       session_key: int | str | None = None) -> str:
+                       session_key: int | str | None = None,
+                       stop_base: int = 0) -> str:
         cfg = self._model_for_chat(chat_id)
         path = self._session_path(session_key if session_key is not None
                                   else chat_id)
@@ -1778,10 +1853,19 @@ class ChatService:
             history = []
         history = [m for m in history if m.get("role") != "system"]
 
-        stack = build_system_stack(context_dirs=resolve_context_dirs())
+        stack = build_system_stack(context_dirs=resolve_context_dirs(),
+                                   user_rules=resolve_user_rules())
         messages = stack + history
         pre_ids = {id(m) for m in messages}
         messages.append({"role": "user", "content": text})
+
+        # Car 4 (D6) call site 4 — the model router (TG interactive leg).
+        # A stored /model override is the operator's explicit choice and
+        # wins; every other non-success outcome leaves cfg untouched, so a
+        # turn never fails (or even notices) because of a decision request.
+        if not self._read_override(chat_id):
+            decision.apply_router(cfg, {"source": "telegram",
+                                        "chars": len(text or "")})
 
         chat_fn = self.chat or ChatClient(cfg).chat
         self.log.write("TURN_START", f"chat={redact_chat(chat_id)}",
@@ -1799,8 +1883,12 @@ class ChatService:
                 self._fire_hooks("compact", chat_id)
 
         try:
+            # Car 7 (D11): STOP baseline captured by _pipeline — a console
+            # STOP aborts this TG turn at its next checkpoint (iteration top
+            # / pre-dispatch; this leg does not stream, so no delta check).
             res = run_turn(messages, chat_fn, self.registry,
-                           on_event=on_event, budget_chars=self._budget())
+                           on_event=on_event, budget_chars=self._budget(),
+                           should_stop=lambda: leash.stop_requested(stop_base))
         except Exception as e:  # noqa: BLE001 — run_turn never raises; belt anyway
             self.log.write("TURN_CRASH", f"chat={redact_chat(chat_id)}",
                            f"err={type(e).__name__}")
@@ -1825,6 +1913,8 @@ class ChatService:
             return res.text.strip() or self._t("err.no_output")
         if res.stop == "max_iters":
             return self._t("err.max_iters", n=res.iterations)
+        if res.stop == "aborted":           # car 7: operator STOP, honest line
+            return self._t("err.stopped")
         # model_error: detail goes to the log only — the chat gets one honest
         # line with no engine name, exception internals, or paths.
         self.log.write("MODEL_ERR", f"chat={redact_chat(chat_id)}",

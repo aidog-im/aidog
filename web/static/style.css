@@ -30,7 +30,7 @@
   --ok: #0a7a52;
   --font: "Segoe UI", system-ui, -apple-system, "PingFang SC",
           "Microsoft YaHei", "Noto Sans SC", sans-serif;
-  --rail: 236px;
+  --rail: 224px;              /* Phase A: slim rail (was 236px) */
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -119,7 +119,7 @@ body {
   grid-template-columns: var(--rail) minmax(0, 1fr);
   grid-template-areas: "top top" "bann bann" "side main";
   align-content: start;
-  max-width: 1440px; margin: 0 auto; padding-bottom: 26px;
+  max-width: 1512px; margin: 0 auto; padding-bottom: 26px;
   min-height: 100%;
 }
 
@@ -127,7 +127,7 @@ body {
 .topbar {
   grid-area: top;
   display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
-  padding: 13px 22px;
+  padding: 11.5px 24px;
   background: rgba(255, 255, 255, .82);
   backdrop-filter: blur(6px);
   border-bottom: 1px solid var(--line-solid);
@@ -187,9 +187,9 @@ body {
   background: var(--panel);
   border-right: 1px solid var(--line-solid);
   padding: 16px 12px;
-  position: sticky; top: var(--topbar-h, 63px); align-self: start;
-  min-height: calc(100vh - var(--topbar-h, 63px));
-  max-height: calc(100vh - var(--topbar-h, 63px)); overflow: auto;
+  position: sticky; top: var(--topbar-h, 56px); align-self: start;
+  min-height: calc(100vh - var(--topbar-h, 56px));
+  max-height: calc(100vh - var(--topbar-h, 56px)); overflow: auto;
   display: flex; flex-direction: column; gap: 16px;
 }
 .nav { display: flex; flex-direction: column; gap: 3px; }
@@ -242,8 +242,8 @@ body {
 .tool.idle { color: var(--muted); background: transparent; }
 
 /* ----------------------------------------------------------------- main --- */
-.main { grid-area: main; min-width: 0; padding: 18px 22px 0; }
-.view { display: none; }
+.main { grid-area: main; min-width: 0; padding: 24px 24px 0; }
+.view { display: none; max-width: 1240px; margin-left: auto; margin-right: auto; }
 .view.is-active { display: block; }
 .view-head {
   display: flex; align-items: flex-end; justify-content: space-between;
@@ -279,8 +279,13 @@ body {
   text-transform: none; font-variant-numeric: tabular-nums; }
 
 /* ------------------------------------------------------------- overview --- */
-.ov-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+/* Phase A (console layout restyle): the overview reads as a 4-column
+   dashboard grid; every row tiles the four tracks exactly (2+2 / 4 / 3+1 /
+   3+1 / 4), so no cell is ever left empty. Cards keep their natural height
+   (start) — stretching would leave a visibly hollow tile in a mixed row. */
+.ov-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 16px; align-items: start; }
+.span-4 { grid-column: span 4; }
 .span-3 { grid-column: span 3; }
 .span-2 { grid-column: span 2; }
 .span-1 { grid-column: span 1; }
@@ -698,21 +703,29 @@ body {
 
 /* -------------------------------------------------------------- footer ---- */
 footer { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  max-width: 1240px; margin-left: auto; margin-right: auto;
   margin-top: 20px; padding-top: 12px;
   border-top: 1px solid var(--line-solid);
-  font-size: 12px; color: var(--muted); letter-spacing: .08em;
+  font-size: 12.5px; color: var(--muted); letter-spacing: .08em;
   font-family: var(--mono); }
-/* X19: docs deep link — reuses the footer type, only borrows the brand blue. */
-footer .foot-docs { color: var(--blue); text-decoration: none; white-space: nowrap; }
+/* X19: docs deep link — reuses the footer type, only borrows the brand blue.
+   Phase A AA fix: the raw brand blue (#2892ff) is only 3.08:1 on the paper
+   ground, so the link uses the AA-safe deep token instead (5.1:1). */
+footer .foot-docs { color: var(--blue-deep); text-decoration: none;
+  white-space: nowrap; }
 footer .foot-docs:hover, footer .foot-docs:focus { text-decoration: underline; }
 /* X3: the mycore service/watchdog readout under the Services panels. */
 #mycoreFacts { margin-top: 12px; }
 
 /* --------------------------------------------------------- responsive ----- */
-@media (max-width: 1180px) {
+@media (max-width: 1100px) {
+  /* Phase A: two columns here. Full-width tiles stay full (span 4/2 -> 2),
+     the 3-track tiles drop to one track so their 1-track neighbour still
+     tiles the row without leaving a hole. */
   .ov-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .span-3 { grid-column: span 2; }
-  .span-2 { grid-column: span 1; }
+  .span-4 { grid-column: span 2; }
+  .span-2 { grid-column: span 2; }
+  .span-3 { grid-column: span 1; }
   .span-1 { grid-column: span 1; }
 }
 @media (max-width: 1000px) {
@@ -745,7 +758,7 @@ footer .foot-docs:hover, footer .foot-docs:focus { text-decoration: underline; }
   .clock { font-size: 15px; }
   .update-banner { margin: 8px 14px 0; }
   .ov-grid { grid-template-columns: minmax(0, 1fr); }
-  .span-3, .span-2, .span-1 { grid-column: span 1; }
+  .span-4, .span-3, .span-2, .span-1 { grid-column: span 1; }
   .panel-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .set-grid { grid-template-columns: minmax(0, 1fr); }
   .evo-cols { grid-template-columns: minmax(0, 1fr); }
@@ -1433,3 +1446,352 @@ a.comm-title:hover { text-decoration: underline; }
 .sniff-add[hidden] { display: none; }
 .sniff-ro { font-family: var(--mono); font-size: 13px; color: var(--text); }
 .btn.tiny { font-size: 11px; padding: 2px 8px; border-radius: 5px; }
+
+/* =============================================================== *
+ *  Phase A (console layout restyle, owner-approved) — the         *
+ *  typography scale, slimmer chrome geometry, unified 12px radii  *
+ *  and the two outstanding WCAG AA contrast fixes.                *
+ *  Pure presentation: no id / API / locale-key / DOM-contract or  *
+ *  behaviour change. Appended LAST so it wins the cascade over    *
+ *  the Draft E skin and every earlier layer.                      *
+ * =============================================================== */
+
+/* ------------------------------------------------ 1. chrome geometry -- */
+/* 1440px reference: topbar 69 -> 56px (11.5 + 32px tallest child + 11.5
+   + 1px rule), rail 236 -> 224px, main padded 24px and capped at 1240px
+   so the content column stays centred on wide screens. */
+.topbar { padding: 11.5px 24px; min-height: 56px; gap: 14px; }
+/* the 24px page h1 shares the bar with the tagline on one baseline row —
+   a stacked pair would push the bar past its 56px budget */
+.brand-text { flex-direction: row; align-items: baseline; gap: 12px; }
+.brand h1 { font-size: 24px; line-height: 1.15; letter-spacing: .13em;
+  font-weight: 700; }
+.brand .sub { font-size: 12.5px; line-height: 1.15; white-space: nowrap;
+  letter-spacing: .16em; }
+.chip { font-size: 12.5px; padding: 4px 10px; border-radius: 999px; }
+.clock { font-size: 15px; }
+.sidebar { padding: 14px 10px; }
+.nav-item { font-size: 14px; }
+.nav-group { font-size: 12.5px; }
+.tool { font-size: 12.5px; }
+
+/* --------------------------------------------------- 2. type scale ----- */
+/* page h1 24 / section 18 / item title 15 / body 14 · 1.5 / meta >= 12.5 */
+body { line-height: 1.5; }
+.view-head h2 { font-size: 24px; font-weight: 700; line-height: 1.25; }
+.view-sub { font-size: 13px; letter-spacing: .1em; }
+.card { padding: 16px 18px 18px; }
+.card h2 { font-size: 18px; font-weight: 700; line-height: 1.35;
+  margin-bottom: 10px; }
+
+/* body-level copy: 14px, weak colour — never a smaller size */
+.ctl-row label, .stat-note, .kv, .chat-bubble, .gal-desc, .ticker,
+.reason-list, .auth-lead, .readout, .auth-result, .comm-reply,
+.comm-reply .comm-meta, .onb-steps li, .sniff-howto-steps, .md-goal,
+.orch-skill label, .chat-empty, .gal-empty, .sniff-empty, .sniff-ro,
+.evo-status, .chat-msg, .evo-msg { font-size: 14px; }
+
+/* meta / helper floor: every visible caption renders at >= 12.5px */
+.brand .sub, .chip, .nav-group, .tool, .chat-badge, .evo-badge, .gal-tag,
+.m-name, .stat-grid .k, .auth-stamp, .auth-hint, .sealbtn .cap span,
+.med .d, .readout .lbl, .auth-result b, .set-chip, .ep-badge, .ep-key,
+.ep-row .ep-test, .ep-src, .ep-row .ep-result, .mt-head, .mt-primary,
+.cs-count, .orch-skill-miss, .chan-webhook, .md-sec, .md-sub-st, .md-cs-l,
+.md-methods summary, .md-ev, .mission-budget .mb-field, .mission-cs .cs-field,
+.chat-meta, .chat-tools-row, .sniff-kind, .sniff-badge, .sniff-speak,
+.sniff-howto-title, .sniff-howto-line, .sniff-howto-caret, .sniff-meta,
+.sniff-err, .sniff-acked, .sniff-when code, .sniff-row-sub, .alert-foot,
+.preview-tag, .upd-cmd, .sub-head, .voice-state, .gal-count, .svc-summary,
+.metric-unit, .num, .m-detail, .test-out .test-row, .mt-row, .mt-name,
+.mt-state, .orch-val, .save-state, .btn.tiny { font-size: 12.5px; }
+/* grid/section sub-titles keep their own rung between card title and body */
+.gal-name, .comm-title, .md-ms-title, .sniff-id { font-size: 15px;
+  font-weight: 700; }
+
+/* form controls read as body copy */
+.ctl-row select, .ctl-row input, .ctl-row textarea, .chat-input, .evo-input,
+.chat-model, .set-search, .cron-create input, .mission-budget input,
+.mission-cs .cs-field input, .mission-cs .cs-field textarea { font-size: 14px; }
+.set-search { font-size: 13px; }
+.cron-create input, .chat-model, .mission-budget input,
+.mission-cs .cs-field input, .mission-cs .cs-field textarea { font-size: 13.5px; }
+.btn { font-size: 12.5px; }
+.ep-row .ep-line input[type="text"], .ep-row .ep-line input.ep-model {
+  font-size: 13px; }
+.ep-row .ep-line input.ep-model { font-size: 13px; }
+
+/* ------------------------------------------------- 3. unified radii ----- */
+/* cards, inputs and buttons: 12px (the Draft E engraving squared them off) */
+.card, .btn, .gal-card, .med, .chat-bubble, .auth-seal, .auth-result,
+.readout, .md-ms, .md-events, .evo-log, .comm-thread, .sniff-howto,
+.mission-cs, .orch-skills, .alert-box, .vs-live, .ep-row, .ep-pool,
+.set-chip, .set-search, .chat-input, .evo-input, .chat-model,
+.ctl-row select, .ctl-row input, .ctl-row textarea, .cron-create input,
+.mission-budget input, .mission-cs .cs-field input,
+.mission-cs .cs-field textarea, .toggle, .btn.tiny, .img-grid a,
+.art-thumb, .sniff-when code { border-radius: 12px; }
+/* status chips stay pill-shaped (droplet-motif language of the base skin) */
+.chip, .tool, .preview-tag, .gal-tag, .chat-badge, .evo-badge,
+.sniff-badge, .auth-stamp { border-radius: 999px; }
+
+/* ------------------------------------ 4. contrast fixes (AA, >=4.5:1) ---- */
+/* #footDocs: #2892ff on #fcfcfa = 3.08:1 -> the AA-safe deep token 5.1:1 */
+footer .foot-docs { color: var(--blue-deep); }
+/* #imgBadge & friends: .chat-badge.live pulsed its OPACITY (blink, min
+   .45), so the sampled frame blended down to ~2.2-4:1. The pulse now moves
+   border + fill only — the ink itself never fades below full strength. */
+.chat-badge.live { color: var(--blue-ink);
+  animation: badgepulse 1.1s steps(2) infinite; }
+@keyframes badgepulse {
+  50% { border-color: var(--blue-deep); background: var(--blue-wash); }
+}
+/* mission plan deep link: same raw-brand-blue fail class as the footer */
+.md-planlink { color: var(--blue-deep); }
+
+/* ------------------------------------------------- 5. narrow screens ---- */
+@media (max-width: 760px) {
+  .topbar { padding: 10px 14px; min-height: 0; }
+  .brand h1 { font-size: 17px; letter-spacing: .12em; }
+  .brand .sub { font-size: 12.5px; letter-spacing: .1em; }
+  .view-head h2 { font-size: 22px; }
+  .card h2 { font-size: 17px; }
+}
+
+/* --- Phase A addendum: selectors the base skin outranks -------------- *
+   (higher-specificity rules above re-assert the same 11/12px values, so
+   the floor needs matching specificity to win the cascade).            */
+.mini .m-name, .mini .m-detail, .ep-row .ep-badge, .ep-adv > summary,
+.mt-row .mt-primary, .orch-skill-state, .md-planlink, div.alert-foot,
+.mission-budget .mb-field span, .mission-cs .cs-field span {
+  font-size: 12.5px;
+}
+.ctl-row input[type=password], .ctl-row input[type=text],
+.ctl-row input[type=number] { font-size: 14px; }
+.med .n { font-size: 15px; }
+
+/* =============================================================== *
+ *  Phase A2 (visual review, 2026-10-29) — the three named defects  *
+ *  only; no other reflow. Presentation only: no id / API / locale- *
+ *  key / DOM-contract or behaviour change. Appended LAST so it wins *
+ *  the cascade over Phase A and every earlier layer.              *
+ * =============================================================== */
+
+/* -------------------------------------------- 1. authority card -- */
+/* The lead copy now lives above the columns, so the seal box only has
+   to carry the engraving: stretch it to the medallion column and centre
+   its contents instead of packing them against the top edge. */
+.auth-cols { align-items: stretch; }
+.auth-seal {
+  align-self: stretch;
+  display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 2px;
+}
+.auth-lead { margin: 0 0 16px; line-height: 1.7; }
+/* the engraving gives the label air: a smaller seal, a padded caption that
+   wraps instead of running edge to edge, and a clean cartouche — the
+   rosette reaches the centre of the button, so a wash-coloured plate (the
+   box ground) masks the lines under the lettering instead of letting them
+   run through it */
+.sealbtn { width: 172px; height: 172px; }
+.sealbtn .cap { padding: 0 24px; gap: 6px; }
+.sealbtn .cap::before {
+  content: ""; position: absolute; left: 4px; right: 4px; top: 50%;
+  height: 104px; transform: translateY(-50%);
+  background: var(--wash); border-radius: 50%;
+}
+.sealbtn .cap b { font-size: 18px; position: relative; }
+.sealbtn .cap span {
+  font-size: 12.5px; letter-spacing: .1em; line-height: 1.4; text-align: center;
+  position: relative;
+}
+.auth-hint { margin-top: 14px; text-align: center; max-width: 34ch; }
+.auth-result { align-self: stretch; text-align: left; }
+
+/* ------------------------------------- 2. ORDER APPROVAL block --- */
+/* .gal-grid auto-fills 200px tracks, so the single empty note was crammed
+   into the first one: a tall narrow paragraph in the corner of a full-width
+   card. The note claims the whole row as a centred panel that fills the
+   block's height, so the empty state reads as a deliberate panel rather
+   than a corner of text in a void. */
+#exPlans > .gal-empty, #exPlans > .save-state { grid-column: 1 / -1; }
+#exPlans > .gal-empty {
+  display: flex; align-items: center; justify-content: center;
+  min-height: 168px; padding: 24px 20px; text-align: center;
+  border: 1px dashed var(--line); background: #fff;
+  border-radius: 12px; line-height: 1.6;
+}
+#exPlans > .save-state { text-align: center; }
+
+/* ------------------------------------------- 3. 390px top bar ---- */
+/* Two rows only — brand + actions on row 1, the status chips on row 2 —
+   so the bar stops stacking three bands and the right-hand controls keep
+   a full 12px gutter. The tagline is the one thing that steps aside; the
+   clock, the update check and the language switch all stay. */
+@media (max-width: 480px) {
+  .topbar { padding: 9px 12px; gap: 8px 10px; flex-wrap: wrap; }
+  .brand { flex: 1 1 auto; min-width: 0; }
+  .brand-text { flex-direction: row; align-items: baseline; gap: 8px; min-width: 0; }
+  .brand h1 { font-size: 16px; letter-spacing: .1em; white-space: nowrap; }
+  .brand .sub { display: none; }
+  .brand-logo { width: 24px; height: 24px; }
+  .head-right { flex: none; gap: 6px; margin-left: auto; }
+  .head-right .btn { padding: 4px 9px; min-height: 30px; }
+  .clock { font-size: 14px; }
+  .head-status { order: 3; width: 100%; flex-wrap: nowrap;
+    min-width: 0; overflow: hidden; gap: 6px; }
+  .chip { min-width: 0; padding: 3px 9px;
+    overflow: hidden; text-overflow: ellipsis; }
+}
+@media (max-width: 760px) {
+  .sealbtn { width: 156px; height: 156px; }
+}
+/* gate-8 guard (same 480 breakpoint): three nowrap action buttons
+   (Community header) measured 458px and pushed the document past a 390px
+   viewport. Let the action row wrap here only — at every wider width its
+   content already fits on one line, so nothing else moves. */
+@media (max-width: 480px) {
+  .view-actions { flex-wrap: wrap; }
+  /* same guard for every control row: nowrap buttons beside a search field
+     (SESSIONS) pushed the document 0.8px past a 390px viewport */
+  .ctl-row { flex-wrap: wrap; }
+}
+
+/* =============================================================== *
+ *  Phase B (Extensions tabs + keyless quotes, car 2) — appended    *
+ *  LAST so it wins the cascade over the Phase A block above.       *
+ *  Pure presentation: no id / API / locale-key / DOM change.       *
+ * =============================================================== */
+
+/* tab strip: one row of 12px-radius chips, wrapping at narrow widths */
+.ext-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 2px 0 16px; }
+.ext-tab {
+  font: inherit; font-size: 13px; font-weight: 600; line-height: 1.3;
+  padding: 8px 18px; min-height: 36px; cursor: pointer;
+  background: #fff; border: 1px solid var(--line-solid);
+  border-radius: 12px; color: var(--muted); letter-spacing: .04em;
+  transition: border-color .15s, color .15s, background .15s;
+}
+.ext-tab:hover { color: var(--ink); border-color: var(--rule); }
+/* active tab: AA-safe deep blue fill with white ink (5.24:1) */
+.ext-tab.is-active, .ext-tab.is-active:hover {
+  background: var(--blue-deep); border-color: var(--blue-deep); color: #fff;
+}
+.ext-tab:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.ext-panel { min-width: 0; }
+.ext-panel[hidden] { display: none; }
+
+/* keyless quote readout: data line in ink, honest failure in AA red */
+.ext-quote {
+  font-family: var(--mono); font-size: 13px; line-height: 1.5;
+  color: var(--ink); margin-top: 12px; overflow-wrap: anywhere;
+}
+.ext-quote.is-err { color: var(--red); }
+
+/* the external link renders as a button: no underline, never baseline-shifted */
+a.btn.ext-link { display: inline-flex; align-items: center; text-decoration: none; }
+
+/* ------------------------------------------- Backup & Restore (CKX-P1) --- */
+/* The console's own encrypted backup plane: scope boxes, the red
+   "the passphrase is unrecoverable" warning, the section rule and the
+   decrypted-artifact preview line. Colours reuse the AA tokens already
+   audited (--red on the white panel, --blue-ink for the preview readout). */
+.bk-scope { border: 1px solid var(--line-solid); border-radius: 10px;
+  margin: 14px 0 6px; padding: 6px 12px 10px; min-width: 0; }
+.bk-scope legend { font-size: 11px; letter-spacing: .16em; text-transform: uppercase;
+  color: var(--blue-ink); padding: 0 6px; }
+.bk-box { display: inline-flex; align-items: center; gap: 6px; margin: 4px 16px 0 0;
+  font-size: 13px; color: var(--text); cursor: pointer; }
+.bk-box input { accent-color: var(--blue); width: 15px; height: 15px; margin: 0; }
+.bk-warn { color: var(--red); margin-top: 10px; }
+.bk-sep { height: 1px; background: var(--line-solid); margin: 16px 0 6px; }
+#bkPreview { color: var(--blue-ink); font-family: var(--mono); font-size: 12.5px;
+  overflow-wrap: anywhere; }
+#bkPreview[hidden] { display: none; }
+.ctl-row input[type=file] { flex: 1; min-width: 0; font-size: 12.5px;
+  color: var(--text); background: #fff; border: 1px solid var(--line);
+  border-radius: 6px; padding: 5px 8px; }
+.ctl-row input[type=file]:focus { outline: none; border-color: var(--blue);
+  box-shadow: var(--glow); }
+
+/* UX round 2 (B2/P2): the CKX verified-integrator badge — the same remote
+   asset and the same registry href as the site footer. The inline-flex box
+   reserves the height before the lazy SVG lands (no header reflow), and it
+   keeps an honest 1px frame with the alt text when an offline machine never
+   receives the remote image. */
+.ckx-badge { display: inline-flex; align-items: center; margin: 0 0 8px;
+  padding: 4px 8px; border: 1px solid var(--line); border-radius: 8px;
+  background: #fff; text-decoration: none; }
+.ckx-badge:hover, .ckx-badge:focus-visible { border-color: var(--blue); }
+.ckx-badge img { display: block; height: 30px; width: auto; }
+
+/* ------------------------------------ Car 4 (D6): intent routing row ------- */
+/* Sits directly under the Extensions tabs: input + ROUTE + honest status.
+   It collapses to one wrapped line on narrow viewports (no overflow). */
+.ext-route { display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+  margin: 12px 0 4px; }
+.ext-route input[type=text] { flex: 1 1 260px; min-width: 0; background: #fff;
+  border: 1px solid var(--line); color: var(--text); font: inherit;
+  font-size: 13px; padding: 6px 9px; border-radius: 6px; }
+.ext-route input[type=text]:focus { outline: none; border-color: var(--blue);
+  box-shadow: var(--glow); }
+.ext-route .save-state { flex: 1 1 100%; }
+
+/* ---------------- Connections + Bridge (car 6, line 5 / D10) -------------- */
+/* Provider blocks inside the Connections card: a head row (name + TEST),
+   the shared credential row, an honest test result line, then the scope
+   checklist. The badge states the POSTURE of each permission — read is the
+   default, write is the exception. */
+.conn-prov { margin-top: 16px; padding-top: 13px;
+  border-top: 1px dashed var(--line-solid); }
+.conn-head { display: flex; align-items: center; justify-content: space-between;
+  gap: 10px; flex-wrap: wrap; }
+.conn-name { font-size: 12.5px; font-weight: 700; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--blue-ink); }
+.conn-scopes { list-style: none; margin: 9px 0 0; padding: 0;
+  display: grid; gap: 5px; }
+.conn-scope { display: flex; gap: 8px; align-items: baseline;
+  font-size: 12.5px; color: var(--muted); flex-wrap: wrap;
+  line-height: 1.45; }
+.conn-scope b { font-family: var(--mono); font-size: 12px; font-weight: 600;
+  color: var(--blue-ink); overflow-wrap: anywhere; }
+.conn-badge { font-style: normal; font-size: 11px; font-weight: 700;
+  letter-spacing: .08em; text-transform: uppercase; padding: 1px 7px;
+  border-radius: 999px; flex: 0 0 auto; }
+.conn-badge[data-scope=ro] { color: var(--ok);
+  border: 1px solid rgba(10, 122, 82, .45);
+  background: rgba(10, 122, 82, .08); }
+.conn-badge[data-scope=rw] { color: var(--amber);
+  border: 1px solid rgba(160, 90, 4, .45);
+  background: rgba(160, 90, 4, .08); }
+/* Test result line: green = proven, amber = inconclusive (could not reach),
+   red = rejected. `.warn` is the amber role — the same token the other
+   cards use, so the contrast audit covers it. */
+.conn-test.ok { color: var(--ok); }
+.conn-test.warn { color: var(--amber); }
+.conn-test.bad { color: var(--red); }
+.conn-test[hidden] { display: none; }
+
+/* Bridge card: the allow-list is a textarea (one host per line or comma
+   separated), the kill switch is deliberately NOT the primary button. */
+.br-stack { align-items: flex-start; }
+.br-stack textarea { flex: 1; min-width: 0; font-family: var(--mono);
+  font-size: 12.5px; color: var(--text); background: #fff;
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px;
+  resize: vertical; }
+.br-stack textarea:focus { outline: none; border-color: var(--blue);
+  box-shadow: var(--glow); }
+.btn.br-kill { color: var(--red); border-color: rgba(208, 42, 68, .55); }
+.btn.br-kill:hover { background: rgba(208, 42, 68, .09);
+  border-color: var(--red); }
+.br-code { margin-top: 10px; max-height: 260px; overflow: auto;
+  background: var(--bg2); border: 1px solid var(--line-solid);
+  border-radius: 8px; padding: 10px 12px; font-family: var(--mono);
+  font-size: 11.5px; line-height: 1.5; color: var(--text);
+  white-space: pre; }
+.br-code[hidden] { display: none; }
+.br-audit { margin-top: 8px; display: grid; gap: 4px; }
+.br-audit .br-line { font-family: var(--mono); font-size: 11.5px;
+  color: var(--muted); overflow-wrap: anywhere; }
+.br-audit .br-line .ok { color: var(--ok); }
+.br-audit .br-line .bad { color: var(--red); }
+.br-audit .br-empty { font-size: 12.5px; color: var(--muted); }

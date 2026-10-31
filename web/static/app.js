@@ -866,6 +866,10 @@ function renderExchange() {
   }
   if (exMsg) exSetMsg(exMsg, exMsgErr);   // re-translate the live status line
 
+  // Phase B: the quote readout rides the same render pass (a language switch
+  // re-translates the idle/working line and keeps the last honest result)
+  renderExtQuotes();
+
   // W2: the threshold line and the approval queue ride the same render pass
   // (language switch / capability refresh re-translate them too)
   renderExThreshold();
@@ -911,6 +915,129 @@ async function exProbe() {
     if (btn) btn.disabled = !exRows().length;
   }
   renderExchange();
+}
+
+/* -------------------------------------- Extensions tabs (Phase B) -------
+   The tab STRIP is a DOM registry: every .ext-tab[data-tab] button inside
+   #view-exchange owns exactly one [data-tabpanel="<name>"] panel. Adding a
+   category later = one button + one panel in index.html and nothing here.
+   Finance is the default and carries every exchange card (thresholds,
+   plans, venues, tools, probe + the new quote and external-link cards);
+   Home/Vehicle are thin launchers onto the SENSE board — they call the very
+   same setView() the sidebar uses and never duplicate SNIFF collection. */
+function setExtTab(name) {
+  const tabs = Array.prototype.slice.call(
+    document.querySelectorAll("#view-exchange .ext-tab"));
+  if (!tabs.length) return;
+  if (!tabs.some(b => b.dataset.tab === name)) name = tabs[0].dataset.tab;
+  tabs.forEach(b => {
+    const on = b.dataset.tab === name;
+    b.classList.toggle("is-active", on);
+    b.setAttribute("aria-selected", String(on));
+    b.tabIndex = on ? 0 : -1;          // roving tabindex (WAI-ARIA tabs)
+  });
+  document.querySelectorAll("#view-exchange [data-tabpanel]").forEach(p => {
+    p.hidden = p.dataset.tabpanel !== name;
+  });
+}
+
+function initExtTabs() {
+  const tabs = Array.prototype.slice.call(
+    document.querySelectorAll("#view-exchange .ext-tab"));
+  tabs.forEach((b, i) => {
+    b.addEventListener("click", () => setExtTab(b.dataset.tab));
+    b.addEventListener("keydown", e => {
+      const step = e.key === "ArrowRight" ? 1 : (e.key === "ArrowLeft" ? -1 : 0);
+      if (!step) return;
+      e.preventDefault();
+      const next = tabs[(i + step + tabs.length) % tabs.length];
+      next.focus();
+      setExtTab(next.dataset.tab);
+    });
+  });
+}
+initExtTabs();
+setExtTab("finance");                  // default tab, whatever the markup says
+
+/* --------------------------- keyless quotes (GET /api/quotes) ----------
+   READ-ONLY public market data behind one route: market=cn (Sina wire,
+   GBK + its mandatory Referer) or market=us (Yahoo chart JSON), symbol as
+   typed. The SERVER is the only source of numbers — a failure renders its
+   honest error verbatim (never a guess, never a stale figure), exactly like
+   the exchange probe above. The endpoint carries its own 10/60s budget and
+   an offline seam (AIDOG_QUOTES_URL) for the tests. */
+let extQuoteMsg = null;     // {k, f, err} — re-translated on every render
+let extQuoteData = null;    // last 200 payload (rendered verbatim)
+let extQuoteErr = null;     // honest server error string, or null
+let extQuoteBusy = false;
+
+function extQuoteDefault(market) { return market === "us" ? "AAPL" : "sh600519"; }
+
+function extQuoteNum(v) {
+  return typeof v === "number" && isFinite(v) ? Math.round(v * 10000) / 10000 : null;
+}
+
+function extQuoteLine(d) {
+  const price = extQuoteNum(d.price);
+  const chg = extQuoteNum(d.change);
+  const pct = extQuoteNum(d.pct);
+  let line = String(d.name || d.symbol || "") + " (" + String(d.symbol || "") + ")";
+  if (price !== null) line += "  " + price + (d.currency ? " " + d.currency : "");
+  if (chg !== null && pct !== null) {
+    line += "  " + (chg >= 0 ? "+" : "") + chg + " (" +
+      (pct >= 0 ? "+" : "") + pct.toFixed(2) + "%)";
+  }
+  if (d.ts) line += "  · " + new Date(Number(d.ts) * 1000).toLocaleString();
+  return line;
+}
+
+function renderExtQuotes() {
+  const msg = document.getElementById("extQuoteMsg");
+  if (msg) {
+    msg.textContent = extQuoteMsg ? t(extQuoteMsg.k, extQuoteMsg.f) : "";
+    msg.classList.toggle("err", !!(extQuoteMsg && extQuoteMsg.err));
+  }
+  const out = document.getElementById("extQuoteResult");
+  if (out) {
+    out.textContent = extQuoteErr ? extQuoteErr
+      : (extQuoteData ? extQuoteLine(extQuoteData)
+        : t("ext.quotes.idle", "pick a market, type a symbol, then press FETCH"));
+    out.classList.toggle("is-err", !!extQuoteErr);
+  }
+  const btn = document.getElementById("extQuoteBtn");
+  if (btn) btn.disabled = extQuoteBusy;
+}
+
+async function extQuoteFetch() {
+  if (extQuoteBusy) return;
+  const sel = document.getElementById("extQuoteMarket");
+  const market = sel ? String(sel.value || "cn") : "cn";
+  const inp = document.getElementById("extQuoteSymbol");
+  const symbol = inp ? String(inp.value || "").trim() : "";
+  extQuoteBusy = true;
+  extQuoteErr = null;
+  extQuoteMsg = { k: "ext.quotes.working", f: "fetching…" };
+  renderExtQuotes();
+  try {
+    const res = await fetch("/api/quotes?market=" + encodeURIComponent(market) +
+      "&symbol=" + encodeURIComponent(symbol));
+    const body = await res.json().catch(() => null);
+    if (res.ok && body && body.ok === true) {
+      extQuoteData = body;
+      extQuoteMsg = { k: "ext.quotes.ok", f: "quote ✓" };
+    } else {
+      extQuoteData = null;
+      extQuoteErr = body && body.error ? String(body.error) : ("HTTP " + res.status);
+      extQuoteMsg = { k: "ext.quotes.failed", f: "quote fetch failed", err: true };
+    }
+  } catch (e) {
+    extQuoteData = null;
+    extQuoteErr = String(e).slice(0, 200);
+    extQuoteMsg = { k: "ext.quotes.failed", f: "quote fetch failed", err: true };
+  } finally {
+    extQuoteBusy = false;
+    renderExtQuotes();
+  }
 }
 
 /* --------------------------------------------- W2 order approval panel --
@@ -1479,6 +1606,10 @@ let epFailed = false;     // last load failed (the note must survive repaints)
 let epRows = [];          // local editable rows (primary excluded)
 let epPrim = null;        // primary row (read-only: edited in Kernel endpoint)
 let epDirty = false;
+// Car 4 (D6): the decision row edits independently of mycDirty/epDirty, so
+// the settings payload ships `mycore.decision` only when the operator
+// actually touched it (an untouched form never rewrites the document).
+let decDirty = false;
 let epPresence = {};      // slot -> bool (10-slot catalog)
 let epKeysOpen = false;
 
@@ -1507,6 +1638,7 @@ async function loadEndpoints() {
       }));
     }
     renderEndpoints();
+    paintDecisionStatus();
     if (epKeysOpen) renderKeyPool();
   } catch (e) {
     epData = null;
@@ -2231,7 +2363,7 @@ function chatQueueBar() {
   bar.className = "chat-queue";
   bar.hidden = true;
   bar.style.cssText = "display:flex;flex-direction:column;gap:4px;" +
-    "margin:6px 0 0;padding:0;font-size:12px;";
+    "margin:6px 0 0;padding:0;font-size:12.5px;";
   form.parentNode.insertBefore(bar, form);
   return bar;
 }
@@ -2258,7 +2390,7 @@ function chatQueueRender() {
       b.type = "button";
       b.textContent = txt;
       b.style.cssText = "border:1px solid var(--line);background:#fff;" +
-        "border-radius:6px;padding:2px 8px;font-size:12px;cursor:pointer;" +
+        "border-radius:6px;padding:2px 8px;font-size:12.5px;cursor:pointer;" +
         "color:var(--text);";
       b.addEventListener("click", fn);
       return b;
@@ -2312,7 +2444,7 @@ function chatProgress(data) {
     document.getElementById("chatEmpty")?.remove();
     chatProgEl = document.createElement("div");
     chatProgEl.className = "chat-progress";
-    chatProgEl.style.cssText = "font-size:12px;color:var(--muted);" +
+    chatProgEl.style.cssText = "font-size:12.5px;color:var(--muted);" +
       "font-family:Consolas,monospace;padding:2px 4px;" +
       "transition:opacity .35s ease;";
     log.insertBefore(chatProgEl, log.lastElementChild);
@@ -2495,11 +2627,11 @@ async function chatTurn(text) {
       headers: { "Content-Type": "application/json",
                  "Authorization": "Bearer " + token },
       body: JSON.stringify(payload) });
-    if (!res.ok) {                       // 401/400 answered before the stream
+    if (!res.ok) {                       // 401/400/409/429 answered pre-stream
       const body = await res.json().catch(() => ({}));
       chatNote("err", res.status === 401
         ? t("chat.badToken", "401 · unauthorized")
-        : ((body.details || [body.error || "error"])[0] + ""));
+        : gateDetail(body));
       bubble.remove();
       return;
     }
@@ -2854,12 +2986,28 @@ async function saveSettings() {
   const needSvcRestart = !!(mycRestartDirty ||
     (toolsDirty && Object.prototype.hasOwnProperty.call(payload.mycore, "tools_off")));
   if (chanDirty) payload.channels = channelsPayload();
+  // car 6: a half-edited bridge block joins the save like every other block
+  if (bridgeDirty) payload.bridge = bridgePayload();
+  // car 7 (D11): guardrails + obedience ride the same dirty-block contract.
+  if (guardDirty) {
+    payload.guardrails = {
+      usd_day: parseFloat((document.getElementById("grUsdDay") || {}).value) || 0,
+      token_day: parseInt((document.getElementById("grTokenDay") || {}).value, 10) || 0,
+    };
+  }
+  if (obedDirty) {
+    const lines = id => String((document.getElementById(id) || {}).value || "")
+      .split("\n").map(s => s.trim()).filter(s => s.length > 0);
+    payload.obedience = { rules: lines("obRules"), forbidden: lines("obForbidden") };
+  }
   const hookPatch = hooksPayload();
   if (hookPatch) payload.hooks = hookPatch;
   const hookMsg = document.getElementById("hookMsg");
   const chanMsg = document.getElementById("chanMsg");
+  const bridgeMsg = document.getElementById("bridgeMsg");
   if (hookMsg) { hookMsg.className = "save-state"; hookMsg.textContent = ""; }
   if (chanMsg) { chanMsg.className = "save-state"; chanMsg.textContent = ""; }
+  if (bridgeMsg) { bridgeMsg.className = "save-state"; bridgeMsg.textContent = ""; }
   if (!token) {
     state.className = "save-state err";
     state.textContent = t("save.needToken", "token required");
@@ -2887,6 +3035,7 @@ async function saveSettings() {
         : (body.error || "error");
       const hookErrs = details.filter(d => String(d).includes("hooks"));
       const chanErrs = details.filter(d => String(d).includes("channels"));
+      const bridgeErrs = details.filter(d => String(d).includes("bridge"));
       if (hookMsg && hookErrs.length) {
         hookMsg.className = "save-state err";
         hookMsg.textContent = hookErrs.join("; ");
@@ -2894,6 +3043,22 @@ async function saveSettings() {
       if (chanMsg && chanErrs.length) {
         chanMsg.className = "save-state err";
         chanMsg.textContent = chanErrs.join("; ");
+      }
+      if (bridgeMsg && bridgeErrs.length) {
+        bridgeMsg.className = "save-state err";
+        bridgeMsg.textContent = bridgeErrs.join("; ");
+      }
+      const grErrs = details.filter(d => String(d).includes("guardrails"));
+      const obErrs = details.filter(d => String(d).includes("obedience"));
+      const grMsg = document.getElementById("grMsg");
+      const obMsg = document.getElementById("obMsg");
+      if (grMsg && grErrs.length) {
+        grMsg.className = "save-state err";
+        grMsg.textContent = grErrs.join("; ");
+      }
+      if (obMsg && obErrs.length) {
+        obMsg.className = "save-state err";
+        obMsg.textContent = obErrs.join("; ");
       }
       return;
     }
@@ -2917,18 +3082,22 @@ async function saveSettings() {
     // marks and re-read the rows the server normalized (hooks/channels/tools).
     chanDirty = false; usageDirty = false; mycDirty = false;
     mycRestartDirty = false;
+    bridgeDirty = false;
+    guardDirty = false; obedDirty = false;
     // v0.5.55: the endpoint manager re-reads the server-normalized chain
     // (source/rows/presence may all have changed) and drops its edit flag.
     epDirty = false;
     loadEndpoints();
     if (hookPatch) { hookDirty.clear(); renderHooks(); }
     if (payload.channels) { renderChannels(); loadChanStatus(); }
+    if (payload.bridge) { bridgePrefill(); loadBridgeStatus(); }
     if (toolsDirty) { toolsDirty = false; renderToolsOff(); }
     beep(880, 0.06);
     scheduleRefresh();
     refreshUsage();            // currency/fx may have changed (server cache cleared)
     refreshSelf();             // v0.5.55: pricing table may have changed
     refreshCaps();             // tools_off / shell / env flags may have changed
+    refreshControl();          // car 7: guardrails/obedience blocks may have changed
   } catch (e) {
     state.className = "save-state err";
     state.textContent = String(e).slice(0, 50);
@@ -2980,7 +3149,7 @@ const CHAN_FIELD_KEYS = {
   phone_number_id: "chan.phoneId",
 };
 const CRED_GROUPS = ["core", "gateway", "web3", "channels", "media",
-                     "connectors"];
+                     "connectors", "backup"];
 const CRED_HINTS = {
   unavailable: ["cred.unavailable",
     "credential slots unavailable — this build has no GET /api/secrets"],
@@ -2995,6 +3164,8 @@ let credHintReason = "";   // "" | unavailable | readOnly | needToken
 let chanStatusRows = [];   // GET /api/channels rows (name/enabled/configured/note)
 let chanWebhookMeta = null;   // X8: top-level .webhook {url, secret_configured}
 let chanDirty = false, usageDirty = false, mycDirty = false, toolsDirty = false;
+// car 7 (D11): only the blocks the operator edited join the save payload.
+let guardDirty = false, obedDirty = false;
 // activation car: only the keys the chat service reads AT START raise this
 // flag (tools_off / mcp / shell / context_dirs) — a models/budget edit must
 // never nag for a restart it does not need.
@@ -3166,13 +3337,16 @@ function renderCreds(body) {
   slots.forEach(s => {
     if (!s || typeof s !== "object" || !s.name) return;
     const g = typeof s.group === "string" && s.group ? s.group : "core";
+    // car 6 (D10): the Connections card owns its two provider slots, so this
+    // card renders every OTHER group — one editor per slot, never two.
+    if (g === "connections") return;
     const bucket = buckets.find(b => b[0] === g);
     if (bucket) bucket[1].push(s); else buckets.push([g, [s]]);
   });
   buckets.filter(b => b[1].length).forEach(([g, items]) => {
     const head = document.createElement("div");
     head.style.cssText =
-      "font-size:12px;letter-spacing:.14em;color:var(--blue-ink);" +
+      "font-size:12.5px;letter-spacing:.14em;color:var(--blue-ink);" +
       "margin-top:14px;text-transform:uppercase;";
     if (CRED_GROUPS.includes(g)) {
       head.dataset.i18n = "cred.group." + g;
@@ -3220,6 +3394,276 @@ function renderTgCreds(body) {
   list.hidden = shown === 0;
 }
 
+/* ------------------------------------------- Connections card (car 6) ------
+   The two provider slots, each inside its own block so the scope checklist
+   sits next to the credential it describes. Same presence-only credRow
+   mechanism as Credentials: a value never round-trips, and a slot the server
+   did not report simply does not render (an honest absence). */
+const CONN_PROVIDERS = [
+  ["CLOUDFLARE_API_TOKEN", "connListCF"],
+  ["GITHUB_TOKEN", "connListGH"],
+];
+
+function renderConnections(body) {
+  const slots = Array.isArray(body && body.slots) ? body.slots : [];
+  const writable = !body || body.writable !== false;
+  CONN_PROVIDERS.forEach(([name, id]) => {
+    const box = document.getElementById(id);
+    if (!box) return;
+    box.textContent = "";
+    const slot = slots.find(s => s && s.name === name);
+    if (!slot) return;
+    box.appendChild(credRow(slot, writable));
+  });
+}
+
+/* One TEST button per provider: POST /api/slots/verify for that ONE slot,
+   painted into that provider's own line with three honest colours —
+   green = proven live, amber = inconclusive (the API could not be reached),
+   red = rejected or wrong shape, and an unset slot stays neutral. The
+   detail is the SERVER's wording; a value never appears here. */
+const CONN_TESTS = [
+  ["connTestCF", "CLOUDFLARE_API_TOKEN", "connTestCFOut"],
+  ["connTestGH", "GITHUB_TOKEN", "connTestGHOut"],
+];
+
+async function connTest(btn, name, outId) {
+  const out = document.getElementById(outId);
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  const say = (text, cls) => {
+    if (!out) return;
+    out.hidden = false;
+    out.className = "conn-test stat-note" + (cls ? " " + cls : "");
+    out.textContent = text;
+  };
+  if (!token) {
+    say(t("cred.needToken", "access token required — set it in Access"), "bad");
+    return;
+  }
+  if (btn) btn.disabled = true;
+  say(t("cred.verifying", "checking\u2026"), "");
+  let res = null;
+  try {
+    res = await fetch("/api/slots/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify({ name: name }),
+    });
+  } catch (e) { res = null; }
+  const doc = res ? await res.json().catch(() => ({})) : {};
+  const row = doc && Array.isArray(doc.results) ? doc.results[0] : null;
+  if (btn) btn.disabled = false;
+  if (!row) {
+    say(t("cred.verifyFail", "verification unavailable"), "bad");
+    return;
+  }
+  if (row.ok === null) {
+    say(t("conn.notSet", "not set — nothing to test"), "");
+    return;
+  }
+  const detail = String(row.detail || row.reason || "");
+  if (row.ok === true) { say("\u2713 " + detail, "ok"); return; }
+  const soft = row.reason === "network" || row.reason === "upstream_error";
+  say((soft ? "! " : "\u2717 ") + detail, soft ? "warn" : "bad");
+}
+
+/* --------------------------------------------------- bridge (car 6) -------
+   The user-owned reverse proxy (line 5 / D9). Three independent ways to be
+   OFF — the switch, an empty Worker URL and an empty allow-list — so the
+   default is fail-closed without anyone having to remember it. The block is
+   non-secret (a URL, host names, a number): credentials never enter it, and
+   the DISABLE NOW button posts {enabled:false} ALONE so a kill switch can
+   never be blocked by a half-typed field elsewhere on the card. */
+let bridgeDirty = false;
+
+function bridgeListValue(id) {
+  const el = document.getElementById(id);
+  if (!el) return [];
+  return String(el.value || "").split(/[,;\r\n]/).map(s => s.trim())
+    .filter(Boolean).slice(0, 32);
+}
+
+function bridgePayload() {
+  const tog = document.getElementById("bridgeToggle");
+  const raw = (document.getElementById("bridgeMaxBytes") || {}).value;
+  const mb = parseInt(raw, 10);
+  return {
+    enabled: !!tog && tog.getAttribute("aria-pressed") === "true",
+    worker_url: (((document.getElementById("bridgeUrl") || {}).value) || "").trim(),
+    allow: bridgeListValue("bridgeAllow"),
+    allow_auth: bridgeListValue("bridgeAuth"),
+    max_bytes: Number.isFinite(mb) ? mb : 1048576,
+  };
+}
+
+function bridgePrefill() {
+  const b = (settings.bridge && typeof settings.bridge === "object")
+    ? settings.bridge : {};
+  const setF = (id, v) => {
+    const el = document.getElementById(id);
+    if (el) el.value = v == null ? "" : String(v);
+  };
+  setF("bridgeUrl", b.worker_url);
+  setF("bridgeAllow", Array.isArray(b.allow) ? b.allow.join(", ") : "");
+  setF("bridgeAuth", Array.isArray(b.allow_auth) ? b.allow_auth.join(", ") : "");
+  setF("bridgeMaxBytes", b.max_bytes == null ? 1048576 : b.max_bytes);
+  const tog = document.getElementById("bridgeToggle");
+  if (tog) tog.setAttribute("aria-pressed",
+                            b.enabled === true ? "true" : "false");
+  bridgeDirty = false;
+}
+
+async function postBridge(partial, msgId) {
+  const msg = document.getElementById(msgId);
+  const say = (text, err) => {
+    if (!msg) return;
+    msg.className = "save-state" + (err ? " err" : "");
+    msg.textContent = text;
+  };
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    say(t("cred.needToken", "access token required — set it in Access"), true);
+    return false;
+  }
+  say(t("br.working", "saving\u2026"), false);
+  try {
+    const res = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify({ bridge: partial }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      // all-or-nothing, like every other block: show the server's details
+      // verbatim (they name keys and grammar reasons, never a value).
+      const details = Array.isArray(body.details) ? body.details : [];
+      say(details.length ? details.join("; ")
+           : (body.error || ("HTTP " + res.status)), true);
+      return false;
+    }
+    settings = Object.assign(settings, body.settings || {});
+    bridgeDirty = false;
+    say(body.changed === true ? t("save.ok", "saved \u2713")
+                              : t("save.same", "no change \u2713"), false);
+    // sync ONLY the switch from the server truth: the other fields stay as
+    // the operator typed them (a kill switch must not discard an edit).
+    const tog = document.getElementById("bridgeToggle");
+    const stored = settings.bridge || {};
+    if (tog) tog.setAttribute("aria-pressed",
+                              stored.enabled === true ? "true" : "false");
+    loadBridgeStatus();
+    beep(880, 0.06);
+    return true;
+  } catch (e) {
+    say(String(e).slice(0, 80), true);
+    return false;
+  }
+}
+
+async function bridgeKill() {
+  const tog = document.getElementById("bridgeToggle");
+  if (tog) tog.setAttribute("aria-pressed", "false");
+  return postBridge({ enabled: false }, "bridgeMsg");
+}
+
+async function bridgeTemplate() {
+  const pre = document.getElementById("brTemplate");
+  const btn = document.getElementById("brTemplateShow");
+  if (!pre) return;
+  if (!pre.hidden) {
+    pre.hidden = true;
+    if (btn) btn.textContent = t("br.showTemplate", "SHOW TEMPLATE");
+    return;
+  }
+  if (!pre.textContent) {
+    try {
+      const res = await fetch("/api/bridge/template");
+      pre.textContent = res.ok ? await res.text()
+        : t("br.templateMissing", "template unavailable");
+    } catch (e) {
+      pre.textContent = t("br.templateMissing", "template unavailable");
+    }
+  }
+  pre.hidden = false;
+  if (btn) btn.textContent = t("br.hideTemplate", "HIDE TEMPLATE");
+}
+
+async function loadBridgeStatus() {
+  const box = document.getElementById("brAudit");
+  const msg = document.getElementById("brStatusMsg");
+  if (!box) return;
+  let doc = null;
+  try {
+    const res = await fetch("/api/bridge/status");
+    doc = res.ok ? await res.json() : null;
+  } catch (e) { doc = null; }
+  if (!doc) {
+    box.textContent = "";
+    if (msg) {
+      msg.className = "save-state err";
+      msg.textContent = t("br.statusFail", "bridge status unavailable");
+    }
+    return;
+  }
+  const rows = Array.isArray(doc.audit) ? doc.audit : [];
+  box.textContent = "";
+  if (!rows.length) {
+    const empty = document.createElement("div");
+    empty.className = "br-empty";
+    empty.dataset.i18n = "br.auditEmpty";
+    empty.textContent = t("br.auditEmpty", "no proxied request yet");
+    box.appendChild(empty);
+  } else {
+    rows.slice().reverse().forEach(row => {
+      const line = document.createElement("div");
+      line.className = "br-line";
+      const dot = document.createElement("span");
+      const good = row && row.ok === true;
+      dot.className = good ? "ok" : "bad";
+      dot.textContent = good ? "\u25cf " : "\u2717 ";
+      line.appendChild(dot);
+      line.appendChild(document.createTextNode(
+        (row && row.host ? row.host : "") +
+        (row && row.path ? row.path : "") + " \u00b7 " +
+        String((row && row.bytes) || 0) + "B" +
+        (row && row.reason ? " \u00b7 " + row.reason : "")));
+      box.appendChild(line);
+    });
+  }
+  if (msg) {
+    msg.className = "save-state";
+    msg.textContent = doc.routing === true
+      ? t("br.routing", "routing on \u00b7 newest first")
+      : t("br.idle", "not routing — switch, Worker URL or allow-list is off");
+  }
+}
+
+function wireBridge() {
+  const once = (el, ev, fn) => {
+    if (!el || el.dataset.wired) return;
+    el.dataset.wired = "1";
+    el.addEventListener(ev, fn);
+  };
+  once(document.getElementById("bridgeToggle"), "click", () => {
+    const tog = document.getElementById("bridgeToggle");
+    const on = tog.getAttribute("aria-pressed") === "true";
+    tog.setAttribute("aria-pressed", on ? "false" : "true");
+    bridgeDirty = true;
+  });
+  ["bridgeUrl", "bridgeAllow", "bridgeAuth", "bridgeMaxBytes"].forEach(id =>
+    once(document.getElementById(id), "input", () => { bridgeDirty = true; }));
+  once(document.getElementById("bridgeSave"), "click",
+       () => postBridge(bridgePayload(), "bridgeMsg"));
+  once(document.getElementById("bridgeKill"), "click", bridgeKill);
+  once(document.getElementById("brTemplateShow"), "click", bridgeTemplate);
+  once(document.getElementById("brAuditRefresh"), "click", loadBridgeStatus);
+  CONN_TESTS.forEach(([btnId, name, outId]) =>
+    once(document.getElementById(btnId), "click",
+         () => connTest(document.getElementById(btnId), name, outId)));
+}
+
 async function loadCreds() {
   const list = document.getElementById("credList");
   const tgList = document.getElementById("tgCredList");
@@ -3234,6 +3678,7 @@ async function loadCreds() {
     credsData = body;
     renderCreds(body);
     renderTgCreds(body);
+    renderConnections(body);
     list.hidden = false;
     credHintReason = body.writable === false ? "readOnly"
       : ((localStorage.getItem(TOKEN_KEY) || "") ? "" : "needToken");
@@ -3241,6 +3686,7 @@ async function loadCreds() {
     credsData = null;
     list.hidden = true;
     if (tgList) { tgList.textContent = ""; tgList.hidden = true; }
+    renderConnections(null);
     credHintReason = "unavailable";
   }
   paintCredHint();
@@ -3361,7 +3807,7 @@ function wireCredList() {
       credWrite(name, "", wrap, input);
     }
   };
-  ["credList", "tgCredList"].forEach(id => {
+  ["credList", "tgCredList", "connListCF", "connListGH"].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.addEventListener("click", handler);
   });
@@ -3934,6 +4380,14 @@ function renderEnvOverride() {
 
 function mycoreExtraPayload() {
   const out = {};
+  // Car 4 (D6): the decision endpoint row — its own flag, its own block.
+  if (decDirty) {
+    const v = id => (((document.getElementById(id) || {}).value || "").trim());
+    const on = id => ((document.getElementById(id) || {}).getAttribute
+      ("aria-pressed") === "true");
+    out.decision = { enabled: on("decToggle"), url: v("decUrl"),
+                     model: v("decModel"), router_model: v("decRouter") };
+  }
   // v0.5.55: the endpoint manager sets epDirty (NOT mycDirty) on row edits,
   // so the whole block must wake for either flag — otherwise an ADD + url
   // save would ship a payload without `endpoints` and silently write nothing.
@@ -4024,6 +4478,125 @@ function mycoreExtraPayload() {
 /* Builds the settings values of the panels once at boot (after
    GET /api/settings resolved). Programmatic value writes fire no input
    events, so no dirty flag is raised here. */
+
+/* car 7 (D11): dirty marks for the guardrails + obedience blocks. Attached
+   once (initSettingsPanels can run again after a restore). */
+let _guardObedWired = false;
+function wireGuardObed() {
+  if (_guardObedWired) return;
+  _guardObedWired = true;
+  ["grUsdDay", "grTokenDay"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("input", () => { guardDirty = true; });
+  });
+  ["obRules", "obForbidden"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("input", () => { obedDirty = true; });
+  });
+}
+
+/* car 7 (D11): the leash read face — tail state + budget status. Refreshed
+   on the SAME cadence as the status panel plus right after every control
+   action/save, so the Overview row and the Guardrails card never show a
+   stale verdict. Fail-soft: a network error keeps the last good paint. */
+let controlData = null;
+async function refreshControl() {
+  try {
+    controlData = await fetch("/api/control").then(r => r.json());
+    renderControl();
+  } catch (e) { /* keep last */ }
+}
+
+function renderControl() {
+  const doc = controlData;
+  if (!doc || typeof doc !== "object") return;
+  // --- tail state (Overview head) ---
+  const tail = document.getElementById("tailState");
+  if (tail) {
+    // server state: idle | working | paused | blocked — mapped through the
+    // packs; the pause reason rides along verbatim (server-supplied data).
+    const map = { idle: "tail.idle", working: "tail.working",
+                  paused: "tail.paused", blocked: "tail.blocked" };
+    let txt = t(map[doc.tail_state] || "tail.idle", doc.tail_state || "idle");
+    if (doc.tail_state === "paused" && doc.reason) txt += " · " + doc.reason;
+    tail.textContent = txt;
+  }
+  const pbtn = document.getElementById("ctlPauseBtn");
+  if (pbtn) {
+    const paused = doc.paused === true;
+    pbtn.dataset.i18n = paused ? "ctl.resume" : "ctl.pause";
+    pbtn.textContent = t(paused ? "ctl.resume" : "ctl.pause",
+                         paused ? "RESUME" : "PAUSE");
+    pbtn.classList.toggle("primary", paused);
+  }
+  // --- guardrails status row ---
+  const b = (doc.budget && typeof doc.budget === "object") ? doc.budget : {};
+  const cell = (id, st, used, limit, money) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const label = st === "over" ? t("gr.over", "OVER")
+      : st === "unknown" ? t("gr.unknown", "UNKNOWN")
+      : st === "off" ? t("gr.off", "OFF") : t("gr.ok", "OK");
+    let val = label;
+    if (st === "ok" || st === "over") {
+      const n = v => money ? "$" + Number(v || 0).toFixed(2)
+                           : Number(v || 0).toLocaleString("en-US");
+      val = `${label} ${n(used)} / ${n(limit)}`;
+    } else if (st === "unknown" && limit > 0) {
+      val = `${label} / ${money ? "$" + Number(limit).toFixed(2)
+                                : Number(limit).toLocaleString("en-US")}`;
+    } else if (st === "off") {
+      val = t("gr.off", "OFF");
+    }
+    el.textContent = val;
+    el.style.color = st === "over" ? "var(--urgent, #c0392b)"
+      : st === "unknown" ? "var(--muted)" : "";
+  };
+  const lim = (b.limits && typeof b.limits === "object") ? b.limits : {};
+  const usd = (b.usd && typeof b.usd === "object") ? b.usd : {};
+  const tok = (b.tokens && typeof b.tokens === "object") ? b.tokens : {};
+  cell("grUsdStat", usd.state || "off", usd.used, lim.usd_day != null
+    ? lim.usd_day : usd.limit, true);
+  cell("grTokStat", tok.state || "off", tok.used, lim.token_day != null
+    ? lim.token_day : tok.limit, false);
+  const gstat = document.getElementById("grStatus");
+  if (gstat) {
+    // why-UNKNOWN stays visible (never a silent pass): reason from the server
+    gstat.textContent = (usd.state === "unknown" && (b.reason || ""))
+      ? String(b.reason) : "";
+  }
+}
+
+/* car 7 (D11): one POST /api/control for stop | pause | resume. */
+async function postControl(action) {
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  const msg = document.getElementById("ctlMsg");
+  const say = (cls, text) => { if (msg) { msg.className = "save-state " + cls; msg.textContent = text; } };
+  if (!token) { say("err", t("save.needToken", "token required")); return; }
+  say("", "…");
+  try {
+    const res = await fetch("/api/control", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify({ action }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      say("err", res.status === 401 ? t("save.badToken", "401 · unauthorized")
+        : ((body.details || [body.error || "error"])[0] + ""));
+      return;
+    }
+    say("", action === "stop" ? "✓ " + t("ctl.stop", "STOP")
+      : action === "pause" ? "✓ " + t("ctl.pause", "PAUSE")
+      : "✓ " + t("ctl.resume", "RESUME"));
+    refreshControl(); refreshStatus();
+    beep(660, 0.05);
+  } catch (e) {
+    say("err", String(e).slice(0, 50));
+  }
+}
+
 function initSettingsPanels() {
   const u = (settings.usage && typeof settings.usage === "object")
     ? settings.usage : {};
@@ -4059,10 +4632,33 @@ function initSettingsPanels() {
   setField("mycRotation", myc.rotation || "");
   setField("mycMaxRpm", Number(myc.max_rpm) || 0);
   setField("mycMaxTpm", Number(myc.max_tpm) || 0);
+  // car 7 (D11): guardrails + obedience prefill (raw stored values; the
+  // server's grammar refusal on save is the honest signal).
+  const guard = (settings.guardrails && typeof settings.guardrails === "object")
+    ? settings.guardrails : {};
+  setField("grUsdDay", guard.usd_day == null ? 0 : guard.usd_day);
+  setField("grTokenDay", guard.token_day == null ? 0 : guard.token_day);
+  const obed = (settings.obedience && typeof settings.obedience === "object")
+    ? settings.obedience : {};
+  setField("obRules", Array.isArray(obed.rules) ? obed.rules.join("\n") : "");
+  setField("obForbidden", Array.isArray(obed.forbidden) ? obed.forbidden.join("\n") : "");
+  // Car 4 (D6): decision endpoint row (raw stored strings; empty = default)
+  const dec = (myc.decision && typeof myc.decision === "object")
+    ? myc.decision : {};
+  setField("decUrl", dec.url);
+  setField("decModel", dec.model);
+  setField("decRouter", dec.router_model);
+  const decTog = document.getElementById("decToggle");
+  if (decTog) decTog.setAttribute("aria-pressed",
+                                  dec.enabled === true ? "true" : "false");
+  wireDecisionPanel();
   epDirty = false;
+  decDirty = false;
   loadEndpoints();
   chanDirty = false; usageDirty = false; mycDirty = false; toolsDirty = false;
   mycRestartDirty = false;
+  guardDirty = false; obedDirty = false;
+  wireGuardObed();             // car 7 (D11): dirty marks for the two blocks
   hookDirty.clear();
   renderToolsOff();
   renderEnvOverride();
@@ -4073,6 +4669,9 @@ function initSettingsPanels() {
   evoPrefill();                // B2: evolution schedule form <- settings
   exCapPrefill();              // B2: exchange caps form <- settings.web3
   missionPrefillCfg();         // car 3: quiet hours + min_interval <- settings
+  bridgePrefill();             // car 6: bridge fields <- settings.bridge
+  wireBridge();                // car 6: switch, save, kill, test, template
+  loadBridgeStatus();          // car 6: routing state + the audit tail
 }
 
 /* repainted after a language switch: the save row may carry a restart hint
@@ -4113,6 +4712,7 @@ function settingsRelang() {
   renderMission();             // mission card: dynamic lines follow the pack
   renderOrch();                // Lane I: orchestration rows follow the pack
   evoCrossCheck();
+  renderAgentBackup();         // car 8: agent-backup rows follow the pack too
 }
 
 /* ------------------------------ car B2: evolution / exchange / overview --
@@ -4451,7 +5051,7 @@ function renderCronList() {
       ? `<button class="btn" id="cronDelBtn" type="button" data-job="${escapeHtml(jid)}" ` +
         `title="${escapeHtml(t("cron.delConfirm", "Delete cron job {id}?"))
           .replace("{id}", escapeHtml(jid))}" ` +
-        `style="padding:2px 9px;font-size:12px;" aria-label="delete">×</button>`
+        `style="padding:2px 9px;font-size:12.5px;" aria-label="delete">×</button>`
       : "";
     return `<div class="ctl-row" data-cron="${escapeHtml(jid)}">` +
       `<label style="flex:1;min-width:0;overflow-wrap:anywhere;">${escapeHtml(title)}</label>` +
@@ -4573,7 +5173,7 @@ function renderCheckpoints() {
       `data-ckpt-restore="${id}" ` +
       `title="${escapeHtml(t("ckpt.restoreTip",
         "Restore this checkpoint — the current file is snapshotted first, so the restore is itself undoable"))}" ` +
-      `style="padding:2px 9px;font-size:12px;" ` +
+      `style="padding:2px 9px;font-size:12.5px;" ` +
       `aria-label="restore checkpoint ${id}">` +
       `${escapeHtml(t("ckpt.restoreBtn", "RESTORE"))}</button>`;
     return `<div class="ctl-row" data-ckpt="${id}">` +
@@ -4671,7 +5271,7 @@ function renderProfiles() {
     const del = p.default ? "" :
       `<button class="btn" type="button" data-prof-rm="${escapeHtml(name)}" ` +
       `title="${escapeHtml(t("prof.rmTip", "Remove this profile (only when its state dir is empty)"))}" ` +
-      `style="padding:2px 9px;font-size:12px;" ` +
+      `style="padding:2px 9px;font-size:12.5px;" ` +
       `aria-label="remove profile ${escapeHtml(name)}">×</button>`;
     return `<div class="ctl-row" data-prof="${escapeHtml(name)}">` +
       `<label style="flex:1;min-width:0;overflow-wrap:anywhere;">` +
@@ -6013,7 +6613,7 @@ function orchGo(kind) {
 }
 
 /* --------------------------------------------------------------- polling -- */
-let statusTimer = null, usageTimer = null, missionTimer = null;
+let statusTimer = null, usageTimer = null, missionTimer = null, controlTimer = null;
 
 async function refreshStatus() {
   try {
@@ -6056,6 +6656,9 @@ function scheduleRefresh() {
   // mission board rides the SAME user-configured cadence as the status panel
   clearInterval(missionTimer);
   missionTimer = setInterval(refreshMission, ms);
+  // car 7 (D11): the leash row (tail + guardrails) follows the same cadence
+  clearInterval(controlTimer);
+  controlTimer = setInterval(refreshControl, ms);
 }
 
 function tickClock() {
@@ -6068,6 +6671,30 @@ function tickClock() {
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+/* car 7 (D11): the leash gate's refusal body -> one localized line.
+   The server sends {error: code, details: [en], params: {...}}; the packs
+   carry gate.paused / gate.budgetUsd / gate.budgetTokens with {used}/{limit}
+   slots, so the numbers stay exact while the sentence translates. Any other
+   error keeps the server's verbatim detail (the standing contract). */
+function gateDetail(body) {
+  const code = body && body.error;
+  const key = code === "paused" || code === "budget_usd"
+    || code === "budget_tokens" ? "gate." + code : "";
+  const fallback = (body && body.details && body.details[0])
+    || (body && body.error) || "error";
+  if (!key) return fallback + "";
+  const p = (body && typeof body.params === "object" && body.params) || {};
+  let out = t(key, fallback);
+  if (code === "budget_usd") {
+    out = out.replace("{used}", Number(p.used || 0).toFixed(2))
+             .replace("{limit}", Number(p.limit || 0).toFixed(2));
+  } else if (code === "budget_tokens") {
+    out = out.replace("{used}", Number(p.used || 0).toLocaleString("en-US"))
+             .replace("{limit}", Number(p.limit || 0).toLocaleString("en-US"));
+  }
+  return out;
 }
 
 /* localized "<panel>: <state>" advisory reason line (server sends raw ids) */
@@ -6626,13 +7253,13 @@ function renderSessions(q) {
       const exp = fmt => `<button class="btn" type="button" ` +
         `data-sess-exp="${escapeHtml(sid)}" data-sess-fmt="${fmt}" ` +
         `aria-label="${escapeHtml("export session " + sid + " as " + fmt)}" ` +
-        `style="padding:2px 9px;font-size:12px;">${fmt.toUpperCase()}</button>`;
+        `style="padding:2px 9px;font-size:12.5px;">${fmt.toUpperCase()}</button>`;
       // X20: make THIS row the live chat session (the server answers an
       // honest no-op when it already is one).
       const open = `<button class="btn" type="button" ` +
         `data-sess-open="${escapeHtml(sid)}" ` +
         `aria-label="${escapeHtml("open session " + sid + " as the live chat session")}" ` +
-        `style="padding:2px 9px;font-size:12px;">${t("sess.openBtn", "OPEN")}</button>`;
+        `style="padding:2px 9px;font-size:12.5px;">${t("sess.openBtn", "OPEN")}</button>`;
       return `<div class="ctl-row">` +
         `<label style="flex:1;min-width:0;overflow-wrap:anywhere;">` +
         `${escapeHtml(bits.filter(Boolean).join(" · "))}` +
@@ -7513,6 +8140,13 @@ if (voiceVolEl) voiceVolEl.addEventListener("input", e => {
 const voiceOrbEl = document.getElementById("voiceOrb");
 if (voiceOrbEl) voiceOrbEl.addEventListener("click", () => armVoice());
 document.getElementById("saveBtn").addEventListener("click", saveSettings);
+/* car 7 (D11): the leash buttons — STOP aborts the running turn, PAUSE /
+   RESUME flips the fail-closed switch (absent element = no-op). */
+const ctlStopBtnEl = document.getElementById("ctlStopBtn");
+if (ctlStopBtnEl) ctlStopBtnEl.addEventListener("click", () => postControl("stop"));
+const ctlPauseBtnEl = document.getElementById("ctlPauseBtn");
+if (ctlPauseBtnEl) ctlPauseBtnEl.addEventListener("click", () =>
+  postControl(controlData && controlData.paused ? "resume" : "pause"));
 /* --- car B2: schedule editor + cap editor + system card wiring (all
        guarded: an absent element is a no-op, never a page error) --- */
 const evoEnabledEl = document.getElementById("evoEnabled");
@@ -7735,8 +8369,34 @@ const exSymbolEl = document.getElementById("exSymbol");
 if (exSymbolEl) exSymbolEl.addEventListener("keydown", e => {
   if (e.key === "Enter") { e.preventDefault(); exProbe(); }
 });
+/* Phase B wiring: the quote card, the two thin launchers and the default
+   symbol swap (A-shares <-> US) — every element id lives in index.html. */
+const extQuoteBtnEl = document.getElementById("extQuoteBtn");
+if (extQuoteBtnEl) extQuoteBtnEl.addEventListener("click", extQuoteFetch);
+const extQuoteSymEl = document.getElementById("extQuoteSymbol");
+if (extQuoteSymEl) extQuoteSymEl.addEventListener("keydown", e => {
+  if (e.key === "Enter") { e.preventDefault(); extQuoteFetch(); }
+});
+const extQuoteMarketEl = document.getElementById("extQuoteMarket");
+if (extQuoteMarketEl) extQuoteMarketEl.addEventListener("change", () => {
+  const inp = document.getElementById("extQuoteSymbol");
+  if (!inp) return;
+  const cur = String(inp.value || "").trim();
+  // only swap the PREFILLED default — a typed symbol is never overwritten
+  if (!cur || cur === "sh600519" || cur === "AAPL")
+    inp.value = extQuoteDefault(extQuoteMarketEl.value);
+});
+const extHomeGoEl = document.getElementById("extHomeGo");
+if (extHomeGoEl) extHomeGoEl.addEventListener("click", () => setView("sniff", true));
+const extVehicleGoEl = document.getElementById("extVehicleGo");
+if (extVehicleGoEl) extVehicleGoEl.addEventListener("click", () => setView("sniff", true));
+/* UX round 2 (B2): the Overview backup pointer opens the one real card */
+const ovBackupOpenEl = document.getElementById("ovBackupOpen");
+if (ovBackupOpenEl) ovBackupOpenEl.addEventListener("click", () => openBackupCard());
 document.getElementById("chatSend").addEventListener("click", chatSend);
 document.getElementById("chatClear").addEventListener("click", chatClear);
+const chatStopEl = document.getElementById("chatStop");
+if (chatStopEl) chatStopEl.addEventListener("click", () => postControl("stop"));
 document.getElementById("chatInput").addEventListener("keydown", e => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); chatSend(); }
 });
@@ -7795,8 +8455,12 @@ function setApplyFilter() {
   if (!grid || !searchEl) return;
   const q = (searchEl.value || "").trim().toLowerCase();
   grid.querySelectorAll(":scope > .card").forEach(card => {
-    const g = card.dataset.setgroup || "general";
-    const groupOk = g === "always" || setGroup === "all" || g === setGroup;
+    // UX round 2 (B2): a card may belong to SEVERAL groups (space separated
+    // data-setgroup) — the Backup card is "general creds" so a user browsing
+    // Credentials & channels still finds it instead of watching it vanish.
+    const groups = (card.dataset.setgroup || "general").split(/\s+/).filter(Boolean);
+    const groupOk = groups.includes("always") || setGroup === "all"
+      || groups.includes(setGroup);
     // reset any child-level marks from the previous pass first
     card.querySelectorAll(".is-filtered").forEach(el =>
       el.classList.remove("is-filtered"));
@@ -7842,6 +8506,22 @@ function wireSettingsFilter() {
       setApplyFilter();
     });
   });
+}
+
+/* UX round 2 (B2): Overview "Backup & Restore / OPEN" pointer. Navigation
+   only — it reveals the ONE existing card under whatever chip/search filter
+   happens to be active (All + cleared search, chips repainted) and focuses
+   it; no write, no second passphrase form, no duplicated controls. */
+function openBackupCard() {
+  setView("settings", true);
+  setGroup = "all";
+  const search = document.getElementById("setSearch");
+  if (search) search.value = "";
+  document.querySelectorAll(".set-chip").forEach(b =>
+    b.classList.toggle("is-active", b.dataset.setfilter === "all"));
+  setApplyFilter();
+  requestAnimationFrame(() =>
+    actFocusEl(document.getElementById("backupCard")));
 }
 
 /* --- 2. Exchange nav visibility (localStorage exNav) ----------------- */
@@ -7895,12 +8575,555 @@ function wireExNav() {
   }
 }
 
+/* --- 3. Backup & Restore card (CKX-P1, car 3) ------------------------- */
+/* The console's own encrypted backup plane. Everything runs IN THIS BROWSER
+   over the loopback: the export is fetched with the Bearer token, the
+   artifact is encrypted by the vendored CKX SDK (lazy-loaded on first use, so
+   the first paint never pays for its ~39 KB), and the passphrase typed here
+   is never sent anywhere — the server only ever sees the DECRYPTED payload,
+   and only once the operator confirms after the preview. The CREATE flow
+   round-trips its own ciphertext before offering the download: an artifact
+   that cannot be decrypted with the passphrase that made it is never handed
+   over. */
+
+let ckxLoading = null;   // one shared lazy <script> injection for the SDK
+let bkPending = null;    // decrypted envelope waiting for the confirm press
+
+function loadCKX() {
+  if (window.CKX) return Promise.resolve(window.CKX);
+  if (ckxLoading) return ckxLoading;
+  ckxLoading = new Promise((res, rej) => {
+    const s = document.createElement("script");
+    s.src = "/static/vendor/ckx.umd.js";
+    s.async = true;
+    s.onload = () => (window.CKX ? res(window.CKX)
+                                 : rej(new Error("CKX missing after load")));
+    s.onerror = () => { ckxLoading = null; rej(new Error("CKX failed to load")); };
+    document.head.appendChild(s);
+  });
+  return ckxLoading;
+}
+
+function bkSet(el, msg, kind) {
+  if (!el) return;
+  el.className = "save-state" + (kind ? " " + kind : "");
+  el.textContent = msg;
+}
+
+function bkScope() {
+  const on = (id) => {
+    const el = document.getElementById(id);
+    return !!(el && el.checked);
+  };
+  const scope = { secrets: on("bkSec"), settings: on("bkSet"), memory: on("bkMem") };
+  scope.any = scope.secrets || scope.settings || scope.memory;
+  return scope;
+}
+
+function bkBytes(str) {
+  try { return new TextEncoder().encode(String(str)).length; }
+  catch (e) { return String(str).length; }
+}
+
+function bkCounts(payload, scope) {
+  const bits = [];
+  if (scope.secrets) {
+    bits.push(`${Object.keys(payload.secrets || {}).length} ` +
+              t("bk.nSlots", "credential slots"));
+  }
+  if (scope.settings) {
+    bits.push(`${Object.keys(payload.settings || {}).length} ` +
+              t("bk.nKeys", "settings keys"));
+  }
+  if (scope.memory) {
+    const mem = payload.memory || {};
+    const bytes = Object.values(mem).reduce((n, v) => n + bkBytes(v), 0);
+    bits.push(`${Object.keys(mem).length} ${t("bk.nFiles", "memory files")}` +
+              ` · ${bytes} ${t("bk.nBytes", "bytes")}`);
+  }
+  return bits;
+}
+
+function bkErrText(status, body) {
+  const det = Array.isArray(body && body.details) ? body.details[0] : null;
+  const base = (body && (body.reason || body.error)) || ("HTTP " + status);
+  return det ? `${base} · ${det}` : String(base);
+}
+
+function bkStrengthText(pass) {
+  if (!pass) return "";
+  let score = 0;
+  if (pass.length >= 8) score++;
+  if (pass.length >= 14) score++;
+  if (/[a-z]/.test(pass) && /[A-Z]/.test(pass)) score++;
+  if (/\d/.test(pass)) score++;
+  if (/[^A-Za-z0-9]/.test(pass)) score++;
+  if (score >= 4) return t("bk.strong", "strength: strong");
+  if (score >= 3) return t("bk.fair", "strength: fair");
+  return t("bk.weak", "strength: weak — length helps most");
+}
+
+function bkInvalidate() {
+  // any edit to the scope / file / passphrase invalidates a preview that was
+  // already shown: the confirm press must apply exactly what was previewed.
+  bkPending = null;
+  const preview = document.getElementById("bkPreview");
+  if (preview) preview.hidden = true;
+}
+
+async function bkCreate() {
+  const msg = document.getElementById("bkMsg");
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    return bkSet(msg, t("comm.needToken",
+      "access token required — set it in Settings, Access"), "err");
+  }
+  const scope = bkScope();
+  if (!scope.any) return bkSet(msg, t("bk.needSection", "select at least one section"), "err");
+  const pass = (document.getElementById("bkPass") || {}).value || "";
+  const pass2 = (document.getElementById("bkPass2") || {}).value || "";
+  if (pass.length < 8) {
+    return bkSet(msg, t("bk.shortPass", "passphrase must be at least 8 characters"), "err");
+  }
+  if (pass !== pass2) return bkSet(msg, t("bk.mismatch", "the two passphrases differ"), "err");
+  const include = ["secrets", "settings", "memory"].filter(k => scope[k]).join(",");
+  const btn = document.getElementById("bkCreate");
+  if (btn) btn.disabled = true;
+  try {
+    bkSet(msg, t("bk.working", "exporting…"));
+    let env;
+    try {
+      const res = await fetch("/api/backup/export?include=" + encodeURIComponent(include),
+        { headers: { Authorization: "Bearer " + token } });
+      const body = await res.json().catch(() => ({}));
+      if (res.status === 401) return bkSet(msg, t("save.badToken", "401 · unauthorized"), "err");
+      if (!res.ok) return bkSet(msg, bkErrText(res.status, body), "err");
+      env = body;
+    } catch (e) {
+      return bkSet(msg, t("comm.netFail", "network error — the console is not answering"), "err");
+    }
+    let sdk;
+    try { sdk = await loadCKX(); }
+    catch (e) { return bkSet(msg, t("bk.sdkFail", "the encryption library could not load"), "err"); }
+    bkSet(msg, t("bk.encrypting", "encrypting…"));
+    const json = JSON.stringify(env);
+    let box;
+    try {
+      box = await sdk.encryptToFile(json, pass, {
+        app: location.origin,
+        schema: "aidog.backup.v1",
+        schemaVersion: "1",
+        label: "aidog backup " + new Date().toISOString().slice(0, 10),
+      });
+    } catch (e) {
+      return bkSet(msg, t("bk.encryptFail", "encryption failed") +
+        (e && e.code ? " · " + e.code : ""), "err");
+    }
+    let ok = false;
+    try {
+      const back = await sdk.decrypt(box, pass);
+      ok = !!back && typeof back.text === "string" && back.text === json;
+    } catch (e) { ok = false; }
+    if (!ok) {
+      return bkSet(msg, t("bk.roundtripFail",
+        "round-trip FAILED — no file was offered for download"), "err");
+    }
+    const name = "aidog-backup-" +
+      new Date().toISOString().slice(0, 10).replace(/-/g, "") + ".ckx";
+    const url = URL.createObjectURL(new Blob([box], { type: "application/octet-stream" }));
+    const a = document.createElement("a");
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    ["bkPass", "bkPass2"].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.value = "";
+    });
+    const strength = document.getElementById("bkStrength");
+    if (strength) strength.textContent = "";
+    bkSet(msg, t("bk.roundtripOk", "round-trip verified ✓") + " · " + name);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function bkApply(doc, scope, token, msg, preview) {
+  const body = {
+    schema: doc.schema,
+    schemaVersion: doc.schemaVersion,
+    payload: doc.payload,
+    apply: { secrets: scope.secrets, settings: scope.settings, memory: scope.memory },
+  };
+  let res, out;
+  try {
+    res = await fetch("/api/backup/restore", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 Authorization: "Bearer " + token },
+      body: JSON.stringify(body),
+    });
+    out = await res.json().catch(() => ({}));
+  } catch (e) {
+    return bkSet(msg, t("comm.netFail", "network error — the console is not answering"), "err");
+  }
+  bkPending = null;
+  if (res.status === 401) return bkSet(msg, t("save.badToken", "401 · unauthorized"), "err");
+  if (res.status === 400) return bkSet(msg, bkErrText(400, out), "err");
+  const bits = [];
+  if (out.secrets) bits.push(`${(out.secrets.names || []).length} ` +
+                              t("bk.nSlots", "credential slots"));
+  if (out.settings) bits.push(`${(out.settings.changed || []).length} ` +
+                               t("bk.nKeys", "settings keys"));
+  if (out.memory) bits.push(`${(out.memory.files || []).length} ` +
+                             t("bk.nFiles", "memory files"));
+  const failed = [].concat(
+    ((out.secrets && out.secrets.failed) || []).map(f => `${f.name}: ${f.reason}`),
+    (out.settings && out.settings.errors) || [],
+    ((out.memory && out.memory.failed) || []).map(f => `${f.name}: ${f.reason}`));
+  const head = out.ok ? t("bk.done", "restored")
+                      : t("bk.partial", "restored — some parts refused");
+  const text = head + ": " + (bits.join(" · ") || "—") +
+    (failed.length ? " · " + failed.join(" | ") : "");
+  bkSet(msg, text, out.ok ? "" : "err");
+  if (preview) preview.hidden = true;
+  if (out.ok) {
+    if (out.settings && typeof loadSettings === "function") loadSettings().catch(() => {});
+    if (out.secrets && typeof loadCreds === "function") loadCreds();
+  }
+}
+
+async function bkRestore() {
+  const msg = document.getElementById("bkRMsg");
+  const preview = document.getElementById("bkPreview");
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    return bkSet(msg, t("comm.needToken",
+      "access token required — set it in Settings, Access"), "err");
+  }
+  const input = document.getElementById("bkFile");
+  const file = input && input.files && input.files[0];
+  if (!file) return bkSet(msg, t("bk.needFile", "choose a .ckx backup file first"), "err");
+  const pass = (document.getElementById("bkRPass") || {}).value || "";
+  if (!pass) return bkSet(msg, t("bk.needPass", "enter the passphrase of that file"), "err");
+  const scope = bkScope();
+  if (!scope.any) return bkSet(msg, t("bk.needSection", "select at least one section"), "err");
+  const key = `${file.name}:${file.size}:${file.lastModified}:${pass}`;
+  const btn = document.getElementById("bkRestore");
+  if (btn) btn.disabled = true;
+  try {
+    if (bkPending && bkPending.key === key) {
+      return await bkApply(bkPending.doc, scope, token, msg, preview);  // the CONFIRM press
+    }
+    bkPending = null;
+    let sdk;
+    try { sdk = await loadCKX(); }
+    catch (e) { return bkSet(msg, t("bk.sdkFail", "the encryption library could not load"), "err"); }
+    bkSet(msg, t("bk.decrypting", "decrypting…"));
+    let text;
+    try {
+      const buf = new Uint8Array(await file.arrayBuffer());
+      const back = await sdk.decrypt(buf, pass);
+      text = back && back.text;
+    } catch (e) {
+      if (preview) preview.hidden = true;
+      const code = String((e && e.code) || "");
+      return bkSet(msg, code === "CKX_WRONG_PASSWORD"
+        ? t("bk.badPass", "wrong passphrase")
+        : t("bk.decryptFail", "this file cannot be read"), "err");
+    }
+    let doc = null;
+    try { doc = JSON.parse(text); } catch (e) { doc = null; }
+    if (!doc || doc.schema !== "aidog.backup.v1" ||
+        typeof doc.schemaVersion !== "string" ||
+        !doc.payload || typeof doc.payload !== "object") {
+      if (preview) preview.hidden = true;
+      return bkSet(msg, t("bk.badArtifact", "not an I'm AiDog backup file"), "err");
+    }
+    if (preview) {
+      preview.hidden = false;
+      preview.textContent = t("bk.previewHead", "preview") + ": " +
+        bkCounts(doc.payload, scope).join(" · ");
+    }
+    bkPending = { key, doc };
+    bkSet(msg, t("bk.ready",
+      "decrypted — check the preview, then press RESTORE again to apply"));
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function wireBackup() {
+  const create = document.getElementById("bkCreate");
+  const restore = document.getElementById("bkRestore");
+  if (!create || !restore || create.dataset.wired) return;
+  create.dataset.wired = "1";
+  const strength = document.getElementById("bkStrength");
+  const pass = document.getElementById("bkPass");
+  if (pass && strength) {
+    pass.addEventListener("input", () => { strength.textContent = bkStrengthText(pass.value); });
+  }
+  ["bkScope", "bkFile", "bkRPass"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("change", bkInvalidate);
+  });
+  const rpass = document.getElementById("bkRPass");
+  if (rpass) rpass.addEventListener("input", bkInvalidate);
+  create.addEventListener("click", () => { bkCreate(); });
+  restore.addEventListener("click", () => { bkRestore(); });
+  [pass, rpass].forEach(el => {
+    if (!el) return;
+    el.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      (el === pass ? bkCreate : bkRestore)();
+    });
+  });
+  wireAgentBackup();
+}
+
+/* --- Car 8 (CKX-P2): the AGENT BACKUP section --------------------------- */
+/* One read face (GET /api/backup/agent) paints every row; the three buttons
+   and the meter reset are the only writes, each behind the existing Bearer
+   gate via commPost. Nothing here ever receives or renders a slot VALUE, a
+   filesystem path or a payload — the server does not send them, and no
+   client-side state pretends otherwise. A missing endpoint degrades to an
+   honest "unavailable" line, never to a fabricated capability. */
+
+let agentDoc = null;
+
+function agentMsg(text, kind) {
+  bkSet(document.getElementById("agMsg"), text, kind || "");
+}
+
+async function refreshAgentBackup() {
+  try {
+    const res = await fetch("/api/backup/agent", { cache: "no-store" });
+    agentDoc = res.ok ? await res.json() : null;
+  } catch (e) { agentDoc = null; }
+  renderAgentBackup();
+}
+
+function renderAgentBackup() {
+  const node = document.getElementById("agNode");
+  const pw = document.getElementById("agPw");
+  const state = document.getElementById("agState");
+  const mcpBtn = document.getElementById("agMcp");
+  const num = document.getElementById("agNum");
+  const bar = document.getElementById("agBar");
+  const doc = agentDoc;
+  if (!doc || typeof doc !== "object") {
+    if (node) node.textContent = t("bk.agentUnavailable",
+      "agent backup status unavailable — the endpoint did not answer");
+    if (pw) pw.textContent = "";
+    if (state) state.textContent = "";
+    if (num) num.textContent = "–";
+    if (bar) bar.style.width = "0%";
+    return;
+  }
+  const n = (doc.node && typeof doc.node === "object") ? doc.node : {};
+  if (node) {
+    node.className = "stat-note" + (n.ok === true ? "" : " warn");
+    node.textContent = n.ok === true
+      ? t("bk.agentNodeOk", "Node runtime: {v} (>= 20 required)")
+          .replace("{v}", String(n.version || "?"))
+      : t("bk.agentNodeOff", "Node runtime unavailable: {r} — scheduled backup stays off; the manual card above still works")
+          .replace("{r}", String(n.reason || "unknown"));
+  }
+  const pwSet = !!(doc.password_slot && doc.password_slot.set === true);
+  if (pw) {
+    pw.className = "stat-note" + (pwSet ? "" : " warn");
+    pw.textContent = pwSet
+      ? t("bk.agentPwOk", "AIDOG_CKX_PASSWORD slot: set")
+      : t("bk.agentPwOff", "AIDOG_CKX_PASSWORD slot: empty — set it in Credentials");
+  }
+  const sched = (doc.scheduled && typeof doc.scheduled === "object")
+    ? doc.scheduled : null;
+  if (state) {
+    state.className = "stat-note";
+    state.textContent = sched
+      ? t("bk.agentSchedAt", "scheduled · {s} · next {n}")
+          .replace("{s}", String(sched.spec || ""))
+          .replace("{n}", String(sched.next || "–"))
+      : t("bk.agentNotSched", "not scheduled");
+  }
+  if (mcpBtn) {
+    const on = !!(doc.mcp && doc.mcp.enabled === true);
+    mcpBtn.dataset.i18n = on ? "bk.agentMcpOff" : "bk.agentMcpOn";
+    mcpBtn.textContent = t(on ? "bk.agentMcpOff" : "bk.agentMcpOn",
+      on ? "DISABLE MCP" : "ENABLE MCP");
+    mcpBtn.dataset.on = on ? "1" : "";
+  }
+  const q = (doc.quota && typeof doc.quota === "object") ? doc.quota : {};
+  const used = Number(q.used) || 0;
+  const cap = Number(q.cap) || 0;
+  const st = String(q.state || "ok");
+  if (num) {
+    num.textContent = cap
+      ? t("bk.agentQuotaNum", "{u} / {c} · {s}")
+          .replace("{u}", used.toLocaleString("en-US"))
+          .replace("{c}", cap.toLocaleString("en-US"))
+          .replace("{s}", st.toUpperCase())
+      : t("bk.agentQuotaUnknown", "meter unavailable");
+    num.style.color = st === "over" ? "var(--urgent, #c0392b)"
+      : st === "warn" ? "var(--amber)" : "";
+  }
+  if (bar) {
+    bar.style.width = cap ? Math.min(100, Math.round(used * 100 / cap)) + "%" : "0%";
+    bar.style.background = st === "over" ? "var(--urgent, #c0392b)"
+      : st === "warn" ? "var(--amber)" : "";
+  }
+}
+
+async function agentPost(action) {
+  const spec = (document.getElementById("agSpec") || {}).value || "";
+  agentMsg(t("bk.agentBusy", "working…"));
+  const res = await commPost("/api/backup/agent",
+    action === "schedule" ? { action, spec: spec.trim() } : { action });
+  if (!res.ok) {
+    const detail = String(res.detail || "");
+    agentMsg(detail || t("bk.agentFail", "request refused"), "err");
+    refreshAgentBackup();
+    return false;
+  }
+  const words = {
+    schedule: "bk.agentSchedOk", unschedule: "bk.agentRemoved",
+    quota_reset: "bk.agentQuotaReset", mcp_on: "bk.agentMcpOnOk",
+    mcp_off: "bk.agentMcpOffOk" };
+  agentMsg("✓ " + t(words[action] || "bk.agentDone", "done"));
+  refreshAgentBackup();
+  beep(660, 0.05);
+  return true;
+}
+
+function wireAgentBackup() {
+  const ids = ["agSched", "agUnsched", "agMcp", "agReset"];
+  const btn = {};
+  let any = false;
+  ids.forEach(id => { btn[id] = document.getElementById(id);
+                      if (btn[id]) any = true; });
+  if (!any) return;
+  ids.forEach(id => {
+    const b = btn[id];
+    if (!b || b.dataset.wired) return;
+    b.dataset.wired = "1";
+    b.addEventListener("click", () => {
+      const action = id === "agSched" ? "schedule"
+        : id === "agUnsched" ? "unschedule"
+        : id === "agReset" ? "quota_reset"
+        : (b.dataset.on === "1" ? "mcp_off" : "mcp_on");
+      agentPost(action);
+    });
+  });
+  refreshAgentBackup();
+}
+
+/* --- 4. Car 4 (D6): decision endpoint row + intent routing --------------- */
+/* The endpoint row lives in the existing Model panel (no new view): fields
+   load from settings, presence/status from GET /api/mycore/endpoints, and an
+   untouched form ships nothing. Intent routing (call site 1) is a button —
+   never automatic — and answers either a tab or an honest "no fast path"
+   reason word; a reason WORD is never invented client-side. */
+
+function paintDecisionStatus() {
+  const el = document.getElementById("decStatus");
+  if (!el) return;
+  const d = (typeof epData === "object" && epData) ? epData.decision : null;
+  if (!d || typeof d !== "object") {
+    el.className = "stat-note";
+    el.textContent = t("myc.decUnknown", "decision endpoint: unavailable");
+    return;
+  }
+  if (d.enabled !== true) {
+    el.className = "stat-note";
+    el.textContent = t("myc.decOff",
+      "off — every decision call site keeps its current behavior");
+    return;
+  }
+  if (d.key_set !== true) {
+    el.className = "stat-note warn";
+    el.textContent = t("myc.decNoKey",
+      "on — set the DECISION_API_KEY slot (Credentials) to activate");
+    return;
+  }
+  el.className = "stat-note";
+  el.textContent = t("myc.decOn", "active") + " · " +
+    (d.url || "https://jevmodel.org") + " · " +
+    (d.model || "jev-latest") + " · " +
+    (d.router_model
+      ? t("myc.decRouterOn", "router → ") + d.router_model
+      : t("myc.decRouterOff", "router off"));
+}
+
+function wireDecisionPanel() {
+  const toggle = document.getElementById("decToggle");
+  if (!toggle || toggle.dataset.wired) return;
+  toggle.dataset.wired = "1";
+  toggle.addEventListener("click", () => {
+    const pressed = toggle.getAttribute("aria-pressed") === "true";
+    toggle.setAttribute("aria-pressed", pressed ? "false" : "true");
+    decDirty = true;
+  });
+  ["decUrl", "decModel", "decRouter"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("input", () => { decDirty = true; });
+  });
+}
+
+function wireIntentRoute() {
+  const btn = document.getElementById("extRouteBtn");
+  const input = document.getElementById("extIntent");
+  const msg = document.getElementById("extRouteMsg");
+  if (!btn || !input || btn.dataset.wired) return;
+  btn.dataset.wired = "1";
+  const say = (text, kind) => {
+    if (!msg) return;
+    msg.className = "save-state" + (kind ? " " + kind : "");
+    msg.textContent = text;
+  };
+  const go = async () => {
+    const text = (input.value || "").trim();
+    if (!text) {
+      say(t("ext.routeEmpty", "type a request first"), "err");
+      return;
+    }
+    btn.disabled = true;
+    say(t("ext.routeBusy", "routing…"));
+    try {
+      const res = await commPost("/api/extensions/intent", { text });
+      if (!res.ok) { say(commErrorText(res), "err"); return; }
+      const body = res.body || {};
+      if (body.available !== true) {
+        const word = String(body.reason || "unavailable");
+        const why = t("ext.reason." + word, word);
+        say(t("ext.routeWhy", "no fast path: {r}").replace("{r}", why), "err");
+        return;
+      }
+      setExtTab(String(body.tab || ""));
+      const conf = Number(body.confidence);
+      say("→ " + t("ext.tab." + body.tab, String(body.tab)) +
+          (Number.isFinite(conf) ? " · " + Math.round(conf * 100) + "%" : ""));
+    } finally {
+      btn.disabled = false;
+    }
+  };
+  btn.addEventListener("click", () => { go(); });
+  input.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    go();
+  });
+}
+
+wireIntentRoute();
+wireBackup();
+
 const startLang = QS_LANG || localStorage.getItem(LANG_KEY) || "en";
 runBoot();
 setView(currentView, false);      // deep link applied before the first paint
 loadLang(startLang);
 loadSettings().then(() => { scheduleRefresh(); renderVoice(); initSettingsPanels(); });
 refreshStatus(); refreshUsage(); refreshSelf(); refreshEvents(); refreshVersion(); refreshSkills();
+refreshControl();      // car 7 (D11): tail row + guardrails status at boot
 loadSkillsRemote();  // car 5: per-skill availability for the ORCHESTRATION row
 refreshEvolution();
 refreshCron();           // cron list for the Overview card (+ delete row)

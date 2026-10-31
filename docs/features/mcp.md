@@ -27,8 +27,10 @@ Precedence: env `MYCORE_MCP` (raw JSON) > settings `web/settings.json`
 
 - `name`: `[A-Za-z0-9][A-Za-z0-9_.-]{0,31}`, unique.
 - `tools` = allow patterns (fnmatch, default = all), `deny` = applied after.
-- **Secrets are env slot NAMES only** (`$SLOT` resolved from the process
-  environment at connect time; a missing/empty slot fails that server with an
+- **Secrets are env slot NAMES only** (`$SLOT` resolved at connect time —
+  process environment first, then the profile `secrets.env` own-line slot,
+  added in car 8 so an operator who only ever wrote the console never has to
+  export the value by hand; a slot missing in BOTH fails that server with an
   honest note naming the SLOT — never a literal secret in settings, never
   echoed). This is the same credential-pool discipline as `modeltier`.
 - Settings validation: `mycore.mcp` is a single-line string (≤4000 chars);
@@ -111,6 +113,45 @@ only when edited; the Overview `#capGrid` renders the configured server
 names. Evidence: `tmp/e2e_frontend_coverage.py` `L3` (write →
 `capabilities.mycore.mcp_servers.names`) and `tmp/e2e_frontend_ui.js` `U5`
 (system card) — see [frontend_coverage.md](frontend_coverage.md).
+
+## CKX backup server (`ckx`, car 8 / CKX-P2)
+
+The console's **AGENT BACKUP** section can register the vendored
+`deploy/ckx/ckx-mcp.mjs` MCP server with one button (`POST /api/backup/agent
+{action:"mcp_on"}` / `mcp_off`). The write path touches ONLY the `ckx` entry
+of `mycore.mcp` — every other server the operator configured survives
+byte-identical, unknown hand-written settings keys survive too, and the value
+goes through the same `validate_settings_patch` + merge-onto-raw-store write
+as the settings face.
+
+```jsonc
+{"name": "ckx", "transport": "stdio",
+ "command": "<node> <repo>/deploy/ckx/ckx-mcp.mjs",
+ "env":    {"AIDOG_CKX_PASSWORD": "$AIDOG_CKX_PASSWORD"},
+ "tools":  ["ckx_verify_integrity", "ckx_read_meta", "ckx_capabilities",
+            "ckx_estimate", "ckx_encrypt"],
+ "deny":   ["ckx_decrypt*", "ckx_generate*", "*recipient*", "ckx_encrypt_to"]}
+```
+
+- **Allow-list is structure/ciphertext only** (design §8): verify, metadata,
+  capabilities, estimates and *encrypting* can never return a plaintext byte.
+  `ckx_decrypt*`, the whole recipient-keypair family and `ckx_encrypt_to` are
+  named in `deny` as belt-and-braces — a decryption or a private key must
+  never reach the model context. **Recovery stays on the manual Backup &
+  Restore card (CKX-P1), where a human types the passphrase.**
+- The passphrase reaches the child only as a resolved `$AIDOG_CKX_PASSWORD`
+  env var (process env, then the profile `secrets.env` slot) — settings hold
+  the slot NAME, never a value.
+- `mcp_on` requires the Node >= 20 probe AND a set passphrase slot, and
+  refuses with a 409 naming the exact reason otherwise; it also refuses when
+  env `MYCORE_MCP` is set (the env override would silently win).
+- The scheduled path does NOT go through MCP: `backup_run` is a core tool
+  that drives the CLI directly (deterministic, no model-facing plaintext),
+  so a scheduled backup keeps working even with MCP switched off.
+
+Evidence: `mycore/tests/run.py::test_ckxbackup` (40 assertions incl. the
+parse/deny round trip), `tests/web_console_p3.py` (agent lane),
+`tmp/e2e_car8_ui.js` (22/22).
 
 ## SNIFF lane: sensing a bridge, read-side only (SNIFF car)
 

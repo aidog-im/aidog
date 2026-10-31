@@ -1312,6 +1312,64 @@ def _auto_verdict(order_type: str, notional: float, spent: float,
 
 # ------------------------------------------------------------ plan state ----
 
+# Car 4 (D6) call site 2 guardrail knobs. `score` is the fractional INDEX over
+# the criteria levels the question defines (0 = negligible ... 4 = severe for
+# our five levels), so "high or worse" is >= 3.0. Confidence below the floor
+# is treated as "no clearance" — money fails closed, never open.
+DECISION_MIN_CONFIDENCE = 0.6
+DECISION_RISK_MAX = 3.0
+
+
+def _decision_guard(facts: dict) -> dict:
+    """Car 4 (D6) call site 2 — the Jev order-plan guardrail.
+
+    Returns {"downgrade": bool, "reason": str}. It may ONLY remove an auto
+    approval: nothing here approves, executes or unblocks a plan. When the
+    decision client is configured, anything short of a CONFIDENT "inside the
+    declared limits and low risk" answer downgrades auto -> pending, which
+    routes the plan to the human gate that already exists (an unreachable or
+    unanswerable question is not a clearance). Client off == today's rule,
+    unchanged. Facts are numbers and enum words — never a credential, never a
+    log line, and the reason string carries no payload."""
+    try:
+        from . import decision as _deci           # noqa: PLC0415 — lazy import
+    except Exception:                             # noqa: BLE001 — fail closed
+        return {"downgrade": True,
+                "reason": "decision client unavailable"}
+    try:
+        cfg = _deci.config()
+    except Exception:                             # noqa: BLE001
+        return {"downgrade": True,
+                "reason": "decision configuration unreadable"}
+    if not cfg["active"]:
+        return {"downgrade": False, "reason": ""}   # opted out == today's rule
+    try:
+        got = _deci.plan_guard(facts)
+    except _deci.DecisionError as e:
+        return {"downgrade": True, "reason": f"no decision ({e.reason})"}
+    except Exception as e:                        # noqa: BLE001 — class name only
+        return {"downgrade": True,
+                "reason": f"no decision ({type(e).__name__})"}
+    try:
+        conf = float(got.get("confidence") or 0.0)
+        risk = float(got.get("risk") or 0.0)
+    except (TypeError, ValueError):
+        conf, risk = 0.0, 0.0
+    if not got.get("within_limits"):
+        return {"downgrade": True,
+                "reason": f"outside the declared limits (confidence {conf:.2f})"}
+    if risk >= DECISION_RISK_MAX:
+        return {"downgrade": True,
+                "reason": (f"risk {risk:g}/10 >= {DECISION_RISK_MAX:g} "
+                           f"(confidence {conf:.2f})")}
+    if conf < DECISION_MIN_CONFIDENCE:
+        return {"downgrade": True,
+                "reason": (f"low decision confidence {conf:.2f} < "
+                           f"{DECISION_MIN_CONFIDENCE:g}")}
+    return {"downgrade": False,
+            "reason": (f"within limits (confidence {conf:.2f}, "
+                       f"risk {risk:g}/10)")}
+
 def prepare_order(venue: str, side: str, symbol: str | None, order_type: str,
                   qty: object, price: object = None, *,
                   transport: Transport | None = None,
@@ -1364,12 +1422,32 @@ def prepare_order(venue: str, side: str, symbol: str | None, order_type: str,
     fee_rate, fee_note = _FEE_FN[venue](sym, transport, timeout)
     fee_usd = fee_rate * notional if fee_rate is not None else None
     th = thresholds()
+    # Car 4 (D6) call site 2 — the order-plan guardrail. Computed OUTSIDE the
+    # store lock (one decision request is network I/O) and applied inside as
+    # a DOWNGRADE only: auto -> pending with the guard's reason, while a
+    # pending plan keeps waiting for the owner either way.
+    guard = _decision_guard({
+        "venue": venue, "side": side, "symbol": sym,
+        "order_type": order_type, "qty": qty_f, "price": price_f,
+        "notional_usd": notional, "slippage_bps": slip,
+        "depth_ok": bool(depth_ok), "fee_rate": fee_rate,
+        "auto_thresholds_usd": th,
+    })
     with _store_lock:
         path = _store_path(state_dir)
         store = _load_store(path)
         _sweep_expired(store)
         spent = _spent_today(store)
         auto, verdict = _auto_verdict(order_type, notional, spent, th)
+        if guard.get("downgrade"):
+            if auto:
+                auto = False
+                verdict = ("decision guardrail: " + guard["reason"] +
+                           " — the plan waits for the owner (threshold "
+                           f"verdict was: {verdict})")
+            else:
+                verdict = (verdict + " · decision guardrail: "
+                           + guard["reason"])
         plan: dict = {
             "id": "pl_" + secrets.token_hex(6),
             "venue": venue, "side": side, "symbol": sym,

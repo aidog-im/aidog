@@ -16,8 +16,8 @@
 <p align="center">
   <a href="https://github.com/aidog-im/aidog/releases"><img src="https://img.shields.io/badge/release-0.5.53-blue?style=flat-square" alt="release 0.5.53"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
-  <img src="https://img.shields.io/badge/core_tests-1773%2F1773-brightgreen?style=flat-square" alt="core tests 1773/1773">
-  <img src="https://img.shields.io/badge/console_smoke-334%2F334-brightgreen?style=flat-square" alt="console smoke 334/334">
+  <img src="https://img.shields.io/badge/core_tests-2045%2F2045-brightgreen?style=flat-square" alt="core tests 2045/2045">
+  <img src="https://img.shields.io/badge/console_smoke-432%2F432-brightgreen?style=flat-square" alt="console smoke 432/432">
   <img src="https://img.shields.io/badge/permanently-free-ff6f00?style=flat-square" alt="permanently free">
 </p>
 
@@ -56,7 +56,7 @@ machine. It is built around three ideas that most assistants skip:
   No vector store you cannot read or audit.
 - **A self-developed core.** The runtime kernel (`mycore`) is written from
   scratch in this repository — an honest function-calling loop with explicit
-  stop reasons, **32 modules ≈ 18.6k LOC, 1,773 tests**, and zero upstream
+  stop reasons, **36 modules ≈ 21.6k LOC, 2,045 tests**, and zero upstream
   dependencies after the core swap. Swap the kernel, never swap "me".
 
 It talks to you over **Telegram**, a **loopback web console**, a
@@ -82,7 +82,7 @@ model key (or use the zero-key trial path) and the whole product activates.
 
 |  | Capability | What it provides |
 |---|---|---|
-| 🧬 | **Self-developed core** | `mycore`: FC loop with honest stop reasons, fail-closed service, watchdog, doctor health gate — 32 modules, 1,773 tests, zero upstream |
+| 🧬 | **Self-developed core** | `mycore`: FC loop with honest stop reasons, fail-closed service, watchdog, doctor health gate — 36 modules, 2,045 tests, zero upstream |
 | 🎭 | **Constitution persona** | `SOUL.md` first in the system stack; red lines and tone enforced every reply, not sampled from a persona prompt |
 | 🧠 | **Curated memory** | Bounded Markdown budgets + archive tiers + digital-memory protocol; `memory` suite 58/58 |
 | 🧩 | **Skills + deterministic router** | `SKILL.md` frontmatter (industry-standard fields), route pre-filter picks TOP3 *before* any body loads — 30/30 |
@@ -94,7 +94,7 @@ model key (or use the zero-key trial path) and the whole product activates.
 | 🔑 | **Zero-key onboarding** | Start with a trial model or bring your own key; secrets live in `secrets.env` (0600) and are **never echoed** — slot names only |
 | 💬 | **Streaming everywhere** | Provider SSE streaming, Telegram typing heartbeat, console chat cards with streamed replies |
 | ⚡ | **Local & portable** | stdlib-only core (voice/image extras lazy-load), service bound to local loopback, SSE streaming throughout, `execute_code` folds multi-step runs into one round trip |
-| 🖥️ | **Loopback web console** | Seven views — Overview · Chat · Skills · Exchange · Evolution · Stream · Settings (Usage & Cost and Voice are cards): activation checklist with fix deep-links, credential slot editor (32 slots — names + lengths only, values never rendered), cron list with delete, capability grid, channel forms with send test, hooks editor, evolution schedule, Web3 caps — bound to `127.0.0.1`, token-gated writes |
+| 🖥️ | **Loopback web console** | Seven views — Overview · Chat · Skills · Exchange · Evolution · Stream · Settings (Usage & Cost and Voice are cards): activation checklist with fix deep-links, credential slot editor (37 editable slots — names + lengths only, values never rendered), cron list with delete, capability grid, channel forms with send test, hooks editor, evolution schedule, Web3 caps, a **Connections** card (Cloudflare + GitHub token slots, a per-permission scope checklist with a read-only default posture, and a real read-only test call) and a **Bridge** card (a reverse proxy YOU deploy on your own account — explicit target allow-list, one-click kill switch, one audit line per proxied request), plus a **Backup & Restore** card (one passphrase-protected `.ckx` file of credentials · settings · memory, encrypted in the browser with an in-page round-trip check before the download) whose **AGENT BACKUP** section schedules the same encrypted run through the vendored CKX CLI — Node probe, passphrase-slot presence, a local call meter and a one-click MCP switch, all read from the server, bound to `127.0.0.1`, token-gated writes |
 | 🖼️ | **Media built in** | Local STT voice sessions with fuzzy wake phrases, TTS announcements, BYOK image generation, Telegram photo send |
 | 🖥️ | **Desktop HUD shell** | Electron frameless shell: transparency slider, always-on-top, tray — Linux packaging verified (Win/macOS not built yet, honestly) |
 | 👥 | **Multi-profile isolation** | `AIDOG_PROFILE` selects fully isolated profiles (settings / secrets / state / body) — 63/63 isolation gate + 18-leg real-machine E2E |
@@ -191,8 +191,8 @@ Every release is cut only after these run green on a clean tree:
 
 | Suite | Result |
 |---|---|
-| `mycore` core suite | **1773/1773** |
-| Console smoke (live HTTP) | **334/334** |
+| `mycore` core suite | **2045/2045** |
+| Console smoke (live HTTP) | **432/432** |
 | Skill router | **30/30** |
 | Memory persistence | **58/58** |
 | Setup wizard | **99/99** |
@@ -200,13 +200,13 @@ Every release is cut only after these run green on a clean tree:
 | Desktop shell (`node --test`) | **15/15** |
 | `aidog doctor` | **0 FAIL · 0 WARN** (honest environment WARN only when egress is fully gone) |
 | Publish gate (deny-by-default manifest) | **READY** |
-| Real-machine E2E | profiles **18/18** · channels **12/12** · domestic channels **46/46** · pipeline **39/39** · web3 read-only **33/33** · web3 approval **61/61** · frontend coverage **62/62** · frontend UI **33/33** · activation **81/81** · activation UI **50/50** · settings matrix **63/63** + UI **20/20** · missions **54/54** · mission-orch **63/63** · mission-pause **73/73** · skills catalog **176/176** · skills remote **58/58** · gateway UI **25/25** |
+| Real-machine E2E | profiles **18/18** · channels **12/12** · domestic channels **46/46** · pipeline **39/39** · web3 read-only **33/33** · web3 approval **61/61** · frontend coverage **62/62** · frontend UI **45/45** · activation **81/81** · activation UI **50/50** · settings matrix **63/63** + UI **20/20** · missions **54/54** · mission-orch **63/63** · mission-pause **73/73** · skills catalog **176/176** · skills remote **58/58** · gateway UI **25/25** · ckx round-trip **28/28** · console UI probes **21/21** + **22/22** |
 
-Catalog scope: **26 registered tools** · **9 exchange venues** · **18
+Catalog scope: **27 registered tools** · **9 exchange venues** · **21
 real-machine E2E legs** — all green.
 
-Locale packs: `en` (default) + `zh`, **979 keys** each, parity lint in CI;
-the marketing site ships its own **283-key** bilingual pack.
+Locale packs: `en` (default) + `zh`, **1189 keys** each, parity lint in CI;
+the marketing site ships its own **284-key** bilingual pack.
 
 ## Documentation
 

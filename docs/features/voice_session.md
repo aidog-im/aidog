@@ -103,7 +103,7 @@ illegal writes answer 400 with the exact key and change nothing on disk):
 | key | type | default | meaning |
 |---|---|---|---|
 | `stt_model` | `tiny\|base\|small` | `base` | console STT model (precision vs. first-load latency) |
-| `wake_phrases` | list, ≤ 3 items, each ≤ 64 chars, single-line | `["hey aidog", "你好艾多"]` | phrases that open the command window |
+| `wake_phrases` | list, ≤ 3 items, each ≤ 64 chars, single-line | `["hey aidog"]` (English by default; add your own — e.g. a Chinese wake phrase — in Settings > Media) | phrases that open the command window |
 
 No credential slot exists for this feature — local STT needs none
 (zero-key by construction). The console MEDIA card edits both keys.

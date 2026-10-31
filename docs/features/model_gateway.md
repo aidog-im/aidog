@@ -101,7 +101,7 @@ untouched — two sources, each honest about its own availability.
 |---|---|---|
 | `GET /api/mycore/endpoints` | none (loopback) | `{source: env\|endpoints\|upstreams\|none\|invalid, endpoints:[{url, model, primary, keys:[{slot, set}]}], rotation, max_rpm, max_tpm, note, key_presence:{10 slots: bool}}` — slot NAMES + presence booleans only, values never |
 | `POST /api/mycore/upstreams/test` | Bearer | now accepts `{url, slot}` — per-key probe of a model slot (`slot` alone → 400; non-model slot → 400; unset slot → 400). Capability is no more than save-then-test; the value resolves for ONE header in this frame (X5 rule unchanged) |
-| `POST /api/secrets` | Bearer | additionally accepts `MODEL_UP_K[1-8]` (group `model`, value rule `^\S{8,}$`). **`GET /api/secrets` catalog unchanged (34 rows)** — the pool slots are managed from the Model panel, whose presence comes from `key_presence` |
+| `POST /api/secrets` | Bearer | additionally accepts `MODEL_UP_K[1-8]` (group `model`, value rule `^\S{8,}$`). **`GET /api/secrets` catalog unchanged (38 rows)** — the pool slots are managed from the Model panel, whose presence comes from `key_presence` |
 | `POST /api/settings` | Bearer | `mycore.endpoints/rotation/max_rpm/max_tpm` + `usage.model_pricing` validated (`_validate_model_pricing`); bool rejected for the caps (`True` is not a cap) |
 
 ### Settings → Model card
@@ -126,9 +126,9 @@ untouched — two sources, each honest about its own availability.
 
 ## 5. Gates (0.5.55)
 
-`python3 -m mycore.tests.run` **1773/1773** (the `gw:` lane: grammar,
+`python3 -m mycore.tests.run` **2045/2045** (the `gw:` lane: grammar,
 rotation, rate windows, meter rows/aggregation/cost, config precedence,
-ChatClient gating) · `tests/web_console_p3.py` **334/334** (validation
+ChatClient gating) · `tests/web_console_p3.py` **432/432** (validation
 matrix, mutex, secrets group, both new routes) · `tmp/e2e_gateway_ui.js`
 **25/25** (manager round trips, knob persistence, pool write + DOM grep,
 remove, self block, zh repaint, zero pageerror).

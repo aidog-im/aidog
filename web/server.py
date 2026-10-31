@@ -17,6 +17,32 @@ Routes:
   GET  /api/config              -> sanitized config view (no credential values)
   GET  /api/settings            -> console settings document (no secrets)
   POST /api/settings            -> Bearer WEB_TOKEN; validated merge; idempotent
+  GET  /api/backup/export       -> Bearer WEB_TOKEN (REQUIRED — there is no
+                                   anonymous read here); ?include=
+                                   secrets,settings,memory (default = all
+                                   three) -> {ok, schema, schemaVersion,
+                                   created, payload}. THE ONLY route in this
+                                   server that returns a credential slot
+                                   VALUE (CKX-P1 / D4): WEB_TOKEN is never
+                                   included, only allow-listed slots ride,
+                                   and neither the payload nor this response
+                                   is ever written to a log line
+  POST /api/backup/restore      -> Bearer WEB_TOKEN; {schema, schemaVersion,
+                                   payload, apply:{secrets,settings,memory}}
+                                   -> honest per-section result (200 all
+                                   applied · 503 partial, with per-slot /
+                                   per-file reasons · 400 envelope shape or
+                                   schema/version mismatch — nothing written)
+  GET  /api/backup/agent        -> CKX-P2 agent-backup status: node runtime,
+                                   passphrase slot PRESENCE, local call meter,
+                                   schedule row, MCP switch (names/numbers only
+                                   -- never a slot value, never a file path)
+  POST /api/backup/agent        -> Bearer; {action: schedule | unschedule |
+                                   quota_reset | mcp_on | mcp_off[, spec]}.
+                                   schedule/unschedule run through the SAME
+                                   scheduler grammar as /api/cron; mcp_on/off
+                                   rewrite only the `ckx` entry of mycore.mcp
+                                   and leave every other server untouched
   GET  /api/usage               -> model-channel usage/cost aggregation (cached)
   GET  /api/events              -> sanitized recent event stream
   GET  /api/evolution           -> evolution loop status (schedule/state/log tail)
@@ -116,10 +142,28 @@ Routes:
                                    own 10/60s sliding window -> 429
   GET  /api/exchange/plans      -> stored W2 order plans (read, no auth —
                                    same contract as every GET; fail-soft 503)
+  GET  /api/quotes              -> Extensions car (Phase B): keyless READ-ONLY
+                                   quotes, market=cn|us + symbol ->
+                                   {ok, market, symbol, name, price, change,
+                                   pct, currency, ts, source}; cn = Sina
+                                   (GBK wire + mandatory Referer), us = Yahoo
+                                   chart JSON. Honest failures: 400 bad
+                                   market/symbol, 404 unknown symbol, 502/504
+                                   upstream trouble (never a fabricated
+                                   number), own 10/60s window -> 429;
+                                   AIDOG_QUOTES_URL = offline mock seam
   POST /api/exchange/plans/<id>  -> Bearer WEB_TOKEN; {action: approve|reject|
                                    cancel} -> {plan} | 400 invalid action |
                                    404 unknown plan id (the ONLY approval
                                    surface: the model has no such route)
+  POST /api/extensions/intent    -> Bearer WEB_TOKEN; {text} -> car 4 call
+                                   site 1: which Extensions tab owns the
+                                   request (Jev choice over finance/home/
+                                   vehicle). 200 {available:true, tab,
+                                   confidence, source} | 200 {available:false,
+                                   reason: WORD} (off / no_key / unreachable /
+                                   upstream — an honest "no fast path", never
+                                   a guessed tab) | 400 bad text | 401
   GET  /api/chat/history        -> current console session (read, loopback)
   GET  /api/voice               -> voice engine capability (edge-tts presence)
   POST /api/say                 -> synthesize speech -> audio/mpeg (cached,
@@ -258,7 +302,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -274,9 +318,11 @@ if str(REPO) in sys.path:
 sys.path.insert(0, str(REPO))
 from lib import i18n  # noqa: E402
 from lib import profile_paths  # noqa: E402  (car F §13.1: per-profile path seams)
-from mycore import checkpoint, cli, evolution, hooks, mission, mcp, modeltier, sniff, terminal  # noqa: E402  (X10 snapshots + config + MCP/ hooks/ terminal/ mission grammar/ sniff grammar)
+from mycore import bridge, checkpoint, cli, decision, evolution, hooks, leash, mission, mcp, modeltier, sniff, terminal  # noqa: E402  (X10 snapshots + config + MCP/ hooks/ terminal/ mission grammar/ sniff grammar/ decision client/ bridge grammar/ car-7 leash grammar)
 from mycore import meter as model_meter  # noqa: E402  (v0.5.55 self-metering)
-from mycore.assembly import build_system_stack, resolve_context_dirs  # noqa: E402
+from mycore.assembly import (build_system_stack,  # noqa: E402
+                              resolve_context_dirs, resolve_user_rules,
+                              DEFAULT_OBEDIENCE, validate_obedience)
 from mycore.compact import measure  # noqa: E402  (X14 context usage: the loop's own payload metric)
 from mycore.loop import run_turn  # noqa: E402
 from mycore.model import ChatClient  # noqa: E402
@@ -414,7 +460,15 @@ DEFAULT_SETTINGS: dict = {
                # console renders it without an absence check). Fresh lists —
                # the module constant's own lists are never shared here.
                "sniff": {**sniff.DEFAULT_SETTINGS,
-                         "sources": [], "rules": []}},
+                         "sources": [], "rules": []},
+               # Car 4 (D6) decision endpoint row: OFF by default = every
+               # Jev call site keeps today's behavior byte-for-byte. The KEY
+               # is deliberately NOT a settings field — it lives in the
+               # DECISION_API_KEY slot (presence-only everywhere), so a
+               # settings write can never aim another slot at an external
+               # service. Empty url/model = the vendor defaults.
+               "decision": {"enabled": False, "url": "", "model": "",
+                            "router_model": ""}},
     "usage": {"metrics_url": "http://127.0.0.1:3456/metrics",
               "pricing_config": "", "log_dir": "", "model_pricing": {}},
     # Inbound/outbound channel adapters (car C): non-secret config only —
@@ -439,7 +493,7 @@ DEFAULT_SETTINGS: dict = {
     # source-language lint (locale packs are the only CJK-bearing files).
     "media": {"image_base_url": "", "image_model": "", "tts_base_url": "", "tts_model": "",
               "stt_model": "base", "tts_engine": "edge",
-              "wake_phrases": ["hey aidog", "\u4f60\u597d\u827e\u591a"]},
+              "wake_phrases": ["hey aidog"]},
     # W2 Web3 auto-approval caps (owner decree 2026-10-25): FAIL-CLOSED
     # zeros — 0 means nothing approves itself, so every plan waits for the
     # owner in the console. Non-secret numbers; mycore.exchanges.thresholds
@@ -454,18 +508,40 @@ DEFAULT_SETTINGS: dict = {
     # SETTINGS — the constant stays the source of truth; the partition is
     # always present so the console renders the tier without an absence check.
     "mission": dict(mission.DEFAULT_SETTINGS),
+    # Bridge partition (car 6, line 5 / D9): a copy of mycore.bridge.
+    # DEFAULT_SETTINGS — the constant is the source of truth and the block is
+    # always present so the console renders the card without an absence check.
+    # Fail-closed by construction: enabled=false and an empty allow-list
+    # route nothing.
+    "bridge": dict(bridge.DEFAULT_SETTINGS),
     # Event hooks partition (car 4a): {} = no hook configured. Present by
     # default for the same reason — the editor renders an honest empty set.
     "hooks": {},
+    # Guardrails partition (car 7, D11 restraint): a copy of mycore.leash.
+    # DEFAULT_GUARDRAILS — the constant stays the source of truth and the
+    # block is always present so the console renders the card without an
+    # absence check. Both caps 0 = OFF (opt-in): today's behavior unchanged.
+    "guardrails": dict(leash.DEFAULT_GUARDRAILS),
+    # Obedience partition (car 7, D11 obedience): a copy of mycore.assembly.
+    # DEFAULT_OBEDIENCE — empty lists = nothing injected into the stack
+    # (the pre-car-7 system stack stays byte-for-byte).
+    "obedience": dict(DEFAULT_OBEDIENCE),
 }
 ALLOWED_TOP = ("language", "refresh_sec", "sound", "voice_volume",
                "alert_preview", "currency", "fx_rate", "mycore", "usage",
-               "evolution", "channels", "hooks", "media", "web3", "mission")
+               "evolution", "channels", "hooks", "media", "web3", "mission",
+               "bridge", "guardrails", "obedience")
 USAGE_KEYS = ("metrics_url", "pricing_config", "log_dir", "model_pricing")
 MYCORE_KEYS = ("base_url", "model", "context_dirs", "upstreams", "mcp", "shell",
                "tools_off", "models", "budget", "session_prune_days",
                "reasoning_effort", "endpoints", "rotation", "max_rpm",
-               "max_tpm", "sniff")
+               "max_tpm", "sniff", "decision")
+# Car 4 (D6): fields the mycore.decision block accepts — the key slot is NOT
+# one of them (see the DEFAULT_SETTINGS note).
+DECISION_KEYS = ("enabled", "url", "model", "router_model")
+# The intent route only ever forwards a short excerpt (mycore.decision slices
+# to 1200 chars before the wire); this is the request-side cap.
+INTENT_TEXT_MAX = 2000
 # v0.5.55: structured endpoint slots the console form may reference — the
 # SAME allowlist mycore.modeltier enforces at parse time (single source of
 # truth is the regex; this tuple only documents it for the route layer).
@@ -538,7 +614,7 @@ WAKE_PHRASE_MAX_LEN = 64
 SECRET_GROUPS: dict = {
     "core": ("MODEL_API_KEY", "MYCORE_TG_TOKEN", "AIDOG_TG_ALLOWED_USERS",
              "AIDOG_GH_PAT", "AIDOG_COMMUNITY_PAT", "MYCORE_WD_CHAT"),
-    "gateway": ("OPENAI_API_TOKEN",),
+    "gateway": ("OPENAI_API_TOKEN", "DECISION_API_KEY"),
     "web3": ("OKX_API_KEY", "OKX_API_SECRET", "OKX_API_PASSPHRASE",
              "KRAKEN_API_KEY", "KRAKEN_API_SECRET",
              "BINANCE_API_KEY", "BINANCE_API_SECRET"),
@@ -551,11 +627,41 @@ SECRET_GROUPS: dict = {
                  "CHANNEL_WHATSAPP_TOKEN", "CHANNEL_SIGNAL_TOKEN"),
     "media": ("TTS_API_KEY", "IMAGE_API_KEY"),
     "connectors": ("LINEAR_API_KEY", "NOTION_API_KEY"),
+    # Car 6 (D10): the Connections card — provider tokens with a READ-ONLY
+    # default posture. Named after the upstream's own env-var names so an
+    # operator can export the same value for wrangler / gh without invention.
+    "connections": ("CLOUDFLARE_API_TOKEN", "GITHUB_TOKEN"),
+    # Car 8 (CKX-P2): the agent-backup passphrase. Presence-only like every
+    # other row here; its VALUE never enters a response, a log line, argv or
+    # the model context — mycore.ckxbackup hands it to ONE child environment.
+    "backup": ("AIDOG_CKX_PASSWORD",),
 }
 SECRET_SLOTS: dict = {name: group for group, names in SECRET_GROUPS.items()
-                      for name in names}          # 33 editable slots
+                      for name in names}          # 37 editable slots
 SECRET_PRESENCE_ONLY = ("WEB_TOKEN",)             # listed, never writable
 SECRET_VALUE_MAX = 4096                           # chars, one line
+
+# ------------------------------------- backup / restore plane (CKX-P1 / D4) ---
+# The console's OWN encrypted backup surface (car 3). An export is the ONE
+# place in this server where a credential slot VALUE leaves the process, so
+# every rule below exists to keep that fact narrow, explicit and un-loggable:
+# the value goes straight from the reader into the response document and
+# never into a log line, an exception or a status string.
+BACKUP_SCHEMA = "aidog.backup.v1"         # envelope marker (the CKX meta id)
+BACKUP_SCHEMA_VERSION = "1"
+BACKUP_INCLUDES = ("secrets", "settings", "memory")
+# Fixed memory slot names — a restore can NEVER address an arbitrary path.
+BACKUP_MEMORY_FILES = ("MEMORY_curated.md", "USER_curated.md",
+                       "EVOLUTION_learned.md")
+BACKUP_MEMORY_MAX_BYTES = 512 * 1024      # per memory slot, in BOTH directions
+BACKUP_MAX_BODY = 4 * 1024 * 1024         # restore body budget: a whole
+                                           # payload rides in on one request
+# Exportable slots = the 37 catalog slots + the model-key pool slots that
+# are NOT catalogued (writable by POST /api/secrets but not listed): the two
+# overlap names are dropped, so the union is 45 today. WEB_TOKEN is
+# presence-only and therefore can never appear in a backup.
+BACKUP_SECRET_SLOTS = tuple(SECRET_SLOTS) + tuple(
+    name for name in MODEL_KEY_SLOTS if name not in SECRET_SLOTS)
 
 # ---------------------------------------- activation checklist formats (§1.1) ---
 # Format rules reported by GET /api/setup. Each pattern MIRRORS one entry of
@@ -701,6 +807,189 @@ def write_env_slot(name: str, value: str) -> bool:
     return True
 
 
+# ------------------------------------------ backup / restore (CKX-P1) --------
+
+class BackupReadError(RuntimeError):
+    """A backup section could not be READ. Carries an HTTP status and a reason
+    WORD only — never a path, never a slot value."""
+
+    def __init__(self, status: int, reason: str) -> None:
+        super().__init__(reason)
+        self.status = status
+        self.reason = reason
+
+
+def backup_memory_paths() -> dict:
+    """The three backupable memory slots, resolved through the ACTIVE profile
+    (default profile = the pre-car-F overlay/memory paths)."""
+    slots = profile_paths.memory_slots()
+    return {BACKUP_MEMORY_FILES[0]: slots[0],
+            BACKUP_MEMORY_FILES[1]: slots[1],
+            BACKUP_MEMORY_FILES[2]: profile_paths.learned_path()}
+
+
+def backup_payload(include) -> dict:
+    """Build one export payload for `include` (a subset of BACKUP_INCLUDES).
+
+    Sections absent from `include` are absent from the result. Only existing,
+    non-empty memory slots ride; a section that cannot be read honestly raises
+    BackupReadError instead of shipping a half-truth. This function writes
+    NOTHING to a log — the values it reads stay inside the caller's response."""
+    payload: dict = {}
+    if "secrets" in include:
+        secrets: dict = {}
+        for name in BACKUP_SECRET_SLOTS:
+            value = read_env_slot(name)
+            if value:
+                secrets[name] = value
+        payload["secrets"] = secrets
+    if "settings" in include:
+        payload["settings"] = load_settings()
+    if "memory" in include:
+        mem: dict = {}
+        for name, path in backup_memory_paths().items():
+            try:
+                raw = path.read_bytes()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                raise BackupReadError(503, "memory slot unreadable") from None
+            if not raw:
+                continue
+            if len(raw) > BACKUP_MEMORY_MAX_BYTES:
+                raise BackupReadError(503, "memory slot over the backup cap")
+            try:
+                mem[name] = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                raise BackupReadError(503, "memory slot is not utf-8") from None
+        payload["memory"] = mem
+    return payload
+
+
+def _backup_secret_reason(name: str, value: str) -> str:
+    """The SAME value rules POST /api/secrets enforces (length, one line, no
+    edge whitespace, per-slot shape) as a reason WORD — the value itself is
+    never echoed into the reason."""
+    if len(value) > SECRET_VALUE_MAX:
+        return f"value too long (max {SECRET_VALUE_MAX} chars)"
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        return "value must be a single line (no control characters)"
+    if value != value.strip():
+        return "value must not start or end with whitespace"
+    fmt_pat = SLOT_WRITE_PATTERNS.get(name)
+    if fmt_pat is None and MODEL_KEY_SLOT_RE.match(name):
+        fmt_pat = SLOT_PATTERNS["MODEL_API_KEY"]
+    if value and fmt_pat and not re.match(fmt_pat, value):
+        return "value does not match the slot format"
+    return ""
+
+
+def backup_apply_secrets(doc: dict) -> dict:
+    """Apply one secrets section slot BY slot: a refusal never stops the other
+    slots (the honest partial report the restore contract promises). Log lines
+    carry names and counts only — never a value."""
+    names: list[str] = []
+    failed: list[dict] = []
+    for name, value in doc.items():
+        if not isinstance(name, str) or not isinstance(value, str):
+            failed.append({"name": str(name)[:64], "reason": "invalid entry"})
+            continue
+        group = SECRET_SLOTS.get(name)
+        if group is None and MODEL_KEY_SLOT_RE.match(name):
+            group = "model"            # the 8 pool slots ride a backup too
+        if group is None:
+            failed.append({"name": name[:64],
+                           "reason": ("slot is not writable"
+                                      if name in SECRET_PRESENCE_ONLY
+                                      else "unknown slot")})
+            continue
+        reason = _backup_secret_reason(name, value)
+        if reason:
+            failed.append({"name": name, "reason": reason})
+            continue
+        try:
+            write_env_slot(name, value)
+        except OSError as e:  # noqa: BLE001 — type name only, never a value
+            failed.append({"name": name,
+                           "reason": f"persist failed: {type(e).__name__}"})
+            continue
+        names.append(name)
+    sys.stderr.write(f"backup restore secrets set={len(names)} "
+                     f"failed={len(failed)}\n")
+    return {"set": len(names), "names": names, "failed": failed}
+
+
+def backup_apply_settings(doc: dict) -> dict:
+    """Apply one settings section through the EXISTING all-or-nothing
+    validator (no second settings grammar exists), merged onto the RAW stored
+    document exactly like POST /api/settings."""
+    clean, errors = validate_settings_patch(doc)
+    if errors:
+        return {"applied": False, "changed": [], "errors": errors}
+    try:
+        stored = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        stored = {}
+    if not isinstance(stored, dict):
+        stored = {}
+    merged = deep_merge(stored, clean)
+    persisted = merged != stored
+    if persisted:
+        try:
+            atomic_write_json(SETTINGS_FILE, merged)
+        except OSError as e:  # noqa: BLE001 — type name only
+            return {"applied": False, "changed": [],
+                    "errors": [f"persist failed: {type(e).__name__}"]}
+        sys.stderr.write(f"backup restore settings "
+                         f"keys={','.join(sorted(clean))}\n")
+        mc_patch = clean.get("mycore")
+        if isinstance(mc_patch, dict) and "session_prune_days" in mc_patch:
+            session_prune_view(force=True)
+        if {"currency", "fx_rate", "usage"} & set(clean):
+            with _usage_lock:
+                _usage_cache["ts"], _usage_cache["data"] = 0.0, None
+    return {"applied": True, "changed": sorted(clean), "persisted": persisted}
+
+
+def backup_apply_memory(doc: dict) -> dict:
+    """Write the three fixed memory slots (never an arbitrary path), each
+    capped and written atomically; a refusal is reported per file and the
+    remaining files still land."""
+    paths = backup_memory_paths()
+    files: list[str] = []
+    failed: list[dict] = []
+    total = 0
+    for name, text in doc.items():
+        path = paths.get(name) if isinstance(name, str) else None
+        if path is None:
+            failed.append({"name": str(name)[:64],
+                           "reason": "unknown memory slot"})
+            continue
+        if not isinstance(text, str):
+            failed.append({"name": name, "reason": "content must be a string"})
+            continue
+        data = text.encode("utf-8")
+        if len(data) > BACKUP_MEMORY_MAX_BYTES:
+            failed.append({"name": name,
+                           "reason": f"over the {BACKUP_MEMORY_MAX_BYTES} byte cap"})
+            continue
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+            tmp.write_bytes(data)
+            os.chmod(tmp, 0o644)
+            os.replace(tmp, path)
+        except OSError as e:  # noqa: BLE001 — type name only
+            failed.append({"name": name,
+                           "reason": f"persist failed: {type(e).__name__}"})
+            continue
+        files.append(name)
+        total += len(data)
+    sys.stderr.write(f"backup restore memory files={len(files)} "
+                     f"bytes={total} failed={len(failed)}\n")
+    return {"files": files, "bytes": total, "failed": failed}
+
+
 # --------------------------------------------------- mycore runtime probes ---
 
 def _read_pid(path: Path) -> int | None:
@@ -766,7 +1055,8 @@ def mycore_watchdog_facts() -> dict:
     """Watchdog observability: process liveness, state-file freshness
     (< MYCORE_WD_FRESH_SEC), per-target verdicts, last sanitized log line."""
     facts: dict = {"process": proc_alive(MYCORE_WD_PROC), "state": "unknown",
-                   "targets": {}, "age_sec": None, "last": None, "detail": ""}
+                   "targets": {}, "age_sec": None, "last": None, "detail": "",
+                   "escalation": {"level": 0, "target": "", "reason": ""}}
     try:
         facts["age_sec"] = round(time.time() - MYCORE_WD_STATE.stat().st_mtime)
         doc = json.loads(MYCORE_WD_STATE.read_text())
@@ -776,6 +1066,22 @@ def mycore_watchdog_facts() -> dict:
                 facts["targets"][str(name)[:32]] = (
                     str(entry.get("state") or "unknown")[:16]
                     if isinstance(entry, dict) else "unknown")
+        # Car 7 (D11): the escalation verdict the tail row / status panel
+        # renders — highest live level across targets (0 = clear).
+        esc = {"level": 0, "target": "", "reason": ""}
+        if isinstance(tg, dict):
+            for name, entry in tg.items():
+                if isinstance(entry, dict):
+                    lvl = entry.get("esc_level")
+                    if isinstance(lvl, int) and not isinstance(lvl, bool) \
+                            and lvl > esc["level"]:
+                        esc = {"level": lvl, "target": str(name)[:32],
+                               "reason": ""}
+        recs = doc.get("escalations") if isinstance(doc, dict) else None
+        if isinstance(recs, list) and recs and isinstance(recs[-1], dict) \
+                and esc["level"] > 0:
+            esc["reason"] = str(recs[-1].get("reason") or "")[:120]
+        facts["escalation"] = esc
     except (OSError, ValueError, TypeError):
         pass
     lines = [ln for ln in _tail_text(MYCORE_WD_LOG, 16384).splitlines() if ln.strip()]
@@ -1176,6 +1482,50 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                         continue
                     clean_mc[key] = val
                     continue
+                if key == "decision":
+                    # Car 4 (D6): the decision endpoint row. Grammar lives
+                    # here (all-or-nothing like every other mycore key) —
+                    # `enabled` must be a boolean, url/model/router_model
+                    # are single-line bounded strings with the same shape
+                    # rules the router client enforces. NO key field exists,
+                    # by design: the credential is the DECISION_API_KEY slot.
+                    if not isinstance(val, dict):
+                        errors.append("mycore.decision must be an object")
+                        continue
+                    unknown = [k for k in val if k not in DECISION_KEYS]
+                    if unknown:
+                        errors.append("unknown mycore.decision key: "
+                                      f"{str(unknown[0])[:40]}")
+                        continue
+                    block: dict = {}
+                    bad = ""
+                    if "enabled" in val:
+                        if not isinstance(val["enabled"], bool):
+                            bad = "enabled must be a boolean"
+                        else:
+                            block["enabled"] = val["enabled"]
+                    for field in ("url", "model", "router_model"):
+                        if bad or field not in val:
+                            continue
+                        value = val[field]
+                        if value is None:
+                            value = ""
+                        if (not isinstance(value, str) or len(value) > 200
+                                or "\n" in value or "\r" in value):
+                            bad = (f"{field} must be a single line of at most "
+                                   "200 chars")
+                        elif field == "url" and value and not re.match(
+                                r"^https?://[^/\s?#]+", value):
+                            bad = "url must be an http(s) base URL"
+                        elif field != "url" and value and not MYCORE_MODEL_RE.match(value):
+                            bad = f"{field} must be a model id"
+                        else:
+                            block[field] = value
+                    if bad:
+                        errors.append(f"mycore.decision: {bad}")
+                        continue
+                    clean_mc[key] = block
+                    continue
                 if key == "endpoints":
                     # v0.5.55 structured chain: grammar lives in
                     # mycore.modeltier.parse_endpoints (the validator reports
@@ -1441,6 +1791,13 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
         errors.extend(mis_errors)
         if clean_mis:
             clean["mission"] = clean_mis
+    if "bridge" in patch:
+        # User-owned bridge (car 6, D9): the grammar lives in mycore.bridge —
+        # one source of truth for the console write path and the runtime read.
+        clean_bridge, bridge_errors = bridge.validate(patch["bridge"])
+        errors.extend(bridge_errors)
+        if clean_bridge:
+            clean["bridge"] = clean_bridge
     if "hooks" in patch:
         # Event hooks partition (car 4a): schema + argv[0] existence live in
         # mycore.hooks — one source of truth for write validation and load.
@@ -1448,6 +1805,22 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
         errors.extend(hook_errors)
         if clean_hooks:
             clean["hooks"] = clean_hooks
+    if "guardrails" in patch:
+        # Guardrails partition (car 7, D11 restraint): the grammar lives in
+        # mycore.leash — one source of truth for the console write path and
+        # the runtime gate. 0 = off; the offending value is never echoed.
+        clean_guard, guard_errors = leash.validate_guardrails(patch["guardrails"])
+        errors.extend(guard_errors)
+        if clean_guard:
+            clean["guardrails"] = clean_guard
+    if "obedience" in patch:
+        # Obedience partition (car 7, D11 obedience): grammar + priority wording
+        # live in mycore.assembly — one source of truth for the write path
+        # and the stack builder. Entry VALUES are never echoed.
+        clean_obs, obs_errors = validate_obedience(patch["obedience"])
+        errors.extend(obs_errors)
+        if clean_obs:
+            clean["obedience"] = clean_obs
     return clean, errors
 
 
@@ -1660,6 +2033,98 @@ def collect_status() -> dict:
             "user_limit": 1375,
         },
         "config": cfg_bits,
+        # Car 7 (D11 tail surface): one-glance state, merged into the EXISTING
+        # Overview (no second switchboard). `state` is derived, never
+        # guessed: paused > budget-blocked > a turn in flight > idle.
+        "tail": tail_state(),
+    }
+
+
+# ------------------------------------------------- car 7: control / tail ---
+# Console-side in-process turn counter (this process only — the TG leg's
+# turns are reported from its own log, honestly labeled).
+_active_lock = threading.Lock()
+_active_turns = [0]
+
+
+def _bump_active_turn(delta: int) -> None:
+    with _active_lock:
+        _active_turns[0] = max(0, _active_turns[0] + delta)
+
+
+def _service_turn_working() -> bool:
+    """True when the mycore service log shows a pipeline TURN_START with no
+    later TURN_END/TURN_CRASH — a TG/voice/channel turn is in flight.
+    Absent/unparseable log = False (honest: unknown reads as not-working,
+    the panel state stays the authority for process health)."""
+    lines = _tail_text(MYCORE_SERVICE_LOG, 32768).splitlines()
+    last_start = ""
+    last_end = ""
+    for line in lines:
+        m = SERVICE_LINE_RE.match(line)
+        if not m:
+            continue
+        code = m.group(2).upper()
+        if code == "TURN_START":
+            last_start = m.group(1)
+        elif code in ("TURN_END", "TURN_CRASH"):
+            last_end = m.group(1)
+    return bool(last_start) and last_start > last_end
+
+
+def tail_state() -> dict:
+    """The tail row: state/reason/since + the honest working flags."""
+    st = leash.read_state()
+    with _active_lock:
+        console_turns = _active_turns[0]
+    status = {"state": "idle", "reason": "", "since": 0.0,
+              "console_turns": console_turns,
+              "service_turn": _service_turn_working()}
+    if st.get("paused"):
+        status.update(state="paused", reason=str(st.get("reason") or ""),
+                      since=float(st.get("since") or 0.0))
+        return status
+    # budget block (only consulted when a cap is set — free otherwise)
+    code, _ctx = _budget_code()
+    if code:
+        status.update(state="blocked", reason=code)
+        return status
+    if console_turns > 0 or status["service_turn"]:
+        status["state"] = "working"
+    return status
+
+
+def _budget_code() -> tuple[str, dict]:
+    """(code, ctx) for TODAY's budget gate without re-reading the pause flag:
+    "" = allowed, else budget_usd | budget_tokens."""
+    status = leash.budget_status(load_settings())
+    limits = status["limits"]
+    if limits["usd_day"] > 0 and status["usd"]["state"] == "over":
+        return "budget_usd", {"used": status["usd"].get("used"),
+                               "limit": status["usd"].get("limit")}
+    if limits["token_day"] > 0 and status["tokens"]["state"] == "over":
+        return "budget_tokens", {"used": status["tokens"].get("used"),
+                                  "limit": status["tokens"].get("limit")}
+    return "", {}
+
+
+def collect_control() -> dict:
+    """GET /api/control — the leash read face: pause state + budget status
+    + what a NEW turn would answer right now. No secrets (numbers only)."""
+    st = leash.read_state()
+    settings = load_settings()
+    budget = leash.budget_status(settings)
+    _ok, code, ctx = leash.gate(settings)
+    return {
+        "paused": bool(st.get("paused")),
+        "reason": str(st.get("reason") or ""),
+        "since": float(st.get("since") or 0.0),
+        "stop_seq": int(st.get("stop_seq") or 0),
+        "budget": budget,
+        "gate": {"allowed": not code, "code": code,
+                 "detail": leash.block_detail(code, ctx) if code else ""},
+        "tail_state": tail_state().get("state", "idle"),
+        "day": "utc",
     }
 
 
@@ -1922,6 +2387,10 @@ def collect_usage_self() -> dict:
         "in_tokens": usage.get("in_tokens", 0),
         "out_tokens": usage.get("out_tokens", 0),
         "cached_tokens": usage.get("cached", 0),
+        # car 5-D7 item 3: the measured prompt-cache hit rate (provider-reported
+        # tokens only; null when nothing reported an input count). Observation,
+        # not a goal — this gateway still sends no cache directive of its own.
+        "cached_ratio": usage.get("cached_ratio"),
         "no_usage": usage.get("no_usage", 0),
         "by_endpoint": usage.get("by_endpoint") or [],
         "by_model": usage.get("by_model") or [],
@@ -2002,6 +2471,42 @@ def _service_events(path: Path, src: str = "service", cap: int = 8) -> list[dict
                           src, f"{code} {body}".strip(), ts,
                           code=f"service.{code.lower()}"))
     return out[-cap:]
+
+
+def _wd_escalation_events() -> list[dict]:
+    """Car 7 (D11 watch escalation): the journal the watchdog dual-writes
+    (state file `escalations`) rendered as console events — the "which
+    level / which attempt / why" chain with its REAL timestamp. Absent or
+    unreadable journal = no events (honest absence, never a fabrication)."""
+    try:
+        doc = json.loads(MYCORE_WD_STATE.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return []
+    recs = doc.get("escalations") if isinstance(doc, dict) else None
+    if not isinstance(recs, list):
+        return []
+    out: list[dict] = []
+    for rec in recs[-8:]:
+        if not isinstance(rec, dict):
+            continue
+        try:
+            ts = float(rec.get("ts") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        level = rec.get("level")
+        if not isinstance(level, int) or isinstance(level, bool):
+            continue
+        target = str(rec.get("target") or "?")[:32]
+        attempt = rec.get("attempt")
+        attempt = attempt if isinstance(attempt, int) \
+            and not isinstance(attempt, bool) else 0
+        reason = sanitize_event_text(str(rec.get("reason") or ""))
+        # level -> event severity: 0 = clear/recovered, 1 = down, 2+ = escalate
+        ev_level = "info" if level <= 0 else ("warn" if level == 1 else "urgent")
+        out.append(_event(ev_level, "watchdog",
+                          f"L{level} {target} attempt {attempt}: {reason}",
+                          ts, code="wd.escalation"))
+    return out
 
 
 def _mycore_watchdog_events() -> list[dict]:
@@ -2525,6 +3030,8 @@ SLOT_VERIFY_RULES: dict[str, tuple[str, str]] = {
     "AIDOG_TG_ALLOWED_USERS": (r"^\d+(,\d+)*$",
                                 "numeric ids, comma-separated"),
     "AIDOG_GH_PAT": (r"^\S{20,}$", "at least 20 chars, no spaces"),
+    "CLOUDFLARE_API_TOKEN": (r"^\S{16,}$", "at least 16 chars, no spaces"),
+    "GITHUB_TOKEN": (r"^\S{20,}$", "at least 20 chars, no spaces"),
     "AIDOG_COMMUNITY_PAT": (r"^\S{20,}$", "at least 20 chars, no spaces"),
     "MYCORE_WD_CHAT": (r"^-?\d{5,20}$", "a numeric Telegram chat id"),
     "CHANNEL_DINGTALK_WEBHOOK": (r"^https://\S+$", "an https:// webhook URL"),
@@ -2651,12 +3158,102 @@ def _probe_model_key(value: str) -> dict:
             "detail": f"the endpoint answered HTTP {status}"}
 
 
+def _probe_cloudflare(value: str) -> dict:
+    """Live: GET /zones (READ-ONLY) — the smallest call that proves the token
+    authenticates and can see the account. Zone names are public DNS data, so
+    only the COUNT is reported. The token never appears in any outcome. The
+    AIDOG_CF_API_URL seam keeps the offline suite off the network."""
+    base = (os.environ.get("AIDOG_CF_API_URL") or
+            "https://api.cloudflare.com/client/v4").rstrip("/")
+    req = urllib.request.Request(
+        f"{base}/zones?per_page=1",
+        headers={"User-Agent": "aidog-console",
+                 "Authorization": f"Bearer {value}"})
+    try:
+        with urllib.request.urlopen(req, timeout=VERIFY_TIMEOUT) as resp:
+            doc = json.loads(resp.read(64 * 1024).decode("utf-8", "replace"))
+    except urllib.error.HTTPError as e:
+        code = getattr(e, "code", 0)
+        if code in (401, 403):
+            return {"ok": False, "reason": "unauthorized",
+                    "detail": f"Cloudflare answered HTTP {code} — the token "
+                              "was rejected or cannot read zones"}
+        return {"ok": False, "reason": "upstream_error",
+                "detail": f"Cloudflare answered HTTP {code}"}
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return {"ok": False, "reason": "network",
+                "detail": "could not reach the Cloudflare API"}
+    if not isinstance(doc, dict):
+        return {"ok": False, "reason": "upstream_error",
+                "detail": "unexpected zones payload"}
+    if doc.get("success") is not True:
+        return {"ok": False, "reason": "no_scope",
+                "detail": "the token authenticates but the zone list was "
+                          "refused — add the Zone:Read scope"}
+    info = doc.get("result_info")
+    total = info.get("total_count") if isinstance(info, dict) else None
+    res = doc.get("result")
+    seen = len(res) if isinstance(res, list) else 0
+    n = total if isinstance(total, int) else seen
+    if n <= 0:
+        return {"ok": True, "reason": "ok",
+                "detail": "ok — token accepted, but 0 zones are visible "
+                          "(grant Zone:Read if you expected some)"}
+    return {"ok": True, "reason": "ok",
+            "detail": f"ok — token accepted · {n} zone(s) visible "
+                      "(read-only test)"}
+
+
+def _probe_github_token(value: str) -> dict:
+    """Live: GET /user with the Connections slot (car 6). The login is public
+    data (the owner runs two identities, so it matters); the token never
+    appears. X-OAuth-Scopes turns 'authenticated' into 'authenticated and
+    here is what it may do' — fine-grained tokens send no scope list, and
+    that is stated instead of guessed. AIDOG_GH_API_URL is the offline seam
+    (the same one mycore.community already uses)."""
+    base = (os.environ.get("AIDOG_GH_API_URL") or
+            "https://api.github.com").rstrip("/")
+    req = urllib.request.Request(
+        f"{base}/user",
+        headers={"User-Agent": "aidog-console",
+                 "Accept": "application/vnd.github+json",
+                 "Authorization": f"Bearer {value}"})
+    scopes = ""
+    try:
+        with urllib.request.urlopen(req, timeout=VERIFY_TIMEOUT) as resp:
+            scopes = (resp.headers.get("X-OAuth-Scopes") or "").strip()
+            doc = json.loads(resp.read(64 * 1024).decode("utf-8", "replace"))
+    except urllib.error.HTTPError as e:
+        code = getattr(e, "code", 0)
+        if code in (401, 403):
+            return {"ok": False, "reason": "unauthorized",
+                    "detail": f"GitHub answered HTTP {code} — the token was "
+                              "rejected"}
+        return {"ok": False, "reason": "upstream_error",
+                "detail": f"GitHub answered HTTP {code}"}
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        return {"ok": False, "reason": "network",
+                "detail": "could not reach the GitHub API"}
+    login = str(doc.get("login") or "") if isinstance(doc, dict) else ""
+    if not login:
+        return {"ok": False, "reason": "upstream_error",
+                "detail": "no login in the /user response"}
+    if scopes:
+        return {"ok": True, "reason": "ok",
+                "detail": f"ok — authenticated as {login} · scopes: {scopes}"}
+    return {"ok": True, "reason": "ok",
+            "detail": f"ok — authenticated as {login} · no scope list "
+                      "(fine-grained token; check its repository access)"}
+
+
 # slot -> live probe (absence = format check only, stated as such)
 SLOT_LIVE_PROBES = {
     "AIDOG_COMMUNITY_PAT": _probe_community_pat,
     "AIDOG_GH_PAT": _probe_github_pat,
     "MYCORE_TG_TOKEN": _probe_bot_token,
     "MODEL_API_KEY": _probe_model_key,
+    "CLOUDFLARE_API_TOKEN": _probe_cloudflare,
+    "GITHUB_TOKEN": _probe_github_token,
 }
 
 
@@ -2715,6 +3312,7 @@ def collect_events() -> dict:
     # run today; post-swap they are the only log sources left).
     events += _service_events(MYCORE_SERVICE_LOG)
     events += _mycore_watchdog_events()
+    events += _wd_escalation_events()      # car 7: the escalation chain
     events += list(_TRANSITIONS)
     events.append(_event("info", "console", f"console online ({VERSION})",
                          _EVENTS_BOOT_TS, code="console.boot"))
@@ -2858,6 +3456,170 @@ def _exchange_quote_rate_ok() -> bool:
             return False
         _exchange_quote_times.append(now)
         return True
+
+
+# Extensions car (Phase B): /api/quotes gets its OWN budget too — a keyless
+# market lookup must never spend the STT, /api/say or exchange-probe windows
+# (the console can quote a symbol while the microphone is busy). Duplicated
+# on purpose: the four windows are independent by contract.
+QUOTES_RATE_LIMIT = 10    # keyless quote lookups per sliding minute
+QUOTES_RATE_WINDOW = 60.0
+_quotes_times: deque = deque()
+_quotes_lock = threading.Lock()
+
+
+def _quotes_rate_ok() -> bool:
+    """Independent sliding window for GET /api/quotes — 10 lookups per
+    minute on a private deque (never another endpoint's budget)."""
+    now = time.time()
+    with _quotes_lock:
+        while _quotes_times and now - _quotes_times[0] > QUOTES_RATE_WINDOW:
+            _quotes_times.popleft()
+        if len(_quotes_times) >= QUOTES_RATE_LIMIT:
+            return False
+        _quotes_times.append(now)
+        return True
+
+
+class QuotesError(Exception):
+    """Typed upstream failure for GET /api/quotes: an HTTP status plus an
+    honest message. Carries no URL, no header and never a made-up number."""
+
+    def __init__(self, code: int, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def _quotes_get(url: str, headers: dict, timeout: float) -> bytes:
+    """One read-only GET for the quote adapters. urllib honors the
+    environment proxy, so a restricted network surfaces as an honest
+    QuotesError (502/504) instead of a traceback, and a 404 from the
+    upstream means the symbol does not exist."""
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read()
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            raise QuotesError(404, "unknown symbol upstream") from None
+        raise QuotesError(502, f"quote upstream refused ({e.code})") from None
+    except urllib.error.URLError as e:
+        reason = str(getattr(e, "reason", "") or "")
+        if "timed out" in reason.lower() or isinstance(getattr(e, "reason", None),
+                                                        TimeoutError):
+            raise QuotesError(504, "quote upstream timed out") from None
+        raise QuotesError(502, "quote upstream unreachable") from None
+    except TimeoutError:
+        raise QuotesError(504, "quote upstream timed out") from None
+
+
+_QUOTE_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; aidog-quotes/1.0)"}
+
+
+def quotes_cn(symbol: str, timeout: float = 8.0) -> dict:
+    """Sina A-share quote (keyless). The wire is GBK and the host REQUIRES a
+    finance Referer; an empty row means the symbol does not exist — 404, never
+    a fabricated zero. Row layout: [0] name, [2] previous close, [3] last,
+    [30]/[31] Beijing date/time."""
+    url = "https://hq.sinajs.cn/list=" + urllib.parse.quote(symbol)
+    raw = _quotes_get(url, {**_QUOTE_HEADERS,
+                            "Referer": "https://finance.sina.com.cn"}, timeout)
+    text = raw.decode("gbk", errors="replace")
+    m = re.search(r'"([^"]*)"', text)
+    row = m.group(1).strip() if m else ""
+    if not row:
+        raise QuotesError(404, f"unknown A-share symbol {symbol!r}")
+    f = row.split(",")
+    if len(f) < 32:
+        raise QuotesError(502, "unexpected Sina payload shape")
+    try:
+        prev = float(f[2])
+        price = float(f[3])
+    except (ValueError, IndexError):
+        raise QuotesError(502, "unexpected Sina payload shape") from None
+    change = price - prev
+    pct = (change / prev * 100.0) if prev else None
+    try:
+        ts = int(datetime.strptime(f"{f[30]} {f[31]}", "%Y-%m-%d %H:%M:%S")
+                 .replace(tzinfo=timezone(timedelta(hours=8))).timestamp())
+    except Exception:  # noqa: BLE001 — odd date = fall back to "now"
+        ts = int(time.time())
+    return {"ok": True, "market": "cn", "symbol": symbol, "name": f[0],
+            "price": price, "change": round(change, 4),
+            "pct": (round(pct, 4) if pct is not None else None),
+            "currency": "CNY", "ts": ts, "source": "sina"}
+
+
+def quotes_us(symbol: str, timeout: float = 8.0) -> dict:
+    """Yahoo Finance chart quote (keyless). An empty result with an upstream
+    error description is an honest 404; a payload without a price is a 502 —
+    a missing number is never rendered as 0."""
+    url = ("https://query1.finance.yahoo.com/v8/finance/chart/"
+           + urllib.parse.quote(symbol) + "?interval=1d&range=1d")
+    raw = _quotes_get(url, _QUOTE_HEADERS, timeout)
+    try:
+        doc = json.loads(raw.decode("utf-8", "replace"))
+    except ValueError:
+        raise QuotesError(502, "unexpected Yahoo payload shape") from None
+    chart = doc.get("chart") if isinstance(doc, dict) else None
+    chart = chart if isinstance(chart, dict) else {}
+    result = chart.get("result") or []
+    if not result:
+        err = chart.get("error") if isinstance(chart.get("error"), dict) else {}
+        desc = str(err.get("description") or "").strip()[:80]
+        note = f" — {desc}" if desc else ""
+        raise QuotesError(404, f"unknown US symbol {symbol!r}{note}")
+    meta = result[0].get("meta") if isinstance(result[0], dict) else {}
+    meta = meta if isinstance(meta, dict) else {}
+    price = meta.get("regularMarketPrice")
+    prev = meta.get("chartPreviousClose") or meta.get("previousClose")
+    if not isinstance(price, (int, float)):
+        raise QuotesError(502, "Yahoo returned no price")
+    change = (price - prev) if isinstance(prev, (int, float)) and prev else None
+    pct = (change / prev * 100.0) if change is not None else None
+    return {"ok": True, "market": "us",
+            "symbol": str(meta.get("symbol") or symbol),
+            "name": str(meta.get("shortName") or meta.get("longName") or symbol),
+            "price": price,
+            "change": (round(change, 4) if change is not None else None),
+            "pct": (round(pct, 4) if pct is not None else None),
+            "currency": str(meta.get("currency") or "USD"),
+            "ts": int(meta.get("regularMarketTime") or time.time()),
+            "source": "yahoo"}
+
+
+def quotes_mock(base: str, market: str, symbol: str,
+                timeout: float = 5.0) -> dict:
+    """Offline seam (env AIDOG_QUOTES_URL): the mock answers with OUR payload
+    shape so the tests exercise validation, routing and rendering without the
+    internet. A mock error body maps to the same honest status codes."""
+    sep = "&" if "?" in base else "?"
+    url = base + sep + urllib.parse.urlencode({"market": market,
+                                               "symbol": symbol})
+    raw = _quotes_get(url, {"User-Agent": "aidog-quotes-test/1.0"}, timeout)
+    try:
+        doc = json.loads(raw.decode("utf-8", "replace"))
+    except ValueError:
+        raise QuotesError(502, "mock quote payload is not JSON") from None
+    if not isinstance(doc, dict):
+        raise QuotesError(502, "mock quote payload is not an object")
+    if doc.get("error") and doc.get("ok") is not True:
+        msg = str(doc["error"])[:120]
+        raise QuotesError(404 if "unknown" in msg.lower() else 502, msg)
+    if doc.get("ok") is not True or not isinstance(doc.get("price"),
+                                                    (int, float)):
+        raise QuotesError(502, "mock quote payload missing ok/price")
+    return doc
+
+
+def _quotes_symbol_ok(market: str, symbol: str) -> bool:
+    """Format gate, per market: cn needs the sh|sz|bj prefix (the wire has no
+    exchange discriminator), us needs a bare ticker. Checked before any
+    network I/O so a bad request can never reach an upstream."""
+    if market == "cn":
+        return bool(re.fullmatch(r"(sh|sz|bj)\d{6}", symbol))
+    return bool(re.fullmatch(r"[A-Za-z][A-Za-z.\-]{0,9}", symbol))
 
 
 def _no_url(text: str) -> str:
@@ -3059,7 +3821,8 @@ def chat_context_usage() -> dict:
                  "compaction_enabled": budget is not None,
                  "over_budget": None}
     try:
-        stack = build_system_stack(context_dirs=resolve_context_dirs())
+        stack = build_system_stack(context_dirs=resolve_context_dirs(),
+                                   user_rules=resolve_user_rules())
         history = [m for m in Session(chat_session_path()).load()
                    if m.get("role") != "system"]
         sys_chars = measure(stack)
@@ -3404,7 +4167,8 @@ def _run_webhook_turn(text: str, sender: str):
         history = []
     history = [m for m in history if m.get("role") != "system"]
 
-    stack = build_system_stack(context_dirs=resolve_context_dirs())
+    stack = build_system_stack(context_dirs=resolve_context_dirs(),
+                               user_rules=resolve_user_rules())
     messages = stack + history
     pre_ids = {id(m) for m in messages}
     messages.append({"role": "user", "content": text})
@@ -3868,6 +4632,240 @@ def collect_cron() -> dict:
         return {"jobs": [], "count": 0}
 
 
+# ------------------------------------- agent backup (CKX-P2, car 8) ---------
+CKX_JOB_NAME = "ckx-backup"            # the ONE scheduled-backup job label
+CKX_DEFAULT_SPEC = "daily 03:00"        # what the console pre-fills
+
+# The model-visible instruction behind `kind: prompt`. It is deliberately
+# narrow: the tool already returns metadata only, so this text's job is to
+# keep the reply to THAT and to name the two ways a run can come back short.
+# Nothing here can cause a payload or a passphrase to be produced — the tool
+# has no argument that would allow one.
+CKX_SCHEDULE_PROMPT = (
+    "Run the `backup_run` tool once (it takes no arguments) and report ONLY "
+    "the JSON metadata it returns: ok, file, bytes, sha256, verified, "
+    "roundtrip, ms and quota. If the tool answers with an ERROR line, report "
+    "that reason verbatim and stop — do not retry more than once. Never "
+    "print a backup file's contents, any exported section, or any "
+    "passphrase: the tool does not return them and you must not try to read "
+    "them. When quota.state is `warn`, say the free-call budget is running "
+    "low; when it is `over`, say the meter must be reset in the console "
+    "after checking the plan.")
+
+
+def collect_backup_agent() -> dict:
+    """GET /api/backup/agent — the CKX-P2 status face (car 8).
+
+    Fail-soft by contract: a broken registry, an unreadable meter or a
+    missing Node runtime each degrade to an honest field, never a 500. This
+    payload carries NAMES, NUMBERS AND PRESENCE ONLY — the passphrase slot is
+    reported as `set: bool`, never as a value, and no filesystem path enters
+    it (the schedule row is built by the same whitelist cron_row uses)."""
+    out: dict = {
+        "node": {"ok": False, "version": "", "reason": "probe unavailable"},
+        "password_slot": {"set": False},
+        "quota": {"used": 0, "cap": 0, "warn_at": 0, "state": "unknown"},
+        "scheduled": None,
+        "mcp": {"enabled": False},
+    }
+    try:
+        from mycore import ckxbackup as _ckx   # noqa: PLC0415 — lazy import
+    except Exception as e:  # noqa: BLE001 — class name only
+        out["node"]["reason"] = type(e).__name__
+        return out
+    try:
+        st = _ckx.node_status()
+        out["node"] = {"ok": bool(st.get("ok")),
+                       "version": str(st.get("version") or ""),
+                       "reason": str(st.get("reason") or "")}
+        out["password_slot"] = {"set": bool(_ckx.password_value())}
+        out["quota"] = _ckx.quota_status()
+    except Exception as e:  # noqa: BLE001 — class name only
+        out["node"]["reason"] = type(e).__name__
+    # schedule row: the fixed job label, built from cron_row's whitelist
+    try:
+        from mycore import scheduler as _sch   # noqa: PLC0415 — lazy import
+        for job in _sch.load_jobs(_cron_jobs_path()):
+            if str(job.get("name") or "") == CKX_JOB_NAME:
+                row = cron_row(job)
+                out["scheduled"] = {"id": row["id"], "name": row["name"],
+                                    "spec": row["spec"], "kind": row["kind"],
+                                    "next": row["next"], "done": row["done"]}
+                break
+    except Exception:  # noqa: BLE001 — an absent/corrupt registry reads null
+        out["scheduled"] = None
+    # MCP switch: the EFFECTIVE config (env override > this server's stored
+    # value), so an env override can never claim a state the runtime lacks
+    # and the read face always matches what mcp_on/mcp_off just wrote.
+    try:
+        raw = _effective_mcp_text()
+        out["mcp"] = {"enabled": any(
+            isinstance(e, dict) and e.get("name") == _ckx.MCP_SERVER_NAME
+            for e in (json.loads(raw) if raw.strip() else []))}
+    except Exception:  # noqa: BLE001 — invalid config reads as off, honestly
+        out["mcp"] = {"enabled": False}
+    return out
+
+
+def backup_agent_schedule(spec: str | None) -> tuple[int, dict]:
+    """POST action=schedule — every pre-flight gate BEFORE the registry is
+    touched, so a refusal never leaves a half-created job behind.
+
+    Gate order (owner contract): Node >= 20 -> passphrase slot present ->
+    local call meter not over (D12 quota gate) -> spec grammar -> idempotent
+    same-name detection. `origin` stays None on purpose: delivery falls back
+    to MYCORE_WD_CHAT, else log-only, exactly like every other console job."""
+    from mycore import ckxbackup as _ckx      # noqa: PLC0415 — lazy import
+    from mycore import scheduler as _sch      # noqa: PLC0415 — lazy import
+    node = _ckx.node_status()
+    if not node["ok"]:
+        return 409, {"error": "agent backup unavailable",
+                     "details": [node["reason"] or "node runtime unavailable"]}
+    if not _ckx.password_value():
+        return 409, {"error": "agent backup unavailable",
+                     "details": [f"{_ckx.PASSWORD_SLOT} slot is not set "
+                                 f"(Settings > Credentials)"]}
+    quota = _ckx.quota_status()
+    if quota["state"] == "over":
+        return 409, {"error": "call quota exhausted",
+                     "details": [f"{quota['used']}/{quota['cap']} local calls "
+                                 f"counted — reset the meter after checking "
+                                 f"your plan"]}
+    text = spec if isinstance(spec, str) and spec.strip() else CKX_DEFAULT_SPEC
+    try:
+        jobs = _sch.load_jobs(_cron_jobs_path())
+    except OSError as e:  # noqa: BLE001 — type name only
+        return 500, {"error": f"registry unreadable: {type(e).__name__}"}
+    for job in jobs:
+        if str(job.get("name") or "") == CKX_JOB_NAME:
+            if _sch.describe(job) == text.strip():
+                return 200, {"ok": True, "already": True,
+                             "job": cron_row(job)}
+            return 409, {"error": "already scheduled",
+                         "details": [f"{CKX_JOB_NAME} runs "
+                                     f"{_sch.describe(job)} — remove it "
+                                     f"before changing the schedule"]}
+    try:
+        job = _sch.create_job(jobs, text, CKX_SCHEDULE_PROMPT,
+                              kind="prompt", source="command",
+                              name=CKX_JOB_NAME)
+        _sch.save_jobs(_cron_jobs_path(), jobs)
+    except _sch.SpecError as e:
+        return 400, {"error": "validation failed", "details": [str(e)]}
+    except OSError as e:  # noqa: BLE001 — type name only
+        return 500, {"error": f"registry not writable: {type(e).__name__}"}
+    sys.stderr.write(f"ckx schedule spec={_sch.describe(job)} kind={job['kind']}\n")
+    return 200, {"ok": True, "job": cron_row(job)}
+
+
+def backup_agent_unschedule() -> tuple[int, dict]:
+    """POST action=unschedule — delete by the FIXED job id lookup (name),
+    never by a client-supplied id: this face owns exactly one job."""
+    from mycore import scheduler as _sch      # noqa: PLC0415 — lazy import
+    try:
+        jobs = _sch.load_jobs(_cron_jobs_path())
+    except OSError as e:  # noqa: BLE001 — type name only
+        return 500, {"error": f"registry unreadable: {type(e).__name__}"}
+    hit = next((j for j in jobs
+                if str(j.get("name") or "") == CKX_JOB_NAME), None)
+    if hit is None:
+        return 404, {"error": "not scheduled"}
+    if not _sch.delete_job(jobs, str(hit.get("id") or "")):
+        return 404, {"error": "not scheduled"}
+    try:
+        _sch.save_jobs(_cron_jobs_path(), jobs)
+    except OSError as e:  # noqa: BLE001 — type name only
+        return 500, {"error": f"registry not writable: {type(e).__name__}"}
+    return 200, {"ok": True, "removed": CKX_JOB_NAME}
+
+
+def _settings_mcp_text() -> str:
+    """The RAW stored mycore.mcp string (hand-written keys aside). Reading
+    the file, not load_settings(): the merge view cannot be written back
+    without dropping what it filtered."""
+    try:
+        stored = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        stored = {}
+    mc = stored.get("mycore") if isinstance(stored, dict) else None
+    raw = mc.get("mcp") if isinstance(mc, dict) else None
+    return raw if isinstance(raw, str) else ""
+
+
+def _effective_mcp_text() -> str:
+    """The config the runtime will actually use: env MYCORE_MCP when set,
+    else the stored mycore.mcp — the SAME precedence mycore.mcp.raw_config
+    applies, read through THIS server's settings seam (the file the agent
+    face writes), so the read face and the write face can never disagree."""
+    env = os.environ.get("MYCORE_MCP", "").strip()
+    return env if env else _settings_mcp_text()
+
+
+def backup_agent_mcp(on: bool) -> tuple[int, dict]:
+    """POST action=mcp_on | mcp_off — insert/replace (or remove) ONLY the
+    `ckx` entry of mycore.mcp; every other server the operator configured
+    survives byte-identical. The result goes through the SAME
+    validate_settings_patch + deep_merge-onto-RAW-store write path as the
+    settings face, so an unknown hand-written key can never be dropped and a
+    rejected value is refused before anything is written."""
+    from mycore import ckxbackup as _ckx      # noqa: PLC0415 — lazy import
+    if on:
+        node = _ckx.node_status()
+        if not node["ok"]:
+            return 409, {"error": "agent backup unavailable",
+                         "details": [node["reason"]
+                                     or "node runtime unavailable"]}
+        if not _ckx.password_value():
+            return 409, {"error": "agent backup unavailable",
+                         "details": [f"{_ckx.PASSWORD_SLOT} slot is not set "
+                                     f"(Settings > Credentials)"]}
+    raw = _settings_mcp_text()
+    try:
+        entries = json.loads(raw) if raw.strip() else []
+    except ValueError:
+        return 409, {"error": "mycore.mcp is not valid JSON",
+                     "details": ["fix it in Settings > Model first"]}
+    if not isinstance(entries, list):
+        return 409, {"error": "mycore.mcp must be a JSON array",
+                     "details": ["fix it in Settings > Model first"]}
+    keep = [e for e in entries
+            if not (isinstance(e, dict)
+                    and e.get("name") == _ckx.MCP_SERVER_NAME)]
+    already = len(keep) != len(entries)
+    if on:
+        if len(keep) >= mcp.MAX_SERVERS:
+            return 409, {"error": "mcp server slots full",
+                         "details": [f"at most {mcp.MAX_SERVERS} servers — "
+                                     f"remove one first"]}
+        keep.append(_ckx.ckx_server(REPO))
+        want = True
+    else:
+        want = False
+        if not already:
+            return 200, {"ok": True, "changed": False,
+                         "mcp": {"enabled": False}}
+    text = json.dumps(keep, separators=(",", ":")) if keep else ""
+    patch, errors = validate_settings_patch({"mycore": {"mcp": text}})
+    if errors:
+        return 400, {"error": "validation failed", "details": errors}
+    try:
+        stored = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        stored = {}
+    if not isinstance(stored, dict):
+        stored = {}
+    merged = deep_merge(stored, patch)
+    changed = merged != stored
+    if changed:
+        try:
+            atomic_write_json(SETTINGS_FILE, merged)
+        except OSError as e:  # noqa: BLE001 — type name only
+            return 500, {"error": f"persist failed: {type(e).__name__}"}
+        sys.stderr.write(f"settings updated keys=mycore.mcp "
+                         f"ckx={'on' if on else 'off'}\n")
+    return 200, {"ok": True, "changed": changed, "mcp": {"enabled": want}}
+
+
 def _repo_relative(path: object) -> str:
     """Repo-relative POSIX path, or the bare file name for a path outside the
     repo — the console never serializes a machine path (the standing rule for
@@ -4034,6 +5032,31 @@ def collect_mission_detail(mid: str) -> tuple[dict, int]:
 # local state, POST runs a read-only sweep or marks a finding acknowledged.
 # mycore.sniff has no actuation code path at all (asserted in core tests).
 SNIFF_FINDINGS_PAGE = 50
+
+
+def collect_bridge_status() -> dict:
+    """GET /api/bridge/status — the Bridge card's read model (car 6).
+
+    Non-secret by construction: the `bridge` settings block holds a URL, host
+    patterns and a number, and an audit row holds a host, a path, a byte count
+    and a reason WORD. No credential can be here, and no audit line ever
+    carries a query string."""
+    cfg = bridge.config()
+    return {
+        "enabled": bool(cfg["enabled"]),
+        "worker_url": cfg["worker_url"],
+        "allow": list(cfg["allow"]),
+        "allow_auth": list(cfg["allow_auth"]),
+        "max_bytes": cfg["max_bytes"],
+        # `routing` = would a request actually be proxied right now? (It needs
+        # the switch, the URL AND at least one allowed host — three ways to be
+        # off, all reported honestly.)
+        "routing": bool(cfg["enabled"] and cfg["worker_url"] and cfg["allow"]),
+        "audit": bridge.audit_tail(),
+        "audit_file": bridge.audit_file().name,
+        "template": "/api/bridge/template",
+        "readme": "/api/bridge/template?file=readme",
+    }
 
 
 def collect_sniff() -> dict:
@@ -4243,6 +5266,38 @@ def _slot_present(name: str) -> bool:
         return False
 
 
+def _decision_row(mc: dict | None = None) -> dict:
+    """Car 4 (D6): the Model panel's decision endpoint row. Presence/flags
+    only — the key VALUE never serializes, and `url`/`model` echo the RAW
+    stored strings (empty = the vendor default) so the form round-trips
+    instead of painting the defaults into the inputs. Fail-soft: an unreadable
+    client still answers a well-formed row with an honest reason WORD."""
+    try:
+        from mycore import decision as _deci      # noqa: PLC0415 — lazy import
+    except Exception as e:  # noqa: BLE001 — class name only
+        return {"enabled": False, "url": "", "model": "", "router_model": "",
+                "key_slot": "DECISION_API_KEY", "key_set": False,
+                "active": False, "reason": type(e).__name__}
+    if mc is None:
+        settings = load_settings()
+        raw = settings.get("mycore") if isinstance(settings.get("mycore"), dict) else None
+        mc = raw if isinstance(raw, dict) else {}
+    block = mc.get("decision") if isinstance(mc, dict) else None
+    block = block if isinstance(block, dict) else {}
+    try:
+        cfg = _deci.config()
+        reason, active, key_set = cfg["reason"], cfg["active"], cfg["key_set"]
+    except Exception as e:  # noqa: BLE001 — class name only
+        reason, active, key_set = type(e).__name__, False, False
+    return {"enabled": block.get("enabled") is True,
+            "url": block.get("url") if isinstance(block.get("url"), str) else "",
+            "model": block.get("model") if isinstance(block.get("model"), str) else "",
+            "router_model": (block.get("router_model")
+                             if isinstance(block.get("router_model"), str) else ""),
+            "key_slot": _deci.KEY_ENV, "key_set": key_set,
+            "active": active, "reason": reason}
+
+
 def collect_endpoints() -> dict:
     """GET /api/mycore/endpoints (v0.5.55) — the normalized chain for the
     Model panel. `source` names which track configured it:
@@ -4259,7 +5314,7 @@ def collect_endpoints() -> dict:
                                                dict) else {}
     out: dict = {"source": "none", "endpoints": [],
                  "rotation": "", "max_rpm": 0, "max_tpm": 0,
-                 "note": ""}
+                 "decision": _decision_row(mc), "note": ""}
     if isinstance(mc, dict):
         out["rotation"] = mc.get("rotation") if mc.get("rotation") in (
             "ordered", "round_robin") else ""
@@ -4528,10 +5583,18 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"status": "ok", "version": VERSION, "ts": time.time()})
         if path == "/api/status":
             return self._json(collect_status())
+        if path == "/api/control":
+            # Car 7 (D11): the leash read face — pause state + budget status.
+            # No auth (same contract as /api/status: names/numbers, no secrets).
+            return self._json(collect_control())
         if path == "/api/config":
             return self._json(read_config_bits())
         if path == "/api/settings":
             return self._json(load_settings())
+        if path == "/api/backup/export":
+            return self._handle_backup_export()
+        if path == "/api/backup/agent":
+            return self._handle_backup_agent_get()
         if path == "/api/setup":
             return self._json(collect_setup())
         if path == "/api/usage":
@@ -4605,8 +5668,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(collect_mission())
         if path == "/api/sniff":
             return self._json(collect_sniff())
+        if path == "/api/bridge/status":
+            return self._json(collect_bridge_status())
+        if path == "/api/bridge/template":
+            return self._handle_bridge_template()
         if path == "/api/exchange/quote":
             return self._handle_exchange_quote()
+        if path == "/api/quotes":
+            return self._handle_quotes()
         if path == "/api/exchange/plans":
             return self._handle_exchange_plans()
         if path.startswith("/api/media/"):
@@ -4625,8 +5694,16 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == "/api/settings":
             return self._handle_settings_write()
+        if path == "/api/control":
+            return self._handle_control()
         if path == "/api/secrets":
             return self._handle_secrets_write()
+        if path == "/api/backup/restore":
+            return self._handle_backup_restore()
+        if path == "/api/backup/agent":
+            return self._handle_backup_agent_post()
+        if path == "/api/extensions/intent":
+            return self._handle_intent()
         if path == "/api/slots/verify":
             return self._handle_slot_verify()
         if path == "/api/discussions/create":
@@ -4735,7 +5812,7 @@ class Handler(BaseHTTPRequestHandler):
         if group is None and MODEL_KEY_SLOT_RE.match(name):
             # v0.5.55: the 8 model-key pool slots (MODEL_UP_K1..K8) are
             # writable here but deliberately NOT listed by GET /api/secrets
-            # (the fixed catalog stays 34 rows) — the Model endpoints panel
+            # (the fixed catalog stays 35 rows) — the Model endpoints panel
             # shows their presence instead. Same value rules as every slot.
             group = "model"
         if group is None:
@@ -4779,6 +5856,194 @@ class Handler(BaseHTTPRequestHandler):
                            "slot": {"name": name, "group": group,
                                     "set": bool(value),
                                     "length": len(value)}})
+
+    # ---------------------------------- backup / restore (CKX-P1) ----------
+    def _handle_backup_export(self) -> None:
+        """GET /api/backup/export — THE ONLY route in this server that returns
+        a credential slot VALUE (car 3, D4).
+
+        Gate order: Bearer WEB_TOKEN first (401 / 503 — never a partial read),
+        then the `include` allowlist (400). WEB_TOKEN itself is presence-only
+        and cannot ride: it is not in BACKUP_SECRET_SLOTS. This response is
+        never written to stderr, to the event stream or to any log line; the
+        access log carries the request PATH (section names) and nothing else.
+        Loopback only, like every other route here."""
+        if not self._require_token():
+            return
+        raw = None
+        if "?" in self.path:
+            raw = (urllib.parse.parse_qs(
+                self.path.split("?", 1)[1]).get("include") or [None])[0]
+        if raw is None or not raw.strip():
+            include = BACKUP_INCLUDES
+        else:
+            parts = [p.strip() for p in raw.split(",") if p.strip()]
+            unknown = [p for p in parts if p not in BACKUP_INCLUDES]
+            if not parts or unknown:
+                bad = unknown[0][:64] if unknown else raw[:64]
+                return self._json(
+                    {"error": "validation failed",
+                     "details": ["include must be a comma list of "
+                                 f"{','.join(BACKUP_INCLUDES)} (bad: {bad})"]},
+                    400)
+            include = tuple(dict.fromkeys(parts))
+        try:
+            payload = backup_payload(include)
+        except BackupReadError as e:
+            return self._json({"error": "backup read failed",
+                               "reason": e.reason}, e.status)
+        return self._json({"ok": True, "schema": BACKUP_SCHEMA,
+                           "schemaVersion": BACKUP_SCHEMA_VERSION,
+                           "created": int(time.time()),
+                           "payload": payload})
+
+    def _handle_backup_restore(self) -> None:
+        """POST /api/backup/restore — apply a decrypted backup envelope.
+
+        Envelope validation is all-or-nothing (400: schema / version / shape —
+        nothing is written before every check passes). Section CONTENT problems
+        are honest PARTIAL results: 200 when everything requested landed, 503
+        with per-slot / per-file reasons when any section refused. The log
+        lines below carry names and counts only — never a value."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body(limit=BACKUP_MAX_BODY)
+        if doc is None:
+            return
+        details: list[str] = []
+        if doc.get("schema") != BACKUP_SCHEMA:
+            details.append(f"schema must be {BACKUP_SCHEMA}")
+        if doc.get("schemaVersion") != BACKUP_SCHEMA_VERSION:
+            details.append(f"schemaVersion must be {BACKUP_SCHEMA_VERSION}")
+        payload = doc.get("payload")
+        if not isinstance(payload, dict):
+            details.append("payload must be an object")
+        apply = doc.get("apply")
+        if not isinstance(apply, dict):
+            details.append("apply must be an object")
+            apply = {}
+        for key in apply:
+            if key not in BACKUP_INCLUDES:
+                details.append(f"unknown apply section: {str(key)[:32]}")
+            elif not isinstance(apply[key], bool):
+                details.append(f"apply.{key} must be a boolean")
+        if isinstance(payload, dict):
+            for key in BACKUP_INCLUDES:
+                if apply.get(key) is True and not isinstance(payload.get(key),
+                                                              dict):
+                    details.append(f"payload.{key} must be an object")
+        if details:
+            return self._json({"error": "validation failed",
+                               "details": details}, 400)
+        if not any(apply.get(key) is True for key in BACKUP_INCLUDES):
+            return self._json(
+                {"error": "validation failed",
+                 "details": ["apply must select at least one section"]}, 400)
+        out: dict = {}
+        if apply.get("secrets") is True:
+            out["secrets"] = backup_apply_secrets(payload.get("secrets") or {})
+        if apply.get("settings") is True:
+            out["settings"] = backup_apply_settings(payload.get("settings") or {})
+        if apply.get("memory") is True:
+            out["memory"] = backup_apply_memory(payload.get("memory") or {})
+        ok = True
+        if "secrets" in out:
+            ok = ok and not out["secrets"]["failed"]
+        if "settings" in out:
+            ok = ok and out["settings"].get("applied") is True
+        if "memory" in out:
+            ok = ok and not out["memory"]["failed"]
+        return self._json({"ok": ok, **out}, 200 if ok else 503)
+
+    # ---------------------- agent backup control (CKX-P2, car 8) ----------
+    def _handle_backup_agent_get(self) -> None:
+        """GET /api/backup/agent — the CKX-P2 status face. NO auth (same
+        contract as /api/status and /api/cron: names, numbers and presence
+        only), never a slot value, never a file path, never a payload."""
+        return self._json(collect_backup_agent())
+
+    def _handle_backup_agent_post(self) -> None:
+        """POST /api/backup/agent {action[, spec]} — Bearer WEB_TOKEN: this
+        face WRITES (a cron job, the MCP config, the call meter), so it sits
+        behind the same gate as every other write here. The value of the
+        passphrase slot never enters this frame's response, its stderr line
+        or an exception."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        action = doc.get("action")
+        if action == "schedule":
+            spec = doc.get("spec")
+            if spec is not None and (not isinstance(spec, str)
+                                     or len(spec) > 120
+                                     or any(ord(c) < 32 for c in spec)):
+                return self._json(
+                    {"error": "validation failed",
+                     "details": ["spec must be a single line of at most "
+                                 "120 chars"]}, 400)
+            code, body = backup_agent_schedule(spec)
+            return self._json(body, code)
+        if action == "unschedule":
+            code, body = backup_agent_unschedule()
+            return self._json(body, code)
+        if action == "quota_reset":
+            from mycore import ckxbackup as _ckx  # noqa: PLC0415 — lazy import
+            try:
+                quota = _ckx.quota_reset()
+            except _ckx.CkxError as e:
+                return self._json({"error": str(e)}, 500)
+            sys.stderr.write("ckx quota reset\n")
+            return self._json({"ok": True, "quota": quota})
+        if action in ("mcp_on", "mcp_off"):
+            if os.environ.get("MYCORE_MCP", "").strip():
+                return self._json(
+                    {"error": "mcp configured by environment",
+                     "details": ["MYCORE_MCP overrides settings — unset it "
+                                 "to switch MCP from the console"]}, 409)
+            code, body = backup_agent_mcp(action == "mcp_on")
+            return self._json(body, code)
+        return self._json(
+            {"error": "validation failed",
+             "details": ["action must be one of: schedule | unschedule | "
+                         "quota_reset | mcp_on | mcp_off"]}, 400)
+
+    def _handle_intent(self) -> None:
+        """POST /api/extensions/intent — car 4 (D6) call site 1: which
+        Extensions tab owns this request.
+
+        Bearer WEB_TOKEN is required because this is the ONE route that
+        forwards operator-typed text to the configured decision endpoint —
+        it is never anonymous and never automatic (the operator presses the
+        button). Every non-success is an honest 200 {available:false, reason:
+        WORD} so the UI can say "no fast path" instead of inventing a tab;
+        a bad body is a 400 and a missing token a 401/503, the usual ladder.
+        The text itself never reaches a log line."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        text = doc.get("text")
+        if not isinstance(text, str) or not text.strip():
+            return self._json({"error": "validation failed",
+                               "details": ["text must be a non-empty string"]}, 400)
+        if len(text) > INTENT_TEXT_MAX:
+            return self._json(
+                {"error": "validation failed",
+                 "details": [f"text too long (max {INTENT_TEXT_MAX} chars)"]}, 400)
+        try:
+            from mycore import decision as _deci   # noqa: PLC0415 — lazy import
+        except Exception as e:  # noqa: BLE001 — class name only
+            return self._json({"available": False, "reason": type(e).__name__})
+        try:
+            got = _deci.route_intent(text)
+        except _deci.DecisionError as e:
+            return self._json({"available": False, "reason": e.reason})
+        except Exception as e:  # noqa: BLE001 — class name only, never the text
+            return self._json({"available": False, "reason": type(e).__name__})
+        return self._json({"available": True, **got})
 
     # -------------------------------- community writes (0.5.54) -----------
     def _handle_discussion_write(self, action: str) -> None:
@@ -4841,9 +6106,11 @@ class Handler(BaseHTTPRequestHandler):
         reason, detail}. Two levels, both honest about what they proved:
           format — the stored VALUE's shape against a conservative rule
                    (never echoed back, only the rule's expectation);
-          live   — a real remote probe for the four slots that have one
+          live   — a real remote probe for the six slots that have one
                    (community PAT -> Discussions scope, GH PAT -> /user,
-                   bot token -> getMe, model key -> GET {base}/models).
+                   bot token -> getMe, model key -> GET {base}/models,
+                   Cloudflare token -> GET /zones (read-only),
+                   connections GitHub token -> GET /user + scope list).
         Unset slots answer ok:null / reason not_set — absence is information,
         not a failure. Every live probe runs with a 5s ceiling and reports
         a category word only; the model key probe never echoes the base URL
@@ -4873,6 +6140,32 @@ class Handler(BaseHTTPRequestHandler):
         return self._json({"results": rows,
                            "checked_at": datetime.now(timezone.utc)
                            .isoformat(timespec="seconds")})
+
+    # -------------------------------------- bridge (car 6, line 5 / D9) ----
+    BRIDGE_TEMPLATES: dict = {
+        "worker": ("deploy/bridge/worker.js", "text/javascript; charset=utf-8"),
+        "readme": ("deploy/bridge/README.md", "text/markdown; charset=utf-8"),
+    }
+
+    def _handle_bridge_template(self) -> None:
+        """GET /api/bridge/template[?file=worker|readme] — the guided Worker
+        template straight from the repo, so the console, the docs and the
+        shipped file can never drift into two versions of the same script.
+        Read-only and unauthenticated like every other GET here; the file
+        carries no credential by construction."""
+        which = "worker"
+        if "?" in self.path:
+            which = (urllib.parse.parse_qs(
+                self.path.split("?", 1)[1]).get("file") or ["worker"])[0]
+        entry = self.BRIDGE_TEMPLATES.get(which)
+        if entry is None:
+            return self._json({"error": "not found"}, 404)
+        rel, mime = entry
+        try:
+            data = (REPO / rel).read_bytes()
+        except OSError:
+            return self._json({"error": "template unavailable"}, 503)
+        return self._send(200, data, mime)
 
     # ------------------------------------ activation & operations (0.5.40) ---
     def _handle_service_restart(self) -> None:
@@ -5756,6 +7049,16 @@ class Handler(BaseHTTPRequestHandler):
                                                f"{VISION_MAX_CHARS} chars"]},
                                   400)
 
+        # Car 7 (D11 restraint): the leash gate — pause and budget refuse a NEW
+        # turn BEFORE the stream opens, with the same {error, details} shape
+        # the composer already renders. 409 = held (pause), 429 = over-limit.
+        allowed, code, ctx = leash.gate(load_settings())
+        if not allowed:
+            return self._json({"error": code,
+                               "details": [leash.block_detail(code, ctx)],
+                               "params": ctx},
+                              409 if code == "paused" else 429)
+
         self._sse_start()
         try:
             ok = self._run_chat_turn(text, model, image=image)
@@ -5781,6 +7084,15 @@ class Handler(BaseHTTPRequestHandler):
         cfg = cli.resolve_model_config()
         if model:
             cfg.model = model
+        else:
+            # Car 4 (D6) call site 4 — the model router (console leg). An
+            # explicit picker choice (X7 whitelist id) always wins; every
+            # other outcome — router off, Jev said main, weak calibration,
+            # unreachable — leaves cfg exactly as resolved above, and the
+            # routed model is what the `meta` event reports.
+            decision.apply_router(cfg, {"source": "console",
+                                        "chars": len(text or ""),
+                                        "has_image": bool(image)})
         path = chat_session_path()
         sess = Session(path)
         history = sess.load()
@@ -5789,7 +7101,8 @@ class Handler(BaseHTTPRequestHandler):
             history = []
         history = [m for m in history if m.get("role") != "system"]
 
-        stack = build_system_stack(context_dirs=resolve_context_dirs())
+        stack = build_system_stack(context_dirs=resolve_context_dirs(),
+                                   user_rules=resolve_user_rules())
         messages = stack + history
         pre_ids = {id(m) for m in messages}
         content = text
@@ -5798,9 +7111,27 @@ class Handler(BaseHTTPRequestHandler):
                        {"type": "image_url", "image_url": {"url": image}}]
         messages.append({"role": "user", "content": content})
 
+        # Car 7 (D11): STOP baseline captured BEFORE the turn — only a later
+        # POST /api/control {action:stop} can abort THIS turn, and the
+        # active-turn counter feeds the Overview tail row.
+        stop_base = leash.stop_baseline()
+        _bump_active_turn(1)
         alive = [True]
-        if not self._sse("meta", {"model": cfg.model}):
-            return False
+        try:
+            if not self._sse("meta", {"model": cfg.model}):
+                return False
+
+            return self._drive_chat_turn(
+                messages, pre_ids, cfg, image, content, sess, alive,
+                stop_base)
+        finally:
+            _bump_active_turn(-1)
+
+    def _drive_chat_turn(self, messages, pre_ids, cfg, image, content, sess,
+                         alive, stop_base) -> bool:
+        """The model/observer half of _run_chat_turn (split so the
+        active-turn counter in the caller covers the whole turn in a
+        finally — a crash must not leave the tail stuck at "working")."""
 
         def on_event(kind: str, data: dict) -> None:
             # Names only — tool ARGUMENTS may carry machine paths, never sent.
@@ -5833,7 +7164,8 @@ class Handler(BaseHTTPRequestHandler):
         chat_fn = ChatClient(cfg).chat
         res = run_turn(messages, chat_fn, registry,
                        on_event=on_event if alive[0] else None,
-                       budget_chars=chat_budget(), on_delta=on_delta)
+                       budget_chars=chat_budget(), on_delta=on_delta,
+                       should_stop=lambda: leash.stop_requested(stop_base))
 
         delta = [m for m in messages
                  if id(m) not in pre_ids and m.get("role") != "system"]
@@ -5913,7 +7245,8 @@ class Handler(BaseHTTPRequestHandler):
         folded request history, and this turn's user input. Stateless: no
         Session file is opened or written on this path."""
         cfg = cli.resolve_model_config()
-        messages = build_system_stack(context_dirs=resolve_context_dirs())
+        messages = build_system_stack(context_dirs=resolve_context_dirs(),
+                                      user_rules=resolve_user_rules())
         if client_system:
             messages.append({"role": "system", "content": client_system})
         messages.extend(history)
@@ -5970,6 +7303,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._openai_error(400,
                                       f"text too long (max {CHAT_MAX_CHARS} chars)",
                                       "invalid_request_error")
+        # Car 7 (D11): the /v1 gateway issues NEW turns too — same pause /
+        # budget gate (OpenAI-shaped bodies: 429 held-or-over, honest text).
+        allowed, code, ctx = leash.gate(load_settings())
+        if not allowed:
+            return self._openai_error(429, leash.block_detail(code, ctx),
+                                      "rate_limit_error")
         try:
             cfg, messages, prompt_chars = self._openai_prepare(client_system,
                                                                history, text)
@@ -6117,6 +7456,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "validation failed",
                                "details": ["sender must be 1..64 chars of [A-Za-z0-9._@-]"]},
                               400)
+        # Car 7 (D11): an inbound webhook turn is a NEW turn too — the same
+        # pause/budget gate applies (409 held / 429 over-limit, honest detail).
+        allowed, code, ctx = leash.gate(load_settings())
+        if not allowed:
+            return self._json({"error": code,
+                               "details": [leash.block_detail(code, ctx)]},
+                              409 if code == "paused" else 429)
         try:
             res = _run_webhook_turn(text, sender)
         except Exception as e:  # noqa: BLE001 — internals never reach the caller
@@ -6456,6 +7802,50 @@ class Handler(BaseHTTPRequestHandler):
         return self._json({"venue": venue, "symbol": symbol or "",
                            "lines": lines})
 
+    def _handle_quotes(self) -> None:
+        """GET /api/quotes?market=cn|us&symbol=<sym> — Extensions car (Phase B):
+        keyless READ-ONLY public quotes. cn -> Sina (GBK + mandatory Referer),
+        us -> Yahoo chart JSON; AIDOG_QUOTES_URL swaps the ADAPTER for a mock
+        (offline smoke). Answers 200 {ok, market, symbol, name, price, change,
+        pct, currency, ts, source} with honest failures — 400 invalid
+        market/format (rejected before any network I/O), 404 unknown symbol,
+        502 upstream refused or shapeless, 504 upstream timeout — and never a
+        fabricated number. Budget: its OWN 10/60s window -> 429, spent only by
+        requests that actually reach an upstream (a 400 is free local work),
+        so this route can never drain the STT, /api/say or exchange-probe
+        windows."""
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        market = (query.get("market") or [""])[0].strip().lower()
+        raw_symbol = (query.get("symbol") or [""])[0].strip()
+        if market not in ("cn", "us"):
+            return self._json(
+                {"error": "invalid market",
+                 "details": ["market must be one of cn|us"]}, 400)
+        symbol = raw_symbol.lower() if market == "cn" else raw_symbol
+        if not _quotes_symbol_ok(market, symbol):
+            want = ("sh600519 — prefix sh|sz|bj plus 6 digits" if market == "cn"
+                    else "AAPL — 1..10 letters, dots or dashes")
+            return self._json(
+                {"error": "invalid symbol",
+                 "details": [f"symbol must look like {want}"]}, 400)
+        mock = os.environ.get("AIDOG_QUOTES_URL", "").strip()
+        if not _quotes_rate_ok():
+            return self._json({"error": "rate limited"}, 429)
+        try:
+            if mock:
+                doc = quotes_mock(mock, market, symbol)
+            elif market == "cn":
+                doc = quotes_cn(symbol)
+            else:
+                doc = quotes_us(symbol)
+        except QuotesError as e:
+            return self._json({"error": e.message}, e.code)
+        except Exception as e:  # noqa: BLE001 — a probe never answers 500
+            sys.stderr.write(f"quotes failed market={market} "
+                             f"err={type(e).__name__}\n")
+            return self._json({"error": "quote fetch failed"}, 502)
+        return self._json(doc)
+
     def _handle_exchange_plans(self) -> None:
         """GET /api/exchange/plans — the stored W2 plans, newest first.
         Read, no token (same contract as every GET): the payload carries
@@ -6532,6 +7922,51 @@ class Handler(BaseHTTPRequestHandler):
         except OSError:
             return self._json({"error": "not found"}, 404)
         self._send(200, data, mime)
+
+    def _handle_control(self) -> None:
+        """POST /api/control {action: stop|pause|resume[, reason]} — Bearer
+        gate (it changes runtime state). Car 7 / D11 restraint:
+        * stop   — moves the STOP counter: the CURRENT turn aborts at its
+                   next checkpoint (iteration top / delta / pre-dispatch);
+                   turns started later are untouched.
+        * pause  — the pause switch ON: new turns and the service's
+                   automatic legs are held with an honest line until a human
+                   resumes (fail-closed, no process killed).
+        * resume — the one human click that clears a pause (and rewrites a
+                   corrupt control file back to a valid one)."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        action = doc.get("action")
+        if action not in ("stop", "pause", "resume"):
+            return self._json({
+                "error": "validation failed",
+                "details": ["action must be one of: stop | pause | resume"]},
+                400)
+        reason = doc.get("reason")
+        if reason is not None and (
+                not isinstance(reason, str) or len(reason) > 200
+                or any(ord(c) < 32 and c not in "\t" for c in reason)):
+            return self._json({
+                "error": "validation failed",
+                "details": ["reason must be a single line of at most 200 chars"]},
+                400)
+        try:
+            if action == "stop":
+                state = leash.request_stop()
+            elif action == "pause":
+                state = leash.pause(str(reason or "manual"))
+            else:
+                state = leash.resume()
+        except OSError:
+            return self._json({"error": "control state write failed"}, 500)
+        sys.stderr.write(f"control action={action} paused={int(state['paused'])} "
+                         f"stop_seq={state['stop_seq']}\n")
+        return self._json({"ok": True, "action": action, "control": {
+            "paused": state["paused"], "reason": state["reason"],
+            "since": state["since"], "stop_seq": state["stop_seq"]}})
 
     def _handle_settings_write(self) -> None:
         """Validated, idempotent settings write. The token value never appears

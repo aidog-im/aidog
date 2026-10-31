@@ -61,7 +61,7 @@
     <p class="hero-sub reveal" data-i18n="hero.sub">A personal embodied AI — a constitution for a personality, curated memory for a life, and a self-developed core that answers to you alone. Not a platform. Not an assistant farm. One companion, grown for one person, engineered so anyone can run it.</p>
     <div class="hero-badges reveal">
       <span class="badge badge-free"><span class="pulse-dot" aria-hidden="true"></span><span data-i18n="hero.badgeFree">PERMANENTLY FREE — forever, no exceptions</span></span>
-      <span class="badge badge-core" data-i18n="hero.badgeCore">Self-developed core · 32 modules · 1773/1773 tests</span>
+      <span class="badge badge-core" data-i18n="hero.badgeCore">Self-developed core · 36 modules · 2045/2045 tests</span>
       <span class="badge badge-local" data-i18n="hero.badgeLocal">Runs on your machine · loopback by default</span>
     </div>
     <div class="hero-cta reveal">
@@ -87,20 +87,20 @@
   </div>
   <div class="fact-strip" aria-label="verified facts">
     <div class="fact-strip-track" id="factTrack">
-      <span class="fact"><b>1773/1773</b> <span data-i18n="facts.core">core tests</span></span>
-      <span class="fact"><b>32</b> <span data-i18n="facts.modules">self-developed modules</span></span>
-      <span class="fact"><b>334/334</b> <span data-i18n="facts.smoke">console smoke</span></span>
+      <span class="fact"><b>2045/2045</b> <span data-i18n="facts.core">core tests</span></span>
+      <span class="fact"><b>36</b> <span data-i18n="facts.modules">self-developed modules</span></span>
+      <span class="fact"><b>432/432</b> <span data-i18n="facts.smoke">console smoke</span></span>
       <span class="fact"><b>30/30</b> <span data-i18n="facts.router">skill router</span></span>
       <span class="fact"><b>58/58</b> <span data-i18n="facts.memory">memory suite</span></span>
       <span class="fact"><b>0F/0W</b> <span data-i18n="facts.doctor">doctor check</span></span>
-      <span class="fact"><b>18</b> <span data-i18n="facts.e2e">real-machine E2E suites</span></span>
+      <span class="fact"><b>21</b> <span data-i18n="facts.e2e">real-machine E2E suites</span></span>
       <span class="fact"><b>99/99</b> <span data-i18n="facts.setup">setup wizard</span></span>
       <span class="fact"><b>63/63</b> <span data-i18n="facts.profiles">profile isolation</span></span>
       <span class="fact"><b>15/15</b> <span data-i18n="facts.desktop">desktop shell</span></span>
-      <span class="fact"><b>26</b> <span data-i18n="facts.tools">registered tools</span></span>
+      <span class="fact"><b>27</b> <span data-i18n="facts.tools">registered tools</span></span>
       <span class="fact"><b>36</b> <span data-i18n="facts.docs">capability docs</span></span>
-      <span class="fact"><b>≈18.6k</b> <span data-i18n="facts.loc">lines of core code</span></span>
-      <span class="fact"><b>979</b> <span data-i18n="facts.i18n">locale keys · en + zh each</span></span>
+      <span class="fact"><b>≈21.6k</b> <span data-i18n="facts.loc">lines of core code</span></span>
+      <span class="fact"><b>1189</b> <span data-i18n="facts.i18n">locale keys · en + zh each</span></span>
     </div>
   </div>
 </section>
@@ -167,7 +167,7 @@
       <h4 data-i18n="start.step1Title">Get the repository</h4>
       <p data-i18n="start.step1Body">I'm AiDog is public on GitHub — clone it with zero credentials.</p>
       <div class="cmd">
-        <code>git clone &lt;product-repo-url&gt; aidog &amp;&amp; cd aidog</code>
+        <code>git clone https://github.com/aidog-im/aidog.git aidog &amp;&amp; cd aidog</code>
         <button class="copy-btn" type="button" data-i18n="start.copy" aria-label="copy command">Copy</button>
       </div>
     </div>
@@ -323,7 +323,7 @@
     <p class="empty-body" data-i18n="sniff.howto1">After install, open the Console → SENSE: add a source (a Home Assistant url + token slot, a URL + extract regex, or a bridge name from mycore.mcp), then add a rule like sensor.temp > 30 for 10m.</p>
     <p class="empty-body" data-i18n="sniff.howto2">Hit SWEEP NOW (or wait out the interval): hits land in the FINDINGS timeline and stay on your machine — rules marked speak reach you first, with quiet hours, the digest cap and PAUSE deciding when.</p>
     <p class="arch-note" data-i18n="sniff.boundary">Read-only by construction — no actuation path exists in the engine at all, and the suite asserts that absence. Personal signals stay on your machine, unconfigured sources never speak, and no paid tier ever touches them.</p>
-    <p class="arch-note"><a class="btn btn-primary" href="#start" data-i18n="sniff.cta">Get started</a> <code>/?view=sniff</code></p>
+    <p class="arch-note"><a class="btn btn-primary" href="#start" data-i18n="sniff.cta">Get started</a></p>
   </div>
 </section>
 
@@ -477,7 +477,7 @@
     <div class="feature"><h4 data-i18n="console.f2T">Zero-dependency local server</h4><p data-i18n="console.f2B">Serves on 127.0.0.1 with plain standard library code; write operations require your local access token.</p></div>
     <div class="feature"><h4 data-i18n="console.f3T">Telegram + console, en/zh</h4><p data-i18n="console.f3B">Chat where you already are, inspect where it runs. Both faces speak English and Chinese.</p></div>
     <div class="feature"><h4 data-i18n="console.f4T">Activation card in the Overview</h4><p data-i18n="console.f4B">The first Overview card mirrors the wizard's check — required slots, endpoint reachability, service state — and every failing row carries a FIX deep-link.</p></div>
-    <div class="feature"><h4 data-i18n="console.f5T">Credential-slot editor</h4><p data-i18n="console.f5B">32 runtime slots are editable from Settings; values are write-only and never echoed — output names slots and lengths.</p></div>
+    <div class="feature"><h4 data-i18n="console.f5T">Credential-slot editor</h4><p data-i18n="console.f5B">37 runtime slots are editable from Settings; values are write-only and never echoed — output names slots and lengths.</p></div>
     <div class="feature"><h4 data-i18n="console.f6T">Ops buttons, not a terminal</h4><p data-i18n="console.f6B">Run doctor, restart the chat service and apply an update from the panel; an upgrade banner appears the moment a newer release exists.</p></div>
   </div>
 </section>
@@ -636,6 +636,13 @@
       <a href="https://github.com/aidog-im/aidog" target="_blank" rel="noopener">GitHub</a>
       <span class="footer-dim" data-i18n="footer.aidogim">aidog.im</span>
       <span class="footer-dim visits-wrap" id="visitsWrap" hidden><span data-i18n="footer.views">Page views:</span> <span id="visits"></span></span>
+    </div>
+    <div class="footer-ckx">
+      <a href="https://cryptokey.im/registry" target="_blank" rel="noopener noreferrer" title="CKX Verified integrator">
+        <img src="https://cryptokey.im/badge/ckx-verified.svg" alt="CKX Verified integrator"
+             width="160" height="40" loading="lazy" decoding="async"
+             referrerpolicy="no-referrer" data-i18n-alt="footer.ckx">
+      </a>
     </div>
     <div class="footer-fine">
       <span data-i18n="footer.fine">Grown for one · built for anyone</span>

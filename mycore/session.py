@@ -310,6 +310,188 @@ def _fts_expr(qf: str) -> str | None:
     return " ".join(terms) or None
 
 
+# --------------------------- car 5-D7 item 4: fold-time recall ------------
+# "Recall before re-send" (design §4.2 item 5): when loop.run_turn folds old
+# turns away, ONLY the snippets that match the live task are re-injected as a
+# `[recalled ...]` system marker — the folded turns are not re-sent whole.
+# It reuses the session search's own FTS5 engine, query grammar and BM25
+# ranking (`_fts_norm` / `_fts_expr` vocabulary), but over an IN-MEMORY window
+# of the just-folded messages: no new on-disk index, no new process, no new
+# dependency. Honest degradation is the same ladder as `?q=`: no FTS5 build
+# here -> a casefolded substring pass reported as method "substring"; a task
+# line with nothing indexable -> method "none" and zero hits (never invented).
+RECALL_LIMIT = 3                # snippets re-injected per fold
+RECALL_SNIPPET_CHARS = 240      # per snippet
+RECALL_SNIPPET_LEAD = 80        # context kept before the first hit
+RECALL_MAX_PROBES = 24          # task-line probes sent to the MATCH expression
+_FTS5_RECALL_AVAILABLE = True   # monkeypatch seam: the degradation test flips it
+
+_RECALL_STOP = frozenset({
+    "the", "and", "for", "are", "but", "not", "you", "all", "can", "had",
+    "has", "his", "her", "was", "one", "our", "out", "get", "how", "now",
+    "new", "old", "see", "way", "who", "did", "its", "let", "say", "she",
+    "too", "use", "that", "with", "have", "this", "will", "your", "from",
+    "they", "know", "want", "been", "much", "some", "time", "very",
+    "when", "come", "here", "just", "like", "make", "many", "over",
+    "such", "take", "than", "them", "well", "were", "what", "into"})
+
+
+def _recall_probes(query: str) -> list[str]:
+    """Indexable probes of the LIVE task line: latin/number word runs (>=3
+    chars, stopwords dropped, prefix-matchable) plus no-space-script runs cut
+    into 2-grams — unicode61 cannot tokenize a han/kana/hangul run into words,
+    so an adjacent-token PHRASE is the only form that recalls a Chinese
+    fragment (the same reasoning as `_fts_expr`). De-duplicated, ordered,
+    bounded by RECALL_MAX_PROBES (long runs are thinned on a stride instead of
+    truncated, so a long task line keeps its whole span)."""
+    latin: list[str] = []
+    cjk: list[str] = []
+    seen: set[str] = set()
+    for run in _WORD_RE.findall(str(query).casefold()):
+        for sub in re.findall("[" + _NSS_CLASS + "]+|[^" + _NSS_CLASS + "]+", run):
+            if _NSS_RE.search(sub):
+                grams = [sub[i:i + 2] for i in range(len(sub) - 1)] if len(sub) > 1 else [sub]
+                for g in grams:
+                    if g not in seen:
+                        seen.add(g)
+                        cjk.append(g)
+            elif len(sub) >= 3 and sub not in _RECALL_STOP and sub not in seen:
+                seen.add(sub)
+                latin.append(sub)
+    budget = max(0, RECALL_MAX_PROBES - len(latin))
+    if len(cjk) > budget:
+        step = max(1, -(-len(cjk) // max(1, budget)))   # ceil division
+        cjk = cjk[::step][:budget]
+    return latin + cjk
+
+
+def _recall_expr(probes: list[str]) -> str | None:
+    """FTS5 MATCH expression over `probes`, ORed (a task line matches on ANY
+    of its terms; ANDing would return nothing realistic). Latin terms are
+    PREFIX phrases (`"tok"*`), no-space-script probes are adjacent-token
+    PHRASES over the normalized text. None when there is nothing to match."""
+    parts: list[str] = []
+    for p in probes:
+        if _NSS_RE.search(p):
+            norm = " ".join(_fts_norm(p).split())
+            if norm:
+                parts.append('"%s"' % norm)
+        else:
+            parts.append('"%s"*' % p)
+    return " OR ".join(dict.fromkeys(parts)) or None
+
+
+def _recall_match(texts: list[str], expr: str, limit: int
+                  ) -> dict[int, float] | None:
+    """BM25 over an in-memory FTS5 table: {candidate index: score} (lower =
+    better), or None when FTS5 cannot run in this python — the caller then
+    uses the substring pass. Never raises; the table lives only for this call."""
+    global _FTS5_RECALL_AVAILABLE
+    if not _FTS5_RECALL_AVAILABLE:
+        return None
+    conn = None
+    try:
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE VIRTUAL TABLE recall_fts USING "
+                     "fts5(text, tokenize='unicode61')")
+        conn.executemany("INSERT INTO recall_fts(text) VALUES (?)",
+                         [(_fts_norm(t),) for t in texts])
+        out: dict[int, float] = {}
+        for rowid, score in conn.execute(
+                "SELECT rowid, bm25(recall_fts) FROM recall_fts "
+                "WHERE recall_fts MATCH ? ORDER BY bm25(recall_fts) LIMIT ?",
+                (expr, max(1, int(limit)))):
+            out[int(rowid) - 1] = float(score)
+        return out
+    except sqlite3.OperationalError as e:
+        if "fts5" in str(e).lower():        # no such module -> permanent here
+            _FTS5_RECALL_AVAILABLE = False
+        return None
+    except (sqlite3.Error, OSError, ValueError, TypeError):
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
+def _recall_snippet(text: str, probes: list[str]) -> str:
+    """One bounded excerpt of `text`, centred on the EARLIEST probe hit when it
+    sits past the opening (a 12k-char tool result recalls its relevant line,
+    not its first 240 chars). Whitespace-collapsed, control chars stripped."""
+    flat = " ".join(_CTRL_RE.sub(" ", text).split())
+    if not flat:
+        return ""
+    cf = flat.casefold()
+    best = -1
+    for p in probes:
+        pos = cf.find(p)
+        if pos >= 0 and (best < 0 or pos < best):
+            best = pos
+    start = best - RECALL_SNIPPET_LEAD if best > RECALL_SNIPPET_LEAD else 0
+    cut = flat[start:start + RECALL_SNIPPET_CHARS]
+    more = len(flat) - start > len(cut)
+    return (("…" if start else "") + cut + ("…" if more else ""))
+
+
+def recall_snippets(candidates: list[dict], query: str, *,
+                    limit: int = RECALL_LIMIT) -> dict:
+    """Car 5-D7 item 4 — FTS5 recall over the messages a fold just dropped.
+
+    -> `{method, hits:[{role, text, score}], probes}` where method is
+      * `fts5`      — BM25 ranking from the in-memory FTS5 pass,
+      * `substring` — honest fallback (no FTS5 in this python),
+      * `none`      — empty task line, no candidates or no indexable probe.
+    Never raises: every failure degrades to `none`/`substring` with zero hits
+    rather than breaking the turn. Snippets are bounded (RECALL_* constants)
+    and role-tagged so the model can see WHERE a fact came from."""
+    try:
+        probes = _recall_probes(query)
+        entries: list[tuple[dict, str]] = []
+        for m in candidates:
+            if not isinstance(m, dict):
+                continue
+            txt = _msg_text(m)
+            if txt.strip():
+                entries.append((m, txt))
+    except Exception:  # noqa: BLE001 — recall is an optimisation, never a fault
+        return {"method": "none", "hits": [], "probes": 0}
+    if not probes or not entries:
+        return {"method": "none", "hits": [], "probes": len(probes)}
+    texts = [t for _m, t in entries]
+    expr = _recall_expr(probes)
+    matched: dict[int, float] = {}
+    method = "substring"
+    if expr is not None:
+        got = _recall_match(texts, expr, max(1, limit * 4))
+        if got is not None:
+            matched = got
+            method = "fts5"
+    scored: list[tuple[int, float, int]] = []
+    for i, t in enumerate(texts):
+        cf = t.casefold()
+        sub = sum(1 for p in probes if p in cf)
+        bm = matched.get(i)
+        if sub == 0 and bm is None:
+            continue
+        # rank: most probe evidence first, BM25 breaks ties (lower wins),
+        # then source order — deterministic for identical input
+        scored.append((-(sub + (2 if bm is not None else 0)),
+                       bm if bm is not None else 0.0, i))
+    scored.sort()
+    hits = []
+    for _neg, bm, i in scored[:max(0, int(limit))]:
+        snip = _recall_snippet(texts[i], probes)
+        if snip:
+            hits.append({"role": entries[i][0].get("role", "?"),
+                         "text": snip, "score": round(bm, 3)})
+    if not hits:
+        return {"method": "none", "hits": [], "probes": len(probes)}
+    return {"method": method, "hits": hits, "probes": len(probes)}
+
+
 def _fts_index_path(directory: str | Path) -> Path:
     """`<parent of sessions>/session_search.sqlite3` - never inside the
     sessions directory itself."""

@@ -35,6 +35,12 @@ from mycore.loop import TurnResult  # noqa: E402
 PASS: list[str] = []
 FAIL: list[str] = []
 
+# Car 8 (CKX-P2) zero-echo sentinels: a fake passphrase and a fake payload
+# that must NEVER appear in any result, reason or artifact the code returns.
+PW_SENTINEL = "pw-sentinel-CKX8-7f3a9d"
+PW_WRONG = "wrong-pw-CKX8-4c1e0b"
+PW_PAYLOAD = "payload-sentinel-CKX8-SECRET-DATA"
+
 # Activation car §1.8: model keys may now fall back to the secrets.env slot,
 # so the suite pins that fallback to "" for EVERY leg — a host whose
 # MODEL_API_KEY slot is filled must still run the existing keyless /
@@ -60,7 +66,9 @@ BROWSER_TOOLS = frozenset({
 
 
 def expected_tool_names() -> frozenset[str]:
-    """Core 11 + generate_image (always, car 4c) + community_post (always,
+    """The 11 pre-car-8 tools + backup_run (car 8, always — every gate
+    resolves at call time) + generate_image (always, car 4c) +
+    community_post (always,
     0.5.54 in-app community car — write side answers an honest ERROR without
     the slot, same rationale as generate_image) + the six browser_* tools
     IFF a browser binary is discoverable (car 4b capability-honest
@@ -75,7 +83,7 @@ def expected_tool_names() -> frozenset[str]:
     to a dead path — so every count assertion derives from this, never a
     literal."""
     out = set(CORE_TOOLS) | {"generate_image", "exchange_markets",
-                             "community_post"}
+                             "community_post", "backup_run"}
     try:
         from mycore import browser as _br
         if _br.available():
@@ -3545,6 +3553,400 @@ def test_result_compression() -> None:
     check("cmp: single line unchanged",
           T.finalize_result("one line") == "one line"
           and T.compress_output("one line") == "one line")
+
+
+def test_result_budget_dedupe() -> None:
+    """Car 5-D7 item 1 — per-tool result budgets, line-aware truncation, the
+    env rollback switch, and same-window byte-identical dedupe."""
+    from mycore import tools as T
+
+    # --- per-tool caps: all far below the old single 24000-char ceiling -----
+    check("cap: default cap sits well below the old ceiling",
+          T.DEFAULT_RESULT_CAP <= 8000
+          and T.result_cap("some_mcp_tool") == T.DEFAULT_RESULT_CAP,
+          str(T.DEFAULT_RESULT_CAP))
+    check("cap: every declared cap is positive and under the ceiling",
+          all(0 < v < T.MAX_RESULT_CHARS for v in T.RESULT_CAPS.values()))
+    check("cap: a dense read keeps a bigger budget than a search dump",
+          T.RESULT_CAPS["read_file"] > T.RESULT_CAPS["grep"]
+          and T.result_cap("grep") == T.RESULT_CAPS["grep"])
+    check("cap: small results pass through untouched",
+          T.finalize_result("x" * 100) == "x" * 100)
+
+    # --- env switches: 0 = exact pre-car-5 behaviour, N = operator override --
+    saved = os.environ.pop(T.RESULT_CAP_ENV, None)
+    try:
+        os.environ[T.RESULT_CAP_ENV] = "0"
+        check("cap: env 0 restores the legacy single cap for every tool",
+              all(T.result_cap(n) == T.MAX_RESULT_CHARS
+                  for n in ("read_file", "grep", "mcp_anything")))
+        os.environ[T.RESULT_CAP_ENV] = "512"
+        check("cap: env N overrides every cap",
+              T.result_cap("read_file") == 512
+              and T.result_cap("mcp_anything") == 512)
+        os.environ[T.RESULT_CAP_ENV] = "not-a-number"
+        check("cap: junk env falls back to the per-tool caps",
+              T.result_cap("read_file") == T.RESULT_CAPS["read_file"])
+    finally:
+        os.environ.pop(T.RESULT_CAP_ENV, None)
+        if saved is not None:
+            os.environ[T.RESULT_CAP_ENV] = saved
+
+    # --- line-aware truncation: a cut never leaves half a line -------------
+    body = "".join(f"line number {i} payload {i}\n" for i in range(600))
+    cut = T.finalize_result(body, 3000)
+    head = cut[:cut.rfind("\n... [truncated at")]
+    check("cap: truncation reports the cap and stays bounded",
+          cut.endswith("... [truncated at 3000 chars]") and len(cut) <= 3100,
+          str(len(cut)))
+    check("cap: the cut lands on a whole line",
+          re.fullmatch(r"line number \d+ payload \d+",
+                       head.split("\n")[-1]) is not None, repr(head[-60:]))
+
+    # --- same-window dedupe of a byte-identical result ----------------------
+    reg = T.ToolRegistry()
+    payload = "grep output\n" + "alpha bravo charlie delta echo\n" * 40
+    reg.register("dup_tool", "t", {"type": "object", "properties": {}},
+                 lambda **kw: payload)
+    first = reg.dispatch("dup_tool", {})
+    second = reg.dispatch("dup_tool", {})
+    check("dedupe: the first call still sends the full payload",
+          first == payload and len(payload) > T.DEDUPE_MIN_CHARS)
+    check("dedupe: an identical repeat becomes a short pointer",
+          second.startswith("[duplicate result: byte-identical to output #1")
+          and "from 'dup_tool'" in second and "sha1 " in second
+          and len(second) < 260, str(len(second)))
+    check("dedupe: pointer is stable across repeats",
+          reg.dispatch("dup_tool", {}) == second)
+
+    reg2 = T.ToolRegistry()
+    err = "ERROR: " + "upstream refused the call " * 30
+    reg2.register("err_tool", "t", {"type": "object", "properties": {}},
+                  lambda **kw: err)
+    check("dedupe: an ERROR verdict is never replaced",
+          reg2.dispatch("err_tool", {}) == err
+          and reg2.dispatch("err_tool", {}) == err)
+
+    reg3 = T.ToolRegistry()
+    reg3.register("tiny_tool", "t", {"type": "object", "properties": {}},
+                  lambda **kw: "ok")
+    check("dedupe: short results are never worth a pointer",
+          reg3.dispatch("tiny_tool", {}) == "ok")
+
+    reg4 = T.ToolRegistry()
+    n = {"i": 0}
+
+    def varying(**kw):
+        n["i"] += 1
+        return f"record {n['i']} " + "y" * 600
+
+    reg4.register("vary_tool", "t", {"type": "object", "properties": {}}, varying)
+    for _ in range(T.DEDUPE_MAX_ENTRIES + 1):
+        reg4.dispatch("vary_tool", {})
+    n["i"] = 0
+    replay = reg4.dispatch("vary_tool", {})
+    check("dedupe: the window is bounded (oldest entry evicted)",
+          replay.startswith("record 1 ") and "duplicate result" not in replay,
+          replay[:60])
+
+    # --- a REAL tool held to its own budget ---------------------------------
+    big = Path(tempfile.gettempdir()) / f"aidog_car5_cap_{os.getpid()}.txt"
+    big.write_text("".join(f"{i:04d} " + "z" * 95 + "\n" for i in range(300)),
+                   encoding="utf-8")
+    try:
+        out = build_registry().dispatch("read_file",
+                                        {"path": str(big), "limit": 200})
+        check("cap: a real read_file is held to its per-tool budget",
+              "[truncated at" in out
+              and len(out) <= T.RESULT_CAPS["read_file"] + 300, str(len(out)))
+    finally:
+        big.unlink(missing_ok=True)
+
+
+def test_compact_semantics() -> None:
+    """Car 5-D7 item 2 — a fold may shrink a turn but never lose a constraint:
+    negations, permission edges, unfinished work, provenance and a Chinese
+    constraint line all survive the marker AND the consolidation merge."""
+    import importlib
+    C = importlib.import_module("mycore.compact")   # mycore.compact attribute is the FUNCTION
+
+    sys_m = {"role": "system", "content": "constitution " * 60}
+    old = {"role": "user",
+           "content": ("warm-up filler sentence for the fold. " * 12
+                       + "\nNever push to origin without explicit approval."
+                       + "\nTODO: re-run the publish gate before tagging."
+                       + "\nkeep the raw backup untouched until I say so."
+                       + "\n" + "trailing chatter. " * 20)}
+    zh = {"role": "assistant",
+          "content": "filler. " * 30 + "\n必须保留备份文件，不得删除。"}  # i18n-allow
+
+    m1 = C._fold_turn(old, 1)
+    check("fold: provenance survives (role + source position)",
+          m1["content"].startswith("[compacted user turn #1:"))
+    check("fold: negation survives the snippet cap",
+          "Never push to origin without explicit approval." in m1["content"])
+    check("fold: unfinished work survives",
+          "TODO: re-run the publish gate before tagging." in m1["content"])
+    check("fold: permission edge survives",
+          "keep the raw backup untouched until I say so." in m1["content"])
+    check("fold: the snippet stays the primary content",
+          m1["content"].index("warm-up filler") < m1["content"].index(" | keep: "))
+    m2 = C._fold_turn(zh, 2)
+    check("fold: zh constraint line survives", "不得删除" in m2["content"])  # i18n-allow
+
+    # consolidation: merged markers keep every constraint clause verbatim
+    fill = [{"role": "user", "content": f"filler {i} " + "p" * 80}
+            for i in range(8)]
+    msgs = [sys_m, m1, m2] + fill
+    out, n = C.compact(msgs, 600)
+    merged = [x for x in out
+              if isinstance(x.get("content"), str)
+              and x["content"].startswith("[compacted ")]
+    check("fold: consolidation merged the markers",
+          n >= 3 and len(merged) >= 1, str(n))
+    joined = " ".join(x["content"] for x in merged)
+    check("fold: merged marker keeps every constraint",
+          "Never push to origin" in joined
+          and "TODO: re-run the publish gate" in joined
+          and "不得删除" in joined)   # i18n-allow
+    check("fold: merged marker carries the keep label",
+          any("keep:" in x["content"] for x in merged))
+    check("fold: system constitution untouched by the fold",
+          out[0]["content"] == sys_m["content"])
+
+
+def test_token_fold() -> None:
+    """Car 5-D7 item 2 — the token-denominated trigger fires ONLY on a real
+    chars->tokens ratio observed from this turn's own usage.prompt_tokens, is
+    labelled as an estimate, and switches off completely with budget_tokens=0."""
+    import importlib
+    C = importlib.import_module("mycore.compact")   # mycore.compact attribute is the FUNCTION
+
+    class UsageChat:
+        """Scripted chat whose `usage` is derived from the payload it received
+        (prompt = 100 + slope*chars), so the loop can calibrate a REAL slope
+        from consecutive observations — exactly what a provider reports."""
+
+        def __init__(self, script, slope=0.9, report=True):
+            self.script = list(script)
+            self.slope = slope
+            self.report = report
+            self.seen: list[list[dict]] = []
+            self.calls = 0
+
+        def chat(self, messages, tools=None, **kw):
+            self.calls += 1
+            self.seen.append([dict(m) for m in messages])
+            if not self.script:
+                raise AssertionError("script exhausted")
+            doc = self.script.pop(0)
+            if self.report:
+                doc["usage"] = {
+                    "prompt_tokens": 100 + int(measure(messages) * self.slope),
+                    "completion_tokens": 5}
+            return doc
+
+    def mkscript():
+        return [fake_response(calls=[("car5_probe", {})]),
+                fake_response(calls=[("car5_probe", {})]),
+                fake_response(text="done")]
+
+    def build():
+        return ([{"role": "system", "content": "S" * 1000}]
+                + [{"role": "user", "content": f"old {i} " + "p" * 90}
+                   for i in range(6)]
+                + [{"role": "user", "content": "task at hand"}])
+
+    def probe_registry(sizes):
+        reg = build_registry()
+        reg.register("car5_probe", "t", {"type": "object", "properties": {}},
+                     lambda **kw: "T" * next(sizes))
+        return reg
+
+    # --- calibrated run: the token rule fires, honestly labelled ------------
+    chat = UsageChat(mkscript(), slope=0.9)
+    msgs = build()
+    events: list[tuple[str, dict]] = []
+    res = run_turn(msgs, chat.chat, probe_registry(iter([1000, 2500])),
+                   budget_chars=8000,
+                   on_event=lambda k, d: events.append((k, d)))
+    comp = [d for k, d in events if k == "compact"]
+    check("tok: turn ends honestly with tools in play", res.stop == "final")
+    check("tok: token-denominated fold fired (chars still under budget)",
+          comp and comp[0].get("by") == "tokens", str(comp))
+    check("tok: the event carries the measured ratio and its estimate",
+          comp and isinstance(comp[0].get("est_tokens"), int)
+          and isinstance(comp[0].get("ratio"), float)
+          and abs(comp[0]["ratio"] - 0.9) < 0.05, str(comp))
+    check("tok: fold budget is tighter than the char budget at this ratio",
+          comp and 0 < comp[0].get("budget_chars", 0) < 8000, str(comp))
+    check("tok: the estimate really exceeded the token budget",
+          comp and comp[0]["est_tokens"] > 8000 // 4, str(comp))
+    check("tok: folded something", comp and comp[0].get("folded", 0) > 0)
+    check("tok: system stack survives the token fold",
+          msgs[0]["content"] == "S" * 1000)
+
+    # --- control A: no usage -> no calibration -> today's char rule only -----
+    chatA = UsageChat(mkscript(), report=False)
+    msgsA = build()
+    evA: list[tuple[str, dict]] = []
+    run_turn(msgsA, chatA.chat, probe_registry(iter([1000, 2500])),
+             budget_chars=8000, on_event=lambda k, d: evA.append((k, d)))
+    check("tok: uncalibrated turn folds exactly as before (chars only)",
+          not any(k == "compact" for k, _ in evA), str([k for k, _ in evA]))
+
+    # --- control B: budget_tokens=0 is a full rollback -----------------------
+    chatB = UsageChat(mkscript(), slope=0.9)
+    msgsB = build()
+    evB: list[tuple[str, dict]] = []
+    run_turn(msgsB, chatB.chat, probe_registry(iter([1000, 2500])),
+             budget_chars=8000, budget_tokens=0,
+             on_event=lambda k, d: evB.append((k, d)))
+    check("tok: budget_tokens=0 switches the token rule off even when measured",
+          not any(k == "compact" for k, _ in evB), str([k for k, _ in evB]))
+
+    check("tok: estimate helpers agree with the default ratio",
+          C.estimate_tokens([{"role": "user", "content": "x" * 1000}]) == 250
+          and C.chars_for_tokens(2000, 0.5) == 4001)
+
+
+def test_recall() -> None:
+    """Car 5-D7 item 4 — after a fold, only the FTS5-hit snippets of the folded
+    turns come back, as ONE system marker the model really receives and the
+    session file never sees."""
+    from mycore.loop import RECALL_MARKER, _recall_into
+
+    stack = {"role": "system", "content": "constitution " * 60}
+    needle = {"role": "assistant",
+              "content": "found it: the auth token leak sits in gateway.log line 42; "
+                         "do NOT retry the rotation without the backup key"}
+    fill = [{"role": "user" if i % 2 == 0 else "assistant",
+             "content": f"chatter {i} " + "padding words here " * 6}
+            for i in range(9)]
+    task = {"role": "user",
+            "content": "recheck the auth token leak before the release"}
+
+    def markers(msgs):
+        return [m for m in msgs
+                if isinstance(m.get("content"), str)
+                and m["content"].startswith(RECALL_MARKER)]
+
+    # --- unit: marker build, position, replacement, removal -----------------
+    msgs = [stack, needle] + fill + [task]
+    _recall_into(msgs, [needle])
+    mk = markers(msgs)
+    check("recall: exactly one system marker, never stacked", len(mk) == 1)
+    check("recall: marker names the source role and the surviving fact",
+          bool(mk) and mk[0]["role"] == "system"
+          and "(assistant)" in mk[0]["content"]
+          and "gateway.log" in mk[0]["content"], str(mk)[:200])
+    check("recall: marker sits after the stable system block",
+          msgs[0] is stack and msgs.index(mk[0]) >= 1)
+    _recall_into(msgs, [needle])
+    check("recall: a second fold REPLACES the marker", len(markers(msgs)) == 1)
+    _recall_into(msgs, [{"role": "user", "content": "unrelated weather chatter"}])
+    check("recall: nothing relevant -> marker dropped, no idle token",
+          markers(msgs) == [])
+
+    # --- end-to-end: the fold happens and the MODEL sees the snippet --------
+    msgs2 = [stack, needle] + fill + [task]
+    chat = ScriptedChat([fake_response(text="checking")])
+    events: list[tuple[str, dict]] = []
+    run_turn(msgs2, chat.chat, build_registry(), budget_chars=1500,
+             on_event=lambda k, d: events.append((k, d)))
+    check("recall: a fold actually happened in this turn",
+          any(k == "compact" for k, _ in events))
+    seen = [m for m in chat.seen[-1]
+            if isinstance(m.get("content"), str)
+            and m["content"].startswith(RECALL_MARKER)]
+    check("recall: the MODEL payload carries the recalled snippet",
+          len(seen) == 1 and "gateway.log" in seen[0]["content"], str(len(seen)))
+    persisted = [m for m in msgs2 if m.get("role") != "system"]
+    check("recall: the marker never enters the persistable delta",
+          not any(isinstance(m.get("content"), str)
+                  and m["content"].startswith(RECALL_MARKER)
+                  for m in persisted))
+
+
+def test_stable_prefix() -> None:
+    """Car 5-D7 item 3 — the prompt-cache premise: byte-stable system prefix,
+    deterministic (sorted, byte-identical) tool schema, dynamic slots between
+    the stable head and the stable tail hint, a measured cache hit ratio, and
+    still no cache directive of ours anywhere on the wire (observe only)."""
+    from mycore.assembly import build_system_stack, stack_digest
+    from mycore import meter as mtr
+
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        cons = tdp / "SOUL.md"
+        cons.write_text("# stable constitution\n" + "clause\n" * 40,
+                        encoding="utf-8")
+        mem = tdp / "MEMORY_curated.md"
+        mem.write_text("curated memory fact\n", encoding="utf-8")
+        learned = tdp / "EVOLUTION_learned.md"
+        learned.write_text("learned lesson\n", encoding="utf-8")
+        proj = tdp / "proj"
+        proj.mkdir()
+        (proj / "AGENTS.md").write_text("project rules\n", encoding="utf-8")
+        kw = dict(constitution_path=cons, memory_paths=(mem,),
+                  learned_path=learned, context_dirs=(proj,))
+        s1 = build_system_stack(**kw)
+        s2 = build_system_stack(**kw)
+        check("prefix: identical body inputs -> byte-identical stack",
+              json.dumps(s1, ensure_ascii=False) == json.dumps(s2, ensure_ascii=False))
+        check("prefix: digest agrees across builds",
+              stack_digest(s1) == stack_digest(s2))
+        check("prefix: stable head, dynamic middle, stable hint last",
+              len(s1) == 5
+              and "stable constitution" in s1[0]["content"]
+              and "curated memory fact" in s1[1]["content"]
+              and "learned lesson" in s1[2]["content"]
+              and "project rules" in s1[3]["content"]
+              and "skill_route" in s1[4]["content"])
+        check("prefix: the dynamic block stays in one place",
+              json.dumps(s1[1:4], ensure_ascii=False)
+              == json.dumps(build_system_stack(**kw)[1:4], ensure_ascii=False))
+
+    # tool schema: name-sorted, and byte-identical across rebuilds
+    sch1 = build_registry().schema()
+    sch2 = build_registry().schema()
+    names = [t["function"]["name"] for t in sch1]
+    check("prefix: tool schema is name-sorted (deterministic order)",
+          names == sorted(names) and len(names) == len(set(names)))
+    check("prefix: tool schema bytes never drift between rebuilds",
+          json.dumps(sch1, sort_keys=False) == json.dumps(sch2, sort_keys=False))
+
+    # measurement-only stance: no cache directive of ours on the wire
+    src = ((REPO / "mycore" / "model.py").read_text(encoding="utf-8")
+           + (REPO / "mycore" / "decision.py").read_text(encoding="utf-8"))
+    check("prefix: no cache directive is ever sent (observe only)",
+          '"cache_control"' not in src and '"prompt_cache"' not in src)
+
+    # meter: the hit-rate FACT, aggregated and honest about missing counts
+    mtr.deactivate()
+    with tempfile.TemporaryDirectory() as td1:
+        mtr.activate(td1)
+        try:
+            mtr.record("http://a/v1", "m", ok=True, in_tok=100, out_tok=10, cached=80)
+            mtr.record("http://a/v1", "m", ok=True, in_tok=50, out_tok=5, cached=10)
+            mtr.record("http://a/v1", "m", ok=True)      # honest no-usage row
+            doc = mtr.read(days=1)
+            check("prefix: meter aggregates a measured cache hit ratio",
+                  doc.get("cached_ratio") == 0.6
+                  and doc.get("cached") == 90 and doc.get("in_tokens") == 150,
+                  str(doc.get("cached_ratio")))
+        finally:
+            mtr.deactivate()
+    with tempfile.TemporaryDirectory() as td2:
+        mtr.activate(td2)
+        try:
+            mtr.record("http://a/v1", "m", ok=True)      # nothing reported
+            doc2 = mtr.read(days=1)
+            check("prefix: no reported input count -> ratio stays null",
+                  doc2.get("cached_ratio") is None
+                  and doc2.get("in_tokens") == 0, str(doc2.get("cached_ratio")))
+        finally:
+            mtr.deactivate()
 
 
 def test_execute_code() -> None:
@@ -8800,15 +9202,16 @@ def test_tools_toggle() -> None:
 
     saved_env = os.environ.get("MYCORE_TOOLS_OFF")
     try:
-        # catalog sanity: 11 core + generate_image + connector_search
-        # + 6 browser + 3 exchange_* (W1) + 3 exchange_* (W2 approval gate)
+        # catalog sanity: 11 core + backup_run (car 8) + generate_image
+        # + connector_search + 6 browser + 3 exchange_* (W1) + 3 exchange_* (W2)
         check("tools_off: KNOWN_TOOL_NAMES covers core + conditional",
               {"read_file", "run_bash", "cron", "delegate", "execute_code",
+               "backup_run",
                "generate_image", "connector_search", "browser_open",
                "browser_close", "exchange_markets", "exchange_portfolio",
                "exchange_orders", "exchange_prepare_order",
                "exchange_execute_order", "exchange_plans"} <= KNOWN_TOOL_NAMES
-              and len(KNOWN_TOOL_NAMES) == 26,
+              and len(KNOWN_TOOL_NAMES) == 27,
               str(sorted(KNOWN_TOOL_NAMES)))
 
         # 1) settings dict path disables a core tool
@@ -13671,6 +14074,1581 @@ def test_sniff() -> None:
 
 
 
+def test_decision() -> None:
+    """Car 4 (owner ruling D6) — mycore.decision: the Jev SystemOne client
+    plus its four purpose wrappers. Injected transport everywhere (zero
+    network, zero credentials): every malformed ask is refused LOCALLY before
+    a request exists, only 429/502/transport retry ONCE under the SAME
+    Idempotency-Key, 401/402/422 never retry, the key and the state never
+    reach an error message or a counter, and each wrapper either returns its
+    shaped answer or raises the reason WORD that lets the caller keep
+    today's behavior ("no fast path", never a guess)."""
+    from mycore import decision as deci
+
+    SENTINEL = "sk-DECISION-SENTINEL-0123456789abcdef"
+    ON = {"mycore": {"decision": {"enabled": True, "url": "",
+                                    "model": "", "router_model": ""}}}
+    OFF = {"mycore": {"decision": {"enabled": False}}}
+    saved_key = os.environ.get("DECISION_API_KEY")
+    seen: dict = {"n": 0, "calls": []}
+    script: dict = {"fn": None}
+
+    def fake(url, method, headers, payload, timeout):
+        seen["n"] += 1
+        body = None
+        if isinstance(payload, (bytes, bytearray)):
+            try:
+                body = json.loads(payload.decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                body = None
+        seen["calls"].append({"url": url, "method": method,
+                              "headers": dict(headers), "body": body})
+        fn = script["fn"]
+        if fn is None:
+            raise AssertionError("no scripted response")
+        return fn()
+
+    def answer(answers, tokens=42):
+        return 200, json.dumps({"model": "jev-latest", "answers": answers,
+                                "usage": {"input_tokens": tokens,
+                                          "output_tokens": 0}})
+
+    def fail(status, etype="invalid_request_error", message="quoted request"):
+        return status, json.dumps({"error": {"type": etype, "message": message}})
+
+    def raises(fn, want: str) -> str:
+        try:
+            fn()
+        except deci.DecisionError as e:
+            return "" if e.reason == want else f"reason={e.reason!r} want={want!r}"
+        return "no DecisionError"
+
+    def refuses(fn, want: str) -> bool:
+        """Boolean form of raises(): True only when the reason WORD matched."""
+        return raises(fn, want) == ""
+
+    deci.reset_for_tests()
+    try:
+        # ---------------------------------------------------- config gates --
+        c = deci.config({})
+        check("decision: defaults are off and stock (url/model)",
+              c["active"] is False and c["reason"] == "disabled"
+              and c["url"] == deci.DEFAULT_BASE
+              and c["model"] == deci.DEFAULT_MODEL
+              and c["router_model"] == "", str(c))
+        os.environ.pop("DECISION_API_KEY", None)
+        c = deci.config(ON)
+        check("decision: enabled without a key -> reason no_key, not active",
+              c["active"] is False and c["reason"] == "no_key", str(c))
+        os.environ["DECISION_API_KEY"] = SENTINEL
+        c = deci.config(ON)
+        check("decision: enabled + key -> active (key_set is presence only)",
+              c["active"] is True and c["reason"] == ""
+              and c["key_set"] is True, str(c))
+        check("decision: config never serializes the key", SENTINEL not in str(c))
+        c = deci.config({"mycore": {"decision": {
+            "enabled": True, "url": "ftp://evil.example", "model": "<bad>",
+            "router_model": "no spaces"}}})
+        check("decision: unusable url/model/router collapse to safe defaults",
+              c["url"] == deci.DEFAULT_BASE and c["model"] == deci.DEFAULT_MODEL
+              and c["router_model"] == "" and c["active"] is False, str(c))
+        check("decision: an endpoint row may pin a stock base url",
+              deci.config({"mycore": {"decision": {"enabled": True,
+              "url": "https://decide.example/v1/"}}})["url"]
+              == "https://decide.example/v1")
+
+        # --------------------------------------------- local validation ----
+        deci.set_transport(fake)
+        q8 = {f"q{i}": {"type": "noul", "instructions": "yes?"}
+              for i in range(9)}
+        check("decision: 9 questions refused locally",
+              refuses(lambda: deci.ask("s", q8, settings=ON), "bad_request"))
+        check("decision: bad question name refused",
+              refuses(lambda: deci.ask("s", {"not a name!": {
+                  "type": "noul", "instructions": "x"}}, settings=ON),
+                     "bad_request"))
+        check("decision: unknown question type refused",
+              refuses(lambda: deci.ask("s", {"q": {"type": "box",
+                  "instructions": "x"}}, settings=ON), "bad_request"))
+        check("decision: missing instructions refused",
+              refuses(lambda: deci.ask("s", {"q": {"type": "noul"}},
+                                      settings=ON), "bad_request"))
+        check("decision: unknown question field refused",
+              refuses(lambda: deci.ask("s", {"q": {"type": "noul",
+                  "instructions": "x", "extra": 1}}, settings=ON),
+                     "bad_request"))
+        check("decision: a one-option choice refused (needs 2-20)",
+              refuses(lambda: deci.ask("s", {"q": {"type": "choice",
+                  "instructions": "x", "criteria": {"a": "only"}}},
+                  settings=ON), "bad_request"))
+        check("decision: a one-level score refused (needs 2-10)",
+              refuses(lambda: deci.ask("s", {"q": {"type": "score",
+                  "instructions": "x", "criteria": ["only"]}},
+                  settings=ON), "bad_request"))
+        check("decision: empty state refused",
+              refuses(lambda: deci.ask("   ", {"q": {"type": "noul",
+                  "instructions": "x"}}, settings=ON), "bad_request"))
+        check("decision: state over 1,000,000 chars refused",
+              refuses(lambda: deci.ask("x" * 1_000_001, {"q": {
+                  "type": "noul", "instructions": "x"}}, settings=ON),
+                     "bad_request"))
+        check("decision: questions must be a non-empty object",
+              refuses(lambda: deci.ask("s", {}, settings=ON), "bad_request")
+              and refuses(lambda: deci.ask("s", [], settings=ON), "bad_request"))
+        check("decision: a disabled client refuses before any network I/O",
+              refuses(lambda: deci.ask("s", {"q": {"type": "noul",
+                  "instructions": "x"}}, settings=OFF), "disabled"))
+        os.environ.pop("DECISION_API_KEY", None)
+        check("decision: enabled without a key refuses before any network I/O",
+              refuses(lambda: deci.ask("s", {"q": {"type": "noul",
+                  "instructions": "x"}}, settings=ON), "no_key"))
+        os.environ["DECISION_API_KEY"] = SENTINEL
+        check("decision: every local refusal kept the transport untouched",
+              seen["n"] == 0, str(seen["n"]))
+
+        # ------------------------------------------------- success path ----
+        seen.update(n=0, calls=[])
+        script["fn"] = lambda: answer({"tab": {"type": "choice",
+            "choice": "finance", "probabilities": {"finance": 0.9},
+            "confidence": 0.9}}, tokens=57)
+        doc = deci.ask("a short state", {"tab": {"type": "choice",
+                       "instructions": "where?",
+                       "criteria": {"finance": "money", "home": "house",
+                                    "vehicle": "car"}}}, settings=ON,
+                       idem_key="fixed-key-1")
+        check("decision: 200 -> answers + usage parsed",
+              doc["answers"]["tab"]["choice"] == "finance"
+              and doc["usage"]["input_tokens"] == 57, str(doc))
+        first = seen["calls"][0]
+        check("decision: one request, POST, stock model on the wire",
+              seen["n"] == 1 and first["method"] == "POST"
+              and first["url"].endswith(deci.API_PATH)
+              and first["body"].get("model") == deci.DEFAULT_MODEL,
+              str({"n": seen["n"], "method": first["method"]}))
+        check("decision: key rides ONLY the Authorization header",
+              first["headers"].get("Authorization") == f"Bearer {SENTINEL}"
+              and SENTINEL not in json.dumps(first["body"]), "key leaked")
+        check("decision: the caller's Idempotency-Key rides the request",
+              first["headers"].get("Idempotency-Key") == "fixed-key-1")
+        st = deci.stats()
+        check("decision: counters are counts/tokens only (zero content)",
+              set(st) == {"asked", "ok", "fail", "tokens_in", "questions"}
+              and st["ok"] == 1 and st["tokens_in"] == 57
+              and st["questions"] == 1, str(st))
+        # the STATE SOFT CAP is the wrappers' frugality rule (billing counts
+        # the state once per question); ask() itself stays faithful to the API
+        # and only enforces the 1,000,000-char ceiling.
+        seen.update(n=0, calls=[])
+        script["fn"] = lambda: answer({"within_limits": {"type": "noul",
+            "noul": True}, "risk": {"type": "score", "score": 1.0,
+            "confidence": 0.9}})
+        deci.plan_guard({"blob": "y" * 9000}, settings=ON)
+        check("decision 2: a fat facts object is capped before the wire",
+              len(seen["calls"][-1]["body"]["state"]) <= deci.STATE_SOFT_CAP + 32,
+              str(len(seen["calls"][-1]["body"]["state"])))
+
+        # ------------------------------------------ failure + retry ladder --
+        for status, etype, want, calls in ((401, "authentication_error", "auth", 1),
+                                           (402, "insufficient_credits", "credits", 1),
+                                           (422, "invalid_request_error", "invalid", 1),
+                                           (429, "rate_limit_error", "rate", 2),
+                                           (502, "upstream_error", "upstream", 2)):
+            seen.update(n=0, calls=[])
+            script["fn"] = (lambda s=status, t=etype: (lambda: fail(s, t)))()
+            msg = raises(lambda: deci.ask("state", {"q": {"type": "noul",
+                          "instructions": "x"}}, settings=ON), want)
+            check(f"decision: HTTP {status} -> reason {want}", msg == "",
+                  msg or f"calls={seen['n']}")
+            check(f"decision: HTTP {status} -> {calls} attempt(s), no key/state echo",
+                  seen["n"] == calls and SENTINEL not in msg,
+                  f"calls={seen['n']} msg={msg}")
+            if calls == 2:
+                keys = [c["headers"].get("Idempotency-Key")
+                        for c in seen["calls"]]
+                check(f"decision: HTTP {status} retry reuses the SAME Idempotency-Key",
+                      bool(keys[0]) and keys[0] == keys[1], str(keys))
+        seen.update(n=0, calls=[])
+        def _raise():
+            raise OSError("connection refused to https://secret-host")
+        script["fn"] = _raise
+        msg = raises(lambda: deci.ask("state", {"q": {"type": "noul",
+                      "instructions": "x"}}, settings=ON), "unreachable")
+        check("decision: a transport failure is unreachable, retried once",
+              msg == "" and seen["n"] == 2, f"msg={msg} n={seen['n']}")
+        check("decision: a transport exception text never reaches the caller",
+              "secret-host" not in str(msg), str(msg))
+        # a server body that QUOTES OUR REQUEST BACK must not travel further:
+        # classification reads error.type only, never error.message.
+        seen.update(n=0, calls=[])
+        script["fn"] = lambda: fail(401, "authentication_error",
+                                    "echo: a short state with secrets")
+        err = ""
+        try:
+            deci.ask("a short state with secrets", {"q": {"type": "noul",
+                      "instructions": "x"}}, settings=ON)
+        except deci.DecisionError as e:
+            err = repr(e)
+        check("decision: a 401 body message is never echoed to the caller",
+              err.startswith("DecisionError('auth")
+              and "secrets" not in err and "echo" not in err, err)
+
+        # ---------------------------------------------- purpose wrappers ---
+        seen.update(n=0, calls=[])
+        script["fn"] = lambda: answer({"tab": {"type": "choice",
+            "choice": "home", "probabilities": {"home": 0.8},
+            "confidence": 0.8}})
+        got = deci.route_intent("the kitchen light is stuck on", settings=ON)
+        check("decision 1: intent route returns the tab + confidence",
+              got == {"tab": "home", "confidence": 0.8,
+                      "source": "decision"}, str(got))
+        check("decision 1: the state carries the operator's bounded text only",
+              seen["calls"][-1]["body"]["state"].startswith('{"request":'),
+              str(seen["calls"][-1]["body"]["state"])[:40])
+        script["fn"] = lambda: answer({"tab": {"type": "choice",
+            "choice": "billing", "confidence": 0.5}})
+        check("decision 1: an answer outside the option set is upstream",
+              refuses(lambda: deci.route_intent("x", settings=ON), "upstream"))
+        check("decision 1: empty text is bad_request with no request",
+              refuses(lambda: deci.route_intent("  ", settings=ON), "bad_request"))
+        check("decision 1: a disabled client propagates its reason WORD",
+              refuses(lambda: deci.route_intent("x", settings=OFF), "disabled"))
+
+        script["fn"] = lambda: answer({"within_limits": {"type": "noul",
+            "noul": False}, "risk": {"type": "score", "score": 8.0,
+            "confidence": 0.91}})
+        got = deci.plan_guard({"venue": "okx", "notional_usd": 40.0},
+                              settings=ON)
+        check("decision 2: guard returns within_limits + risk + confidence",
+              got["within_limits"] is False and got["risk"] == 8.0
+              and abs(got["confidence"] - 0.91) < 1e-9, str(got))
+        script["fn"] = lambda: answer({"risk": {"type": "score",
+            "score": 2.0, "confidence": 0.7}})
+        got = deci.plan_guard({"venue": "okx"}, settings=ON)
+        check("decision 2: a missing noul answer defaults to within_limits",
+              got["within_limits"] is True and got["risk"] == 2.0, str(got))
+        check("decision 2: empty facts are bad_request",
+              refuses(lambda: deci.plan_guard({}, settings=ON), "bad_request"))
+
+        rows = [{"signature": "a", "summary": "door open", "source": "home",
+                 "severity": "info"},
+                {"signature": "b", "summary": "freezer warm", "source": "home",
+                 "severity": "warn"},
+                {"signature": "c", "summary": "update available",
+                 "source": "web", "severity": "info"}]
+        script["fn"] = lambda: answer({"f0": {"type": "choice",
+            "choice": "noise", "probabilities": {"urgent": 0.1,
+                "notable": 0.2, "noise": 0.7}, "confidence": 0.7},
+            "f1": {"type": "choice", "choice": "urgent",
+                "probabilities": {"urgent": 0.9, "notable": 0.05,
+                    "noise": 0.05}, "confidence": 0.9},
+            "f2": {"type": "choice", "choice": "notable",
+                "probabilities": {"urgent": 0.2, "notable": 0.7,
+                    "noise": 0.1}, "confidence": 0.7}})
+        got = deci.triage(rows, settings=ON)
+        check("decision 3: triage answers per signature with a rank",
+              set(got) == {"a", "b", "c"}
+              and got["b"]["verdict"] == "urgent"
+              and got["b"]["rank"] > got["c"]["rank"] > got["a"]["rank"],
+              str({k: v["rank"] for k, v in got.items()}))
+        many = [{"signature": f"s{i}", "summary": f"row {i}",
+                 "source": "home", "severity": "info"} for i in range(12)]
+        seen.update(n=0, calls=[])
+        script["fn"] = lambda: answer({f"f{i}": {"type": "choice",
+            "choice": "noise", "confidence": 0.5} for i in range(8)})
+        deci.triage(many, settings=ON)
+        check("decision 3: at most 8 findings ride one request (API cap)",
+              len(seen["calls"][-1]["body"]["questions"]) == deci.MAX_QUESTIONS,
+              str(len(seen["calls"][-1]["body"]["questions"])))
+        check("decision 3: triage state carries only the minimal row fields",
+              set(json.loads(seen["calls"][-1]["body"]["state"])[0])
+              == {"severity", "source", "summary", "rule"},
+              str(list(json.loads(seen["calls"][-1]["body"]["state"])[0])))
+
+        script["fn"] = lambda: answer({"model": {"type": "choice",
+            "choice": "cheap", "probabilities": {"cheap": 0.9},
+            "confidence": 0.88}})
+        check("decision 4: a confident cheap choice routes the request",
+              deci.route_model("main-model", "cheap-model", {"chars": 80},
+                               settings=ON) == "cheap-model", "not routed")
+        script["fn"] = lambda: answer({"model": {"type": "choice",
+            "choice": "cheap", "probabilities": {"cheap": 0.55},
+            "confidence": 0.42}})
+        check("decision 4: weak calibration falls back to the main model",
+              deci.route_model("main-model", "cheap-model", {},
+                               settings=ON) is None, "routed anyway")
+        script["fn"] = lambda: answer({"model": {"type": "choice",
+            "choice": "main", "probabilities": {"main": 0.95},
+            "confidence": 0.95}})
+        check("decision 4: Jev choosing main keeps the configured model",
+              deci.route_model("main-model", "cheap-model", {},
+                               settings=ON) is None, "routed anyway")
+        check("decision 4: a missing/distinct cheap model is bad_request",
+              refuses(lambda: deci.route_model("m", "m", {}, settings=ON),
+                     "bad_request")
+              and refuses(lambda: deci.route_model("m", "", {}, settings=ON),
+                         "bad_request"))
+        # the key appears in exactly ONE place on the wire (checked above) and
+        # never in a raised message: force one authenticated failure and grep it.
+        script["fn"] = lambda: fail(401, "authentication_error", "bad key")
+        key_err = ""
+        try:
+            deci.ask("state", {"q": {"type": "noul", "instructions": "x"}},
+                     settings=ON)
+        except deci.DecisionError as e:
+            key_err = repr(e)
+        check("decision: the key never appears in a raised message",
+              SENTINEL not in key_err and key_err.startswith("DecisionError('auth"),
+              key_err)
+    finally:
+        deci.reset_for_tests()
+        if saved_key is None:
+            os.environ.pop("DECISION_API_KEY", None)
+        else:
+            os.environ["DECISION_API_KEY"] = saved_key
+
+
+def test_decision_wiring() -> None:
+    """Car 4 (D6) — the four call sites ON the real modules, with the decision
+    client pinned ON through its test seam (web/settings.json is never
+    touched) and an injected transport. Asserts the two directions that
+    matter: (a) with the client OFF every module behaves exactly as before —
+    oldest-first delivery, threshold auto-approval, configured model; (b) with
+    it ON the decision may only REORDER delivery, REMOVE an auto approval or
+    SWAP to the cheap model — it can never approve, never drop a row, never
+    move a model on weak calibration, and a refusal degrades to (a)."""
+    from mycore import decision as deci
+    from mycore import exchanges as ex
+    from mycore import sniff as sn
+
+    KEY = "sk-DECISION-WIRING-SENTINEL-0123456789"
+    ON = {"mycore": {"decision": {"enabled": True, "url": "",
+                                   "model": "", "router_model": "cheap-model"}}}
+    OFF = {"mycore": {"decision": {"enabled": False}}}
+    saved_key = os.environ.get("DECISION_API_KEY")
+    saved_thresholds = ex.thresholds
+    saved_slot = ex._slot
+    answer = {"fn": None}
+    calls = {"n": 0}
+
+    def fake(url, method, headers, payload, timeout):
+        calls["n"] += 1
+        return answer["fn"]()
+
+    def clear():
+        answer["fn"] = lambda: (
+            200, json.dumps({"model": "jev-latest",
+                             "answers": {"within_limits": {"type": "noul",
+                                                           "noul": True},
+                                         "risk": {"type": "score", "score": 1.0,
+                                                  "confidence": 0.9}},
+                             "usage": {"input_tokens": 30,
+                                       "output_tokens": 0}}))
+
+    def adverse():
+        answer["fn"] = lambda: (
+            200, json.dumps({"model": "jev-latest",
+                             "answers": {"within_limits": {"type": "noul",
+                                                           "noul": False},
+                                         "risk": {"type": "score", "score": 4.0,
+                                                  "confidence": 0.95}},
+                             "usage": {"input_tokens": 30,
+                                       "output_tokens": 0}}))
+
+    def down():
+        answer["fn"] = lambda: (401, json.dumps(
+            {"error": {"type": "authentication_error", "message": "x"}}))
+
+    book = {"bids": [["99.0", "1"]], "asks": [["100.0", "1"], ["101.0", "10"]]}
+
+    def venue_transport(url, method, headers, payload, timeout):
+        if "/api/v5/market/books" in url:
+            return json.dumps({"code": "0", "data": [book]})
+        if "/api/v5/account/trade-fee" in url:
+            return json.dumps({"code": "0",
+                               "data": [{"takerFeeRate": "0.001"}]})
+        raise AssertionError(f"unexpected url {url}")
+
+    def rows_for():
+        out = []
+        for i, (sig, summary, seen_at) in enumerate((
+                ("sig-old", "door left open", 100.0),
+                ("sig-new", "freezer warm", 200.0),
+                ("sig-mid", "update available", 150.0))):
+            out.append({"signature": sig, "rule": "r1", "source": "home",
+                        "severity": "info", "summary": summary,
+                        "trigger": summary, "first_seen": seen_at,
+                        "delivered": False, "count": 1})
+        return out
+
+    dcfg = {"rules": [{"id": "r1", "speak": True}], "quiet_hours": "",
+            "digest_cap": 1}
+    deci.reset_for_tests()
+    try:
+        os.environ["DECISION_API_KEY"] = KEY
+        deci.set_transport(fake)
+
+        # -------------------------------------------- 3: SNIFF triage order --
+        deci.set_settings_for_tests(OFF)
+        base = sn.delivery_take(dcfg, now=1000.0, findings=rows_for())
+        check("wiring 3: decision OFF speaks the oldest finding (today's rule)",
+              base["count"] == 1 and "door left open" in base["lines"][0],
+              str(base["lines"]))
+        deci.set_settings_for_tests(ON)
+        # delivery_take sorts the pool OLDEST-FIRST before triage, so the
+        # question index maps f0=door(100) f1=update(150) f2=freezer(200).
+        answer["fn"] = lambda: (
+            200, json.dumps({"model": "jev-latest", "answers": {
+                "f0": {"type": "choice", "choice": "noise",
+                       "probabilities": {"urgent": 0.05, "notable": 0.15,
+                                         "noise": 0.8}, "confidence": 0.8},
+                "f1": {"type": "choice", "choice": "notable",
+                       "probabilities": {"urgent": 0.3, "notable": 0.6,
+                                         "noise": 0.1}, "confidence": 0.7},
+                "f2": {"type": "choice", "choice": "urgent",
+                       "probabilities": {"urgent": 0.9, "notable": 0.05,
+                                         "noise": 0.05}, "confidence": 0.9}},
+                "usage": {"input_tokens": 40, "output_tokens": 0}}))
+        triaged = sn.delivery_take(dcfg, now=1000.0, findings=rows_for())
+        check("wiring 3: triage promotes the urgent row into a cap-1 batch",
+              triaged["count"] == 1 and "freezer warm" in triaged["lines"][0],
+              str(triaged["lines"]))
+        pool = rows_for()
+        sn.delivery_take(dcfg, now=1000.0, findings=pool)
+        check("wiring 3: triage never drops a row (same set, marks intact)",
+              len(pool) == 3 and [r["delivered"] for r in pool].count(True) == 1,
+              str([r["delivered"] for r in pool]))
+        down()
+        refused = sn.delivery_take(dcfg, now=1000.0, findings=rows_for())
+        check("wiring 3: a refused decision degrades to the oldest-first order",
+              refused["count"] == 1 and "door left open" in refused["lines"][0],
+              str(refused["lines"]))
+
+        # ------------------------------------------ 2: order-plan guardrail --
+        slots = {"OKX_API_KEY": "OKXKEY-SENTINEL-001",
+                 "OKX_API_SECRET": "OKXSEC-SENTINEL-001",
+                 "OKX_API_PASSPHRASE": "OKXPP-SENTINEL-001"}
+        ex._slot = lambda name: slots.get(name, "")
+        ex.thresholds = lambda settings=None: {   # noqa: E731 — same idiom as W2
+            "per_tx": 1000.0, "daily": 5000.0}
+
+        def prep(td: str) -> dict:
+            ex.prepare_order("okx", "buy", "BTC-USDT", "limit", 1, 105,
+                             transport=venue_transport, state_dir=td)
+            rows = [p for p in ex.plans_list(state_dir=td)
+                    if p["venue"] == "okx"]
+            return rows[0]
+
+        with tempfile.TemporaryDirectory() as td:
+            deci.set_settings_for_tests(OFF)
+            plan = prep(td)
+            check("wiring 2: decision OFF keeps the threshold auto-approval",
+                  plan["status"] == "approved"
+                  and plan["approval"] == "auto-threshold",
+                  f"{plan['status']} {plan['approval']}")
+        with tempfile.TemporaryDirectory() as td:
+            deci.set_settings_for_tests(ON)
+            clear()
+            plan = prep(td)
+            check("wiring 2: a confident inside-limits answer keeps auto",
+                  plan["status"] == "approved", f"{plan['status']}")
+        with tempfile.TemporaryDirectory() as td:
+            adverse()
+            plan = prep(td)
+            check("wiring 2: an adverse answer DOWNGRADES auto -> pending",
+                  plan["status"] == "pending" and plan["approval"] == "none"
+                  and "decision guardrail" in plan["reason"]
+                  and "outside the declared limits" in plan["reason"],
+                  f"{plan['status']} {plan['reason'][:90]}")
+        with tempfile.TemporaryDirectory() as td:
+            down()
+            plan = prep(td)
+            check("wiring 2: an unanswerable question is not a clearance",
+                  plan["status"] == "pending"
+                  and "no decision (auth)" in plan["reason"],
+                  plan["reason"][:100])
+        with tempfile.TemporaryDirectory() as td:
+            clear()
+            out = ex.prepare_order("okx", "buy", "BTC-USDT", "limit", 1, 105,
+                                   transport=venue_transport, state_dir=td)
+            check("wiring 2: the guard reason reaches the owner's plan text "
+                  "without any credential",
+                  "SENTINEL" not in out and "sk-DECISION" not in out,
+                  out[:120])
+
+        # ------------------------------------------------ 4: model router ----
+        class _Cfg:
+            model = "main-model"
+
+        deci.set_settings_for_tests(OFF)
+        calls["n"] = 0
+        cfg = _Cfg()
+        deci.apply_router(cfg, {"source": "console"})
+        check("wiring 4: router OFF never calls out and never moves the model",
+              cfg.model == "main-model" and calls["n"] == 0,
+              f"{cfg.model} n={calls['n']}")
+        deci.set_settings_for_tests(ON)
+        answer["fn"] = lambda: (
+            200, json.dumps({"model": "jev-latest", "answers": {
+                "model": {"type": "choice", "choice": "cheap",
+                          "probabilities": {"cheap": 0.9}, "confidence": 0.9}},
+                "usage": {"input_tokens": 20, "output_tokens": 0}}))
+        cfg = _Cfg()
+        deci.apply_router(cfg, {"source": "console"})
+        check("wiring 4: a confident cheap answer swaps this turn's model",
+              cfg.model == "cheap-model", cfg.model)
+        answer["fn"] = lambda: (
+            200, json.dumps({"model": "jev-latest", "answers": {
+                "model": {"type": "choice", "choice": "cheap",
+                          "probabilities": {"cheap": 0.5}, "confidence": 0.3}},
+                "usage": {"input_tokens": 20, "output_tokens": 0}}))
+        cfg = _Cfg()
+        deci.apply_router(cfg, {"source": "console"})
+        check("wiring 4: weak calibration keeps the main model",
+              cfg.model == "main-model", cfg.model)
+        down()
+        cfg = _Cfg()
+        deci.apply_router(cfg, {"source": "console"})
+        check("wiring 4: a refused decision is a no-op, not a turn failure",
+              cfg.model == "main-model", cfg.model)
+        check("wiring: the decision key never reached a plan/log surface",
+              "sk-DECISION-WIRING-SENTINEL" not in json.dumps(
+                  ex.plans_list(state_dir=tempfile.mkdtemp())), "key echo")
+    finally:
+        ex.thresholds = saved_thresholds
+        ex._slot = saved_slot
+        deci.reset_for_tests()
+        if saved_key is None:
+            os.environ.pop("DECISION_API_KEY", None)
+        else:
+            os.environ["DECISION_API_KEY"] = saved_key
+
+
+def test_bridge() -> None:
+    """Car 6 (line 5 / D9): the user-owned bridge — fail-closed routing, the
+    no-open-proxy allow-list, one audit line per proxied request with zero
+    credential echo, and the http_fetch seam that uses them."""
+    import importlib
+    from mycore import bridge as br
+    _tools = importlib.import_module("mycore.tools")
+
+    # ---- config: every road leads to "off" --------------------------------
+    br.set_settings_for_tests({})
+    cfg = br.config()
+    check("bridge: empty settings -> fail-closed defaults",
+          cfg["enabled"] is False and cfg["worker_url"] == ""
+          and cfg["allow"] == [] and cfg["max_bytes"] == 1048576, str(cfg))
+    br.set_settings_for_tests({"bridge": "nope"})
+    check("bridge: non-object block -> defaults stand",
+          br.config()["enabled"] is False, str(br.config()))
+    br.set_settings_for_tests({"bridge": {"enabled": True,
+                                          "worker_url": "https://x.workers.dev",
+                                          "allow": ["bad host"]}})
+    cfg = br.config()
+    check("bridge: a block the grammar refuses collapses to safe defaults",
+          cfg["enabled"] is False or cfg["allow"] == [], str(cfg))
+    br.set_settings_for_tests(None)
+
+    # ---- grammar ----------------------------------------------------------
+    clean, errs = br.validate({"enabled": True,
+                               "worker_url": "https://n.workers.dev",
+                               "allow": ["api.example.com", "API.EXAMPLE.COM",
+                                         "api.example.com"],
+                               "allow_auth": [], "max_bytes": 65536})
+    check("bridge: valid block accepted, hosts lowercased and de-duplicated",
+          not errs and clean["allow"] == ["api.example.com"]
+          and clean["max_bytes"] == 65536 and clean["enabled"] is True,
+          f"{clean} {errs}")
+    _, errs = br.validate({"enabled": "yes"})
+    check("bridge: non-boolean enabled refused",
+          any("enabled" in e for e in errs), str(errs))
+    _, errs = br.validate({"nope": 1})
+    check("bridge: unknown key refused",
+          any("unknown bridge key" in e for e in errs), str(errs))
+    _, errs = br.validate({"worker_url": "https://x.workers.dev/deep/path"})
+    check("bridge: a worker URL with a path refused (ambiguous target)",
+          len(errs) == 1 and "origin" in errs[0], str(errs))
+    _, errs = br.validate({"worker_url": "ftp://x.workers.dev"})
+    check("bridge: a non-http worker URL refused",
+          len(errs) == 1, str(errs))
+    _, errs = br.validate({"allow": ["not a host"]})
+    check("bridge: malformed allow entry refused with an index-free reason",
+          len(errs) == 1 and "not a host" not in errs[0], str(errs))
+    _, errs = br.validate({"allow": ["a.com"] * 40})
+    check("bridge: allow-list length capped",
+          any("at most" in e for e in errs), str(errs))
+    _, errs = br.validate({"max_bytes": 1})
+    check("bridge: max_bytes below the floor refused",
+          any("max_bytes" in e for e in errs), str(errs))
+    _, errs = br.validate({"max_bytes": 10 ** 12})
+    check("bridge: max_bytes above the ceiling refused",
+          any("max_bytes" in e for e in errs), str(errs))
+    _, errs = br.validate(["x"])
+    check("bridge: a non-object block refused", errs == ["bridge must be an object"],
+          str(errs))
+
+    # ---- host matching (the no-open-proxy core) ---------------------------
+    check("bridge: exact host matches, case-insensitively",
+          br.host_matches("API.example.com", ["api.example.com"]))
+    check("bridge: wildcard covers a sub-domain",
+          br.host_matches("a.internal.example.com", ["*.internal.example.com"]))
+    check("bridge: wildcard never implies the apex",
+          not br.host_matches("internal.example.com", ["*.internal.example.com"]))
+    check("bridge: an empty allow-list matches nothing",
+          not br.host_matches("api.example.com", []))
+    check("bridge: a look-alike suffix is not a match",
+          not br.host_matches("api.example.com.evil.net", ["*.example.com"])
+          and not br.host_matches("notexample.com", ["example.com"]))
+    check("bridge: an empty host never matches",
+          not br.host_matches("", ["*.example.com"]))
+
+    # ---- routing ----------------------------------------------------------
+    br.set_settings_for_tests({"bridge": {"enabled": True,
+                                           "worker_url": "https://br.workers.dev",
+                                           "allow": ["api.example.com"]}})
+    check("bridge: an allow-listed target routes through the worker",
+          br.route("https://api.example.com/v1/x")
+          == "https://br.workers.dev/https://api.example.com/v1/x",
+          str(br.route("https://api.example.com/v1/x")))
+    check("bridge: an off-list target never routes",
+          br.route("https://other.example.net/x") is None)
+    check("bridge: a fragment is stripped before routing",
+          br.route("https://api.example.com/a#secret-token")
+          == "https://br.workers.dev/https://api.example.com/a",
+          str(br.route("https://api.example.com/a#secret-token")))
+    check("bridge: a non-http scheme never routes",
+          br.route("ftp://api.example.com/x") is None
+          and br.route("file:///etc/passwd") is None)
+    check("bridge: an over-long URL never routes",
+          br.route("https://api.example.com/" + "a" * 3000) is None)
+    br.set_settings_for_tests({"bridge": {"enabled": False,
+                                           "worker_url": "https://br.workers.dev",
+                                           "allow": ["api.example.com"]}})
+    check("bridge: the kill switch routes nothing",
+          br.route("https://api.example.com/x") is None)
+    br.set_settings_for_tests({"bridge": {"enabled": True, "worker_url": "",
+                                           "allow": ["api.example.com"]}})
+    check("bridge: a missing worker URL routes nothing",
+          br.route("https://api.example.com/x") is None)
+    br.set_settings_for_tests({"bridge": {"enabled": True,
+                                           "worker_url": "https://br.workers.dev",
+                                           "allow": []}})
+    check("bridge: an empty allow-list routes nothing (no open proxy)",
+          br.route("https://api.example.com/x") is None)
+    br.set_settings_for_tests(None)
+
+    # ---- proxy_get: transport-injected, zero network ----------------------
+    import tempfile
+    seen: dict = {}
+    _state = Path(tempfile.mkdtemp(prefix="bridge_audit_")) / "bridge_audit.jsonl"
+    br.set_state_for_tests(_state)
+
+    def _ok(url, headers, payload, timeout):
+        seen.update(url=url, headers=dict(headers), payload=payload)
+        return "bridge-body"
+
+    br.set_settings_for_tests({"bridge": {"enabled": True,
+                                           "worker_url": "https://br.workers.dev",
+                                           "allow": ["api.example.com"],
+                                           "max_bytes": 4096}})
+    out = br.proxy_get("https://api.example.com/v1/data?token=SENTINEL",
+                       transport=_ok)
+    check("bridge: proxy_get returns the worker's body", out == "bridge-body", out)
+    check("bridge: the request targets worker-origin + target URL",
+          seen.get("url") == "https://br.workers.dev/https://api.example.com/"
+                             "v1/data?token=SENTINEL", str(seen.get("url")))
+    check("bridge: no credential header is ever attached",
+          not any(k.lower() in ("authorization", "cookie")
+                  for k in seen.get("headers", {})), str(seen.get("headers")))
+    rows = br.audit_tail(50)
+    check("bridge: exactly one audit line, ok, host + path only",
+          len(rows) == 1 and rows[0].get("ok") is True
+          and rows[0].get("host") == "api.example.com"
+          and rows[0].get("path") == "/v1/data", str(rows))
+    blob = _state.read_text(encoding="utf-8")
+    check("bridge: the audit line never records a query string or a token",
+          "SENTINEL" not in blob and "token=" not in blob, blob[:200])
+
+    def _boom(url, headers, payload, timeout):
+        raise br.BridgeError("http_error", "HTTP 403 Forbidden: nope")
+
+    try:
+        br.proxy_get("https://api.example.com/x", transport=_boom)
+        check("bridge: a transport failure raises BridgeError", False)
+    except br.BridgeError as e:
+        check("bridge: a transport failure raises BridgeError",
+              e.reason == "http_error", str(e))
+    rows = br.audit_tail(50)
+    check("bridge: a FAILED proxied request is audited too",
+          len(rows) == 2 and rows[-1].get("ok") is False
+          and rows[-1].get("reason") == "http_error", str(rows))
+    try:
+        br.proxy_get("https://offlist.example.org/x", transport=_ok)
+        check("bridge: proxy_get refuses an off-list target", False)
+    except br.BridgeError as e:
+        check("bridge: proxy_get refuses an off-list target",
+              e.reason == "not_routed", str(e))
+    br.set_settings_for_tests({"bridge": {"enabled": True,
+                                           "worker_url": "https://br.workers.dev",
+                                           "allow": ["api.example.com"],
+                                           "max_bytes": 4096}})
+    out = br.proxy_get("https://api.example.com/big",
+                       transport=lambda u, h, p, t: "x" * 9000)
+    check("bridge: a body over max_bytes is truncated, never dropped whole",
+          len(out) > 4096 and "[truncated at bridge max_bytes]" in out,
+          str(len(out)))
+    with _state.open("a", encoding="utf-8") as fh:
+        fh.write("this is not json\n")
+    check("bridge: a corrupt audit line is skipped, never repaired or echoed",
+          all(isinstance(r, dict) for r in br.audit_tail(50)))
+    br.set_state_for_tests(None)
+
+    # ---- the http_fetch seam ---------------------------------------------
+    br.set_settings_for_tests({"bridge": {"enabled": True,
+                                           "worker_url": "https://br.workers.dev",
+                                           "allow": ["bridged.example"]}})
+    br.set_transport_for_tests(lambda u, h, p, t: "via-the-bridge")
+    try:
+        out = _tools._http_fetch("https://bridged.example/a")
+        check("bridge: http_fetch routes an allow-listed host through the worker",
+              out == "via-the-bridge", out)
+
+        def _down(u, h, p, t):
+            raise br.BridgeError("unreachable", "worker down")
+
+        br.set_transport_for_tests(_down)
+
+        class _FakeResp:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self, n=-1):
+                return b"direct-body"
+
+        _orig = _tools.urllib.request.urlopen
+        _tools.urllib.request.urlopen = lambda req, timeout=None: _FakeResp()
+        try:
+            out = _tools._http_fetch("https://bridged.example/a")
+        finally:
+            _tools.urllib.request.urlopen = _orig
+        check("bridge: a bridge outage falls back to a DIRECT fetch, marked",
+              out.startswith("... [bridge unreachable - fetched directly instead]")
+              and "direct-body" in out, out[:120])
+    finally:
+        br.set_transport_for_tests(None)
+    br.set_settings_for_tests({"bridge": {"enabled": True,
+                                           "worker_url": "https://br.workers.dev",
+                                           "allow": ["bridged.example"]}})
+    br.set_transport_for_tests(lambda u, h, p, t: "via-the-bridge")
+    try:
+        class _Direct:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self, n=-1):
+                return b"direct-body"
+
+        _orig2 = _tools.urllib.request.urlopen
+        _tools.urllib.request.urlopen = lambda req, timeout=None: _Direct()
+        try:
+            out = _tools._http_fetch("https://offlist.example/a")
+        finally:
+            _tools.urllib.request.urlopen = _orig2
+        check("bridge: an off-list host still goes DIRECT, never via the worker",
+              out == "direct-body", out[:80])
+    finally:
+        br.set_transport_for_tests(None)
+        br.set_settings_for_tests(None)
+
+
+def test_leash() -> None:
+    """Car 7 (D11 restraint): control state, the pause/STOP switch and the
+    guardrails gate — fail-closed pause, baseline STOP, honest budget
+    states, and run_turn's should_stop abort at every checkpoint."""
+    from mycore import leash
+    from mycore.loop import run_turn as _rt
+    from mycore.tools import build_registry as _br
+
+    saved_cache = dict(leash._cache)
+    try:
+        # --- control state: missing file = running, pause/resume roundtrip
+        leash._cache.update(ts=0.0, doc=None)
+        st = leash.read_state(ttl=0)
+        check("leash: missing state file = running (fresh install)",
+              st["paused"] is False and st["stop_seq"] == 0, str(st))
+        st = leash.pause("manual")
+        check("leash: pause persists + reason",
+              st["paused"] is True and st["reason"] == "manual", str(st))
+        ok, code, _ = leash.gate({}, ttl=0)
+        check("leash: gate refuses while paused (fail-closed)",
+              not ok and code == "paused", f"{ok} {code}")
+        st = leash.resume()
+        check("leash: resume clears the pause (human click)",
+              st["paused"] is False and st["reason"] == "", str(st))
+        ok, code, _ = leash.gate({}, ttl=0)
+        check("leash: gate re-opens after resume", ok and code == "", code)
+
+        # --- corrupt file = paused (fail-closed), resume rewrites it
+        p = leash.state_path()
+        p.write_text("{{{ corrupt", encoding="utf-8")
+        leash._cache.update(ts=0.0, doc=None)
+        st = leash.read_state(ttl=0)
+        check("leash: corrupt state file fails CLOSED (paused)",
+              st["paused"] is True and "corrupt" in st["reason"],
+              str(st.get("reason")))
+        ok, code, _ = leash.gate({}, ttl=0)
+        check("leash: corrupt state gates turns closed too", not ok and code == "paused")
+        st = leash.resume()
+        check("leash: resume rewrites a corrupt file back to valid",
+              st["paused"] is False
+              and json.loads(p.read_text(encoding="utf-8"))["paused"] is False)
+
+        # --- STOP: baseline semantics (only a LATER stop aborts)
+        leash._cache.update(ts=0.0, doc=None)
+        base = leash.stop_baseline()
+        check("leash: no stop requested at baseline",
+              not leash.stop_requested(base, ttl=0))
+        st = leash.request_stop()
+        check("leash: request_stop bumps the counter",
+              st["stop_seq"] == base + 1, str(st["stop_seq"]))
+        check("leash: stop lands on the captured baseline",
+              leash.stop_requested(base, ttl=0))
+        base2 = leash.stop_baseline()
+        check("leash: a NEW turn's baseline is unaffected by an old stop",
+              not leash.stop_requested(base2, ttl=0))
+
+        # --- guardrails grammar (values never echoed, bools refused)
+        clean, errs = leash.validate_guardrails({"usd_day": 5, "token_day": 1000})
+        check("leash: guardrails grammar accepts the legal shape",
+              clean == {"usd_day": 5.0, "token_day": 1000} and not errs,
+              f"{clean} {errs}")
+        for bad, needle in [({"usd_day": -1}, "usd_day"),
+                            ({"usd_day": True}, "usd_day"),
+                            ({"token_day": 1.5}, "token_day"),
+                            ({"token_day": True}, "token_day"),
+                            ({"nope": 1}, "nope"),
+                            ({"usd_day": 1000001}, "usd_day")]:
+            c, e = leash.validate_guardrails(bad)
+            check(f"leash: guardrails refuses {bad}",
+                  not c and needle in " ".join(e), f"{c} {e}")
+        c, e = leash.validate_guardrails([1])
+        check("leash: guardrails non-object refused",
+              not c and "object" in " ".join(e), str(e))
+
+        # --- budget gate with a temp meter (no network: caps in tokens only)
+        from mycore import meter as _meter
+        mdir = Path(tempfile.mkdtemp(prefix="leash_meter_"))
+        try:
+            _meter.activate(mdir)
+            check("leash: meter active for the budget probe",
+                  _meter.active(), str(_meter.active_dir()))
+            ok, code, _ = leash.gate({"guardrails": {"usd_day": 0,
+                                                      "token_day": 0}}, ttl=0)
+            check("leash: both caps off = gate open without meter data",
+                  ok and code == "", code)
+            _meter.record("http://ep", "m", ok=True, in_tok=10, out_tok=5)
+            ok, code, ctx = leash.gate(
+                {"guardrails": {"usd_day": 0, "token_day": 10}}, ttl=0)
+            check("leash: token cap over -> budget_tokens with real numbers",
+                  not ok and code == "budget_tokens"
+                  and ctx.get("used") == 15 and ctx.get("limit") == 10,
+                  f"{code} {ctx}")
+            ok, code, _ = leash.gate(
+                {"guardrails": {"usd_day": 0, "token_day": 1000000}}, ttl=0)
+            check("leash: token cap under -> gate open", ok and code == "", code)
+            bs = leash.budget_status(
+                {"guardrails": {"usd_day": 1, "token_day": 0}})
+            check("leash: usd cap with no price = UNKNOWN, never ok/over",
+                  bs["usd"]["state"] == "unknown"
+                  and bs["tokens"]["state"] == "off",
+                  str(bs["usd"]))
+            ok, code, _ = leash.gate(
+                {"guardrails": {"usd_day": 1, "token_day": 0}}, ttl=0)
+            check("leash: UNKNOWN usd never blocks (token guard is the backstop)",
+                  ok and code == "", f"{ok} {code}")
+        finally:
+            _meter.deactivate()
+
+        bs = leash.budget_status({})
+        check("leash: caps off -> states off, no meter read",
+              bs["usd"]["state"] == "off" and bs["tokens"]["state"] == "off"
+              and bs["tokens"]["used"] is None, str(bs["limits"]))
+
+        # --- run_turn should_stop: all three checkpoints
+        reg = _br()
+        msgs = lambda: [{"role": "user", "content": "hi"}]
+        calls = {"n": 0}
+
+        def chat_final(**kw):
+            calls["n"] += 1
+            return {"choices": [{"message": {"role": "assistant",
+                                               "content": "ok"}}]}
+        res = _rt(msgs(), chat_final, reg, should_stop=lambda: True)
+        check("leash: should_stop at the iteration top = aborted, no model call",
+              res.stop == "aborted" and calls["n"] == 0
+              and "stopped by the operator" in res.text,
+              f"{res.stop} n={calls['n']} {res.text[:60]}")
+
+        # pre-dispatch: the model answers with a tool call, stop flips after
+        # the iteration-top check -> the tool must never run.
+        seq = {"n": 0}
+
+        def should_pre():
+            seq["n"] += 1
+            return seq["n"] > 1
+
+        def chat_tool(**kw):
+            return {"choices": [{"message": {
+                "role": "assistant", "content": "",
+                "tool_calls": [{"id": "t1", "type": "function",
+                                "function": {"name": "run_bash",
+                                             "arguments": '{"command":"echo hi"}'}}]}}]}
+        ran = {"hit": False}
+        reg2 = _br()
+        res = _rt(msgs(), chat_tool, reg2, should_stop=should_pre)
+        check("leash: should_stop before tool dispatch = aborted, 0 tool calls",
+              res.stop == "aborted" and res.tool_calls == 0
+              and "before tool dispatch" in res.text,
+              f"{res.stop} tools={res.tool_calls} {res.text[:60]}")
+
+        # mid-stream: the second delta raises StopRequested -> aborted
+        seq2 = {"n": 0}
+
+        def should_mid():
+            seq2["n"] += 1
+            return seq2["n"] > 1      # iteration-top check passes (1st poll)
+
+        def chat_stream(**kw):
+            d = kw.get("on_delta")
+            d("partial ")
+            d("text")                  # 2nd delta trips the stop
+            return {"choices": [{"message": {"role": "assistant",
+                                               "content": "partial text"}}]}
+        res = _rt(msgs(), chat_stream, reg, on_delta=lambda p: None,
+                  should_stop=should_mid)
+        check("leash: should_stop mid-stream = aborted (StopRequested path)",
+              res.stop == "aborted" and "mid-stream" in res.text,
+              f"{res.stop} {res.text[:60]}")
+
+        # default (should_stop=None) keeps today's contract byte-for-byte
+        res = _rt(msgs(), chat_final, reg)
+        check("leash: no should_stop -> normal final (unchanged contract)",
+              res.stop == "final" and res.text == "ok", f"{res.stop} {res.text}")
+    finally:
+        # restore the shared suite state: never leave the control file paused
+        try:
+            leash.resume()
+        except OSError:
+            pass
+        leash._cache.clear()
+        leash._cache.update(saved_cache)
+
+
+def test_obedience() -> None:
+    """Car 7 (D11 constitution_over_rules): grammar + the injected priority
+    block — default OFF keeps every existing stack shape, and a configured
+    block states the fixed order + the mandatory conflict disclosure."""
+    from mycore.assembly import (build_system_stack, validate_obedience,
+                                 resolve_user_rules, DEFAULT_OBEDIENCE)
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        cons = tdp / "SOUL.md"
+        cons.write_text("# SOUL test constitution", encoding="utf-8")
+        mem = tdp / "MEMORY_curated.md"
+        mem.write_text("- memory fact", encoding="utf-8")
+
+        # default: OFF -> pre-car-7 stack shape (len 4), byte-identical
+        stack = build_system_stack(cons, (mem,), learned_path=None)
+        check("obedience: default OFF keeps the stack shape (len 3)",
+              len(stack) == 3 and "priority:" not in stack[1]["content"],
+              f"len={len(stack)}")
+
+        blk = {"rules": ["always cite a source"],
+               "forbidden": ["never touch prod without approval"]}
+        stack = build_system_stack(cons, (mem,), learned_path=None,
+                                   user_rules=blk)
+        check("obedience: configured block injects right after the constitution",
+              len(stack) == 4 and stack[1]["content"].startswith(
+                  "[user rules"), f"len={len(stack)}")
+        c1 = stack[1]["content"]
+        check("obedience: fixed priority order stated verbatim",
+              "Fixed priority order" in c1
+              and "1) constitution" in c1 and "4) your own judgment" in c1)
+        check("obedience: conflict disclosure is mandatory + templated",
+              "constitution wins" in c1 and "was not applied" in c1
+              and "Never resolve a conflict silently" in c1)
+        check("obedience: rules + forbidden zones both rendered",
+              "always cite a source" in c1
+              and "never touch prod without approval" in c1
+              and "Forbidden zones" in c1)
+        check("obedience: hint stays last", "skill_route" in stack[-1]["content"])
+
+        # grammar
+        clean, errs = validate_obedience({"rules": ["a"], "forbidden": []})
+        check("obedience: grammar accepts the legal shape",
+              clean == {"rules": ["a"], "forbidden": []} and not errs,
+              f"{clean} {errs}")
+        for bad, needle in [({"rules": "x"}, "list"),
+                            ({"rules": ["a", "a"]}, "duplicate"),
+                            ({"rules": ["  lead"]}, "single-line"),
+                            ({"rules": ["x" * 501]}, "single-line"),
+                            ({"rules": ["a\nb"]}, "single-line"),
+                            ({"nope": []}, "nope"),
+                            ({"rules": [f"m{i}" for i in range(65)]}, "64")]:
+            c, e = validate_obedience(bad)
+            check(f"obedience: refuses {str(bad)[:40]}",
+                  not c.get("rules") and needle in " ".join(e),
+                  f"{c} {e}")
+        check("obedience: DEFAULT_OBEDIENCE is empty (opt-in)",
+              DEFAULT_OBEDIENCE == {"rules": [], "forbidden": []},
+              str(DEFAULT_OBEDIENCE))
+
+        # resolve_user_rules: raw file at call time, invalid -> None
+        sp = tdp / "settings.json"
+        check("obedience: absent settings -> None", resolve_user_rules(sp) is None)
+        sp.write_text(json.dumps({"obedience": blk}), encoding="utf-8")
+        check("obedience: stored block resolves", resolve_user_rules(sp) == blk)
+        sp.write_text(json.dumps({"obedience": {"rules": [],
+                                                 "forbidden": []}}),
+                      encoding="utf-8")
+        check("obedience: empty block -> None (nothing injected)",
+              resolve_user_rules(sp) is None)
+        sp.write_text(json.dumps({"obedience": {"rules": ["bad\nline"]}}),
+                      encoding="utf-8")
+        check("obedience: invalid stored block -> None (shrinks, never widens)",
+              resolve_user_rules(sp) is None)
+
+
+def test_watchdog_escalation() -> None:
+    """Car 7 (D11 watch escalation): L1 down -> L2 circuit open after N
+    failed restarts -> L3 needs-a-human -> recovery closes the chain, every
+    step dual-written (notify text + the state journal the console reads)."""
+    from mycore.watchdog import (Watchdog, WatchConfig, L3_AFTER_SEC,
+                                 DEFAULT_ESCALATE_AFTER, ESC_JOURNAL_MAX)
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        cfgp = tdp / "wd.json"
+        good = {"dry_run": False, "interval_sec": 60, "throttle_sec": 60,
+                "targets": [{"name": "gw", "kind": "process", "value": "x"}]}
+        cfgp.write_text(json.dumps(good), encoding="utf-8")
+        cfg = WatchConfig.load(cfgp)
+        check("wd-esc: default escalate_after",
+              cfg.escalate_after == DEFAULT_ESCALATE_AFTER,
+              str(cfg.escalate_after))
+        cfgp.write_text(json.dumps({**good, "escalate_after": 0}), encoding="utf-8")
+        try:
+            WatchConfig.load(cfgp)
+            check("wd-esc: escalate_after=0 rejected", False)
+        except Exception:  # noqa: BLE001
+            check("wd-esc: escalate_after=0 rejected", True)
+        cfgp.write_text(json.dumps({**good, "escalate_after": 21}), encoding="utf-8")
+        try:
+            WatchConfig.load(cfgp)
+            check("wd-esc: escalate_after=21 rejected", False)
+        except Exception:  # noqa: BLE001
+            check("wd-esc: escalate_after=21 rejected", True)
+        cfgp.write_text(json.dumps(good), encoding="utf-8")
+        cfg = WatchConfig.load(cfgp)
+
+        clock = [1000.0]
+        notes: list[str] = []
+        restarts: list[str] = []
+        wd = Watchdog(cfg, tdp / "state.json", log=lambda l: None,
+                      probe=lambda t: False,
+                      restart=lambda t: restarts.append(t["name"]) or
+                                         (False, "rc=1 boom"),
+                      now=lambda: clock[0])
+        wd.notify = lambda text: notes.append(text)
+
+        wd.check_once()                       # round 1: down -> L1 + attempt 1
+        st = wd.states["gw"]
+        check("wd-esc: L1 on the down transition",
+              st.esc_level == 1 and any("DOWN" in n for n in notes),
+              f"level={st.esc_level}")
+        check("wd-esc: first failed restart still alerts",
+              any("restart FAILED" in n and "attempt 1" in n for n in notes))
+        check("wd-esc: journal carries the L1 record",
+              wd._esc and wd._esc[-1]["level"] == 1
+              and wd._esc[-1]["target"] == "gw", str(wd._esc[-1:]))
+
+        clock[0] += 61
+        wd.check_once()                       # attempt 2
+        st = wd.states["gw"]
+        check("wd-esc: below threshold = still retrying (no L2 yet)",
+              st.esc_level == 1 and st.restart_attempts == 2
+              and restarts == ["gw", "gw"], str(restarts))
+
+        clock[0] += 61
+        wd.check_once()                       # attempt 3 -> L2 circuit open
+        st = wd.states["gw"]
+        check("wd-esc: L2 circuit opens at escalate_after failures",
+              st.esc_level == 2 and st.restart_attempts == 3
+              and any("L2" in n and "HALTED" in n for n in notes),
+              f"level={st.esc_level} attempts={st.restart_attempts}")
+        check("wd-esc: L2 reason says why (consecutive failures)",
+              wd._esc[-1]["level"] == 2
+              and "consecutive" in wd._esc[-1]["reason"],
+              str(wd._esc[-1]))
+
+        restarts.clear()
+        notes.clear()
+        for _ in range(6):                    # circuit open: NO restarts
+            clock[0] += 61
+            wd.check_once()
+        check("wd-esc: circuit open halts automatic restarts (breaker)",
+              restarts == [], str(restarts))
+        check("wd-esc: never silent while the circuit is open",
+              any("still down" in n and "circuit OPEN" in n for n in notes),
+              str(notes[:2]))
+
+        clock[0] += L3_AFTER_SEC + 120        # L3 after the open circuit
+        notes.clear()
+        wd.check_once()
+        st = wd.states["gw"]
+        check("wd-esc: L3 lands when the open circuit outlives its window",
+              st.esc_level == 3 and any("L3" in n and "manual" in n for n in notes),
+              f"level={st.esc_level} {notes}")
+        check("wd-esc: journal records the L3 reason",
+              wd._esc[-1]["level"] == 3
+              and "circuit open too long" in wd._esc[-1]["reason"],
+              str(wd._esc[-1]))
+
+        wd._probe = lambda t: True            # recovery closes the chain
+        notes.clear()
+        wd.check_once()
+        st = wd.states["gw"]
+        check("wd-esc: recovery clears the level + resets counters",
+              st.esc_level == 0 and st.restart_attempts == 0
+              and any("recovered" in n for n in notes),
+              f"level={st.esc_level}")
+        check("wd-esc: journal closes with the level-0 recovery record",
+              wd._esc[-1]["level"] == 0 and wd._esc[-1]["reason"] == "recovered",
+              str(wd._esc[-1]))
+
+        # state roundtrip: levels + journal survive a watchdog restart
+        wd._save_state()
+        wd2 = Watchdog(cfg, tdp / "state.json", probe=lambda t: True,
+                       now=lambda: clock[0])
+        check("wd-esc: journal roundtrips through the state file",
+              len(wd2._esc) == len(wd._esc) and wd2._esc[-1]["level"] == 0,
+              f"{len(wd2._esc)} records")
+
+        # journal is bounded
+        for i in range(ESC_JOURNAL_MAX + 5):
+            wd._esc.append({"ts": float(i), "level": 1, "target": "gw",
+                            "attempt": i, "reason": "x"})
+        wd._save_state()
+        wd3 = Watchdog(cfg, tdp / "state.json", probe=lambda t: True,
+                       now=lambda: clock[0])
+        check("wd-esc: journal stays bounded",
+              len(wd3._esc) <= ESC_JOURNAL_MAX, str(len(wd3._esc)))
+
+        # dry-run shadow mode: no L2 (attempts below threshold), never silent
+        dry = {**good, "dry_run": True}
+        cfgp.write_text(json.dumps(dry), encoding="utf-8")
+        dcfg = WatchConfig.load(cfgp)
+        shadow: list[str] = []
+        clock[0] += 100000
+        wdd = Watchdog(dcfg, tdp / "state_dry.json", log=lambda l: None,
+                       probe=lambda t: False,
+                       restart=lambda t: (True, "ok"),
+                       now=lambda: clock[0])
+        wdd.notify = lambda text: shadow.append(text)
+        wdd.check_once()
+        clock[0] += dcfg.throttle_sec + 1
+        wdd.check_once()
+        st = wdd.states["gw"]
+        check("wd-esc: dry-run shadow stays below L2 (2 attempts < 3)",
+              st.esc_level == 1 and st.restart_attempts == 2,
+              f"level={st.esc_level} attempts={st.restart_attempts}")
+        check("wd-esc: dry-run still reports periodically (never silent)",
+              len(shadow) >= 2 and any("still down" in n for n in shadow),
+              str(shadow))
+
+
+def test_ckxbackup() -> None:
+    """Car 8 (CKX-P2): the agent backup — capability probe, the local call
+    meter, the metadata-only result with a zero-echo assertion, the real
+    CLI round-trip when Node >= 20 is present (honest degradation otherwise),
+    the parse_config-legal MCP entry, and the credential-store gate the
+    faithfulness rule needs (design §8: the agent never holds the password)."""
+    import shutil as _sh
+    from mycore import ckxbackup as cb
+    from mycore.tools import build_registry as _br
+    from mycore.tools import SECRET_STORE_REASON
+
+    saved_runner, saved_export = cb._RUNNER, cb._EXPORTER
+    saved_pw = os.environ.pop(cb.PASSWORD_SLOT, None)
+    try:
+        # --- 1. node_status: seam-driven ok / too-old / unreadable ---------
+        cb.set_runner_for_tests(
+            lambda argv, **kw: type("P", (), {
+                "returncode": 0, "stdout": b"v22.1.0\n", "stderr": b""})())
+        st = cb.node_status()
+        check("ckx: node >= 20 probes ok",
+              st["ok"] is True and st["major"] == 22 and st["reason"] == "",
+              str(st))
+        cb.set_runner_for_tests(
+            lambda argv, **kw: type("P", (), {
+                "returncode": 0, "stdout": b"v18.19.0\n", "stderr": b""})())
+        st = cb.node_status()
+        check("ckx: node < 20 refused with the requirement in the reason",
+              st["ok"] is False and ">= 20" in st["reason"]
+              and st["major"] == 18, str(st))
+        cb.set_runner_for_tests(
+            lambda argv, **kw: type("P", (), {
+                "returncode": 0, "stdout": b"garbage\n", "stderr": b""})())
+        st = cb.node_status()
+        check("ckx: unreadable version degrades honestly (major 0)",
+              st["ok"] is False and st["major"] == 0, str(st))
+        cb.set_runner_for_tests(None)
+
+        # --- 2. quota meter: count / warn / over / reset / fail-closed ------
+        with tempfile.TemporaryDirectory() as td:
+            check("ckx: fresh meter reads ok at 0",
+                  cb.quota_status(td) == {"used": 0, "cap": cb.QUOTA_CAP,
+                                          "warn_at": cb.QUOTA_WARN,
+                                          "state": "ok"},
+                  str(cb.quota_status(td)))
+            for _ in range(cb.QUOTA_WARN):
+                cb.quota_note(td)
+            q = cb.quota_status(td)
+            check("ckx: meter reaches warn at the threshold",
+                  q["used"] == cb.QUOTA_WARN and q["state"] == "warn",
+                  str(q))
+            for _ in range(cb.QUOTA_CAP - cb.QUOTA_WARN):
+                cb.quota_note(td)
+            q = cb.quota_status(td)
+            check("ckx: meter reaches over at the cap",
+                  q["used"] == cb.QUOTA_CAP and q["state"] == "over",
+                  str(q))
+            check("ckx: oversized meter fails CLOSED (never a free lane)",
+                  cb.quota_status(_td_over(td))["state"] == "over",
+                  str(cb.quota_status(_td_over(td))))
+            check("ckx: operator reset zeroes the meter",
+                  cb.quota_reset(td)["used"] == 0
+                  and cb.quota_status(td)["state"] == "ok",
+                  str(cb.quota_status(td)))
+
+        # --- 3. run_backup offline: metadata shape + zero echo --------------
+        with tempfile.TemporaryDirectory() as td:
+            payload = json.dumps({
+                "ok": True, "schema": "aidog.backup.v1",
+                "schemaVersion": "1", "created": 1,
+                "payload": {"secrets": {"A": PW_SENTINEL},
+                            "settings": {"k": "v"}}}).encode()
+            cb.set_export_for_tests(lambda: payload)
+            os.environ[cb.PASSWORD_SLOT] = PW_SENTINEL
+            meta = cb.run_backup(td)
+            doc = json.dumps(meta, ensure_ascii=False)
+            check("ckx: run_backup returns metadata only",
+                  meta["ok"] is True and meta["verified"] is True
+                  and meta["roundtrip"] is True
+                  and set(meta) == {"ok", "file", "bytes", "sha256",
+                                    "verified", "roundtrip", "ms", "quota"},
+                  str(sorted(meta)))
+            check("ckx: artifact name is repo-relative, not a machine path",
+                  "/" not in meta["file"] or not meta["file"].startswith("/"),
+                  meta["file"])
+            check("ckx: result echoes neither passphrase nor payload",
+                  PW_SENTINEL not in doc and PW_PAYLOAD not in doc,
+                  "sentinel found")
+            check("ckx: result carries the live meter",
+                  meta["quota"]["used"] == 1
+                  and meta["quota"]["state"] in ("ok", "warn"),
+                  str(meta["quota"]))
+            art = Path(td) / cb.BACKUP_DIR / Path(meta["file"]).name
+            raw = art.read_bytes()
+            check("ckx: artifact is ciphertext + mode 0600 in a 0700 dir",
+                  PW_PAYLOAD.encode() not in raw
+                  and oct(art.stat().st_mode & 0o777) == "0o600"
+                  and oct(art.parent.stat().st_mode & 0o777) == "0o700",
+                  f"{oct(art.stat().st_mode & 0o777)}")
+            check("ckx: second run never overwrites the first",
+                  cb.run_backup(td)["file"] != meta["file"], "same name")
+
+            # honest pre-flight failures: no call counted, no traceback
+            os.environ.pop(cb.PASSWORD_SLOT, None)
+            try:
+                cb.run_backup(td)
+                err = ""
+            except cb.CkxError as e:
+                err = str(e)
+            check("ckx: empty passphrase slot -> short honest refusal",
+                  cb.PASSWORD_SLOT in err and PW_SENTINEL not in err,
+                  err)
+            for _ in range(cb.QUOTA_CAP - cb.quota_status(td)["used"]):
+                cb.quota_note(td)
+            os.environ[cb.PASSWORD_SLOT] = PW_SENTINEL
+            try:
+                cb.run_backup(td)
+                err = ""
+            except cb.CkxError as e:
+                err = str(e)
+            check("ckx: quota over -> refused before any export",
+                  "quota reached" in err and PW_SENTINEL not in err, err)
+            cb.set_export_for_tests(None)
+            cb.quota_reset(td)
+
+        # --- 4. export pre-flight: no WEB_TOKEN -> honest refusal ------------
+        with tempfile.TemporaryDirectory() as td:
+            saved_tok = cb._web_token
+            cb._web_token = lambda: ""
+            try:
+                cb.set_export_for_tests(None)
+                os.environ[cb.PASSWORD_SLOT] = PW_SENTINEL
+                try:
+                    cb.run_backup(td)
+                    err = ""
+                except cb.CkxError as e:
+                    err = str(e)
+                check("ckx: no export gate -> honest reason, no payload",
+                      "WEB_TOKEN" in err and PW_PAYLOAD not in err, err)
+                check("ckx: pre-flight failure costs no counted call",
+                      cb.quota_status(td)["used"] == 0,
+                      str(cb.quota_status(td)))
+            finally:
+                cb._web_token = saved_tok
+
+        # --- 5. the REAL CLI round-trip when Node >= 20 is actually here ----
+        node = cb.node_status()
+        cli_ok = node["ok"] and Path(cb.CKX_CLI).is_file()
+        with tempfile.TemporaryDirectory() as td:
+            if cli_ok:
+                payload = json.dumps({"ok": True, "schema": "aidog.backup.v1",
+                                      "payload": {"secrets": {
+                                          "A": PW_PAYLOAD}}}).encode()
+                cb.set_export_for_tests(lambda: payload)
+                os.environ[cb.PASSWORD_SLOT] = PW_SENTINEL
+                meta = cb.run_backup(td)
+                check("ckx real: vendored CLI encrypts + verifies + round-trips",
+                      meta["ok"] is True and meta["verified"] is True
+                      and meta["roundtrip"] is True and meta["bytes"] > 0,
+                      str(meta))
+                art = Path(td) / cb.BACKUP_DIR / Path(meta["file"]).name
+                check("ckx real: ciphertext never contains the payload",
+                      PW_PAYLOAD.encode() not in art.read_bytes(), "leak")
+                # The container really IS passphrase-bound: decrypting it
+                # with a different passphrase must exit non-zero (this is the
+                # property run_backup's digest check relies on, proved at the
+                # CLI level so a fake could never satisfy it).
+                import subprocess as _sp
+                good = os.environ[cb.PASSWORD_SLOT]
+                try:
+                    os.environ[cb.PASSWORD_SLOT] = PW_WRONG
+                    p = _sp.run([cb._node_exe(), str(cb.CKX_CLI), "decrypt",
+                                 "--in", str(art), "--out", "-",
+                                 "--password-env", cb.PASSWORD_SLOT],
+                                env=dict(os.environ), capture_output=True,
+                                timeout=cb.RUN_TIMEOUT)
+                finally:
+                    os.environ[cb.PASSWORD_SLOT] = good
+                check("ckx real: a different passphrase cannot decrypt it",
+                      p.returncode != 0
+                      and PW_PAYLOAD.encode() not in (p.stdout or b"")
+                      and PW_PAYLOAD.encode() not in (p.stderr or b""),
+                      f"rc={p.returncode}")
+
+            else:
+                check("ckx real: node/cli absent -> capability probes honest",
+                      node["ok"] is False or not Path(cb.CKX_CLI).is_file(),
+                      str(node))
+
+        # --- 5b. failure paths remove the artifact + return only a reason ---
+        with tempfile.TemporaryDirectory() as td:
+            payload = json.dumps({"schema": "aidog.backup.v1",
+                                  "payload": {"secrets": {
+                                      "A": PW_PAYLOAD}}}).encode()
+            cb.set_export_for_tests(lambda: payload)
+            os.environ[cb.PASSWORD_SLOT] = PW_SENTINEL
+            import subprocess as _sp
+
+            def _real(argv, **kw):
+                """The genuine child runner, captured before any seam."""
+                return _sp.run(argv, env=kw.get("env"), input=kw.get("data"),
+                               capture_output=True,
+                               timeout=kw.get("timeout", cb.RUN_TIMEOUT))
+
+            def _step(name, rc=0, out=b""):
+                def run(argv, **kw):
+                    if "--version" in argv:
+                        return type("P", (), {"returncode": 0,
+                                              "stdout": b"v22.1.0\n",
+                                              "stderr": b""})()
+                    if argv[2] == name:
+                        return type("P", (), {"returncode": rc,
+                                              "stdout": out,
+                                              "stderr": b""})()
+                    return _real(argv, **kw)
+                return run
+
+            cb.set_runner_for_tests(_step("encrypt", rc=7))
+            try:
+                cb.run_backup(td)
+                err = ""
+            except cb.CkxError as e:
+                err = str(e)
+            check("ckx: encrypt failure -> short reason, artifact removed",
+                  "encrypt failed" in err and PW_SENTINEL not in err
+                  and not list((Path(td) / cb.BACKUP_DIR).glob("*")),
+                  f"err={err} files={list((Path(td)/cb.BACKUP_DIR).glob('*'))}")
+            check("ckx: encrypt failure still counts the launched call",
+                  cb.quota_status(td)["used"] == 1,
+                  str(cb.quota_status(td)))
+
+            cb.set_runner_for_tests(_step("verify", rc=1))
+            try:
+                cb.run_backup(td)
+                err = ""
+            except cb.CkxError as e:
+                err = str(e)
+            check("ckx: verify failure -> artifact removed, reason only",
+                  "self-check failed" in err and PW_PAYLOAD not in err
+                  and not list((Path(td) / cb.BACKUP_DIR).glob("*")),
+                  f"err={err}")
+
+            cb.set_runner_for_tests(_step("decrypt", out=b'{"tampered":true}'))
+            try:
+                cb.run_backup(td)
+                err = ""
+            except cb.CkxError as e:
+                err = str(e)
+            check("ckx: round-trip digest mismatch -> rejected, artifact gone",
+                  "digest mismatch" in err and PW_PAYLOAD not in err
+                  and not list((Path(td) / cb.BACKUP_DIR).glob("*")),
+                  f"err={err}")
+            cb.set_runner_for_tests(None)
+            cb.set_export_for_tests(None)
+            cb.quota_reset(td)
+
+        cb.set_export_for_tests(None)
+
+        # --- 6. MCP entry: parse_config-legal + deny-by-default -------------
+        from mycore import mcp
+        cfgs = mcp.parse_config(cb.mcp_entry())
+        check("ckx mcp: entry parses as one stdio server",
+              len(cfgs) == 1 and cfgs[0].name == cb.MCP_SERVER_NAME
+              and cfgs[0].transport == "stdio"
+              and cfgs[0].command[0].endswith("node"), str(cfgs))
+        check("ckx mcp: env holds the SLOT NAME, never a value",
+              cfgs[0].env == {cb.PASSWORD_SLOT: "$" + cb.PASSWORD_SLOT},
+              str(cfgs[0].env))
+        import fnmatch as _fn
+        visible = [t for t in cb.MCP_ALLOW
+                   if not any(_fn.fnmatch(t, d) for d in cb.MCP_DENY)]
+        check("ckx mcp: allow-list is structure/ciphertext only",
+              visible == list(cb.MCP_ALLOW)
+              and not [t for t in visible
+                       if "decrypt" in t or "recipient" in t
+                       or t.startswith("ckx_generate")], str(visible))
+        hidden = ["ckx_decrypt", "ckx_decrypt_as", "ckx_generate_recipient_keypair",
+                  "ckx_recipient_public_key", "ckx_encrypt_to"]
+        check("ckx mcp: decrypt + recipient family are denied",
+              all(any(_fn.fnmatch(t, d) for d in cb.MCP_DENY) for t in hidden),
+              str([t for t in hidden
+                   if not any(_fn.fnmatch(t, d) for d in cb.MCP_DENY)]))
+        check("ckx mcp: allow + deny stay inside the pattern budget",
+              len(cfgs[0].allow) <= mcp.MAX_PATTERNS
+              and len(cfgs[0].deny) <= mcp.MAX_PATTERNS
+              and len(cb.mcp_entry()) <= mcp.MAX_CONFIG_CHARS,
+              str(len(cb.mcp_entry())))
+
+        # --- 7. resolve_slot: env -> profile secrets.env fallback ------------
+        with tempfile.TemporaryDirectory() as td:
+            sf = Path(td) / "secrets.env"
+            sf.write_text(f"{cb.PASSWORD_SLOT}=file-slot-value\n", encoding="utf-8")
+            os.chmod(sf, 0o600)
+            os.environ.pop(cb.PASSWORD_SLOT, None)
+            from mycore import envslots as _es
+            saved_slotf = _es.secrets_file
+            _es.secrets_file = lambda path=None: Path(path) if path is not None else sf
+            try:
+                check("ckx slot: env unset -> profile secrets.env fallback",
+                      mcp.resolve_slot("$" + cb.PASSWORD_SLOT, "ckx", "env")
+                      == "file-slot-value", "fallback failed")
+                os.environ[cb.PASSWORD_SLOT] = "env-wins"
+                check("ckx slot: process env still wins over the file",
+                      mcp.resolve_slot("$" + cb.PASSWORD_SLOT, "ckx", "env")
+                      == "env-wins", "env lost")
+                os.environ.pop(cb.PASSWORD_SLOT, None)
+                _es.secrets_file = lambda path=None: Path(td) / "absent.env"
+                try:
+                    mcp.resolve_slot("$" + cb.PASSWORD_SLOT, "ckx", "env")
+                    slot_err = None
+                except mcp.McpError as e:
+                    slot_err = str(e)
+                check("ckx slot: absent everywhere -> honest failure, no value",
+                      slot_err is not None and cb.PASSWORD_SLOT in slot_err
+                      and "file-slot" not in slot_err, str(slot_err))
+            finally:
+                _es.secrets_file = saved_slotf
+
+        # --- 8. the credential-store gate (design §8) ------------------------
+        with tempfile.TemporaryDirectory() as td:
+            sec = Path(td) / "secrets.env"
+            sec.write_text("MODEL_API_KEY=super-secret\n", encoding="utf-8")
+            other = Path(td) / "notes.md"
+            other.write_text("super-secret appears here too\n", encoding="utf-8")
+            reg = _br(allowed_roots=[td])
+            check("gate: read_file refuses secrets.env",
+                  reg.dispatch("read_file", {"path": str(sec)})
+                  == "ERROR: " + SECRET_STORE_REASON,
+                  reg.dispatch("read_file", {"path": str(sec)})[:80])
+            check("gate: write_file refuses secrets.env",
+                  reg.dispatch("write_file", {"path": str(sec),
+                                              "content": "x"})
+                  == "ERROR: " + SECRET_STORE_REASON, "write allowed")
+            check("gate: edit_file refuses secrets.env",
+                  reg.dispatch("edit_file", {"path": str(sec),
+                                             "old_text": "MODEL_API_KEY",
+                                             "new_text": "y"})
+                  == "ERROR: " + SECRET_STORE_REASON, "edit allowed")
+            check("gate: grep refuses secrets.env as an explicit target",
+                  reg.dispatch("grep", {"pattern": "super", "path": str(sec)})
+                  == "ERROR: " + SECRET_STORE_REASON, "grep allowed")
+            hits = reg.dispatch("grep", {"pattern": "super", "path": td})
+            check("gate: grep skips secrets.env inside a tree walk",
+                  "notes.md" in hits and "secrets.env" not in hits, hits[:120])
+            check("gate: every other file still reads normally",
+                  "super-secret appears" in reg.dispatch(
+                      "read_file", {"path": str(other)}), "blocked a normal file")
+            check("gate: execute_code inherits the same refusal",
+                  "ERROR" in execute_code_read_gate(td, str(sec)),
+                  execute_code_read_gate(td, str(sec))[:160])
+    finally:
+        cb.set_runner_for_tests(saved_runner)
+        cb.set_export_for_tests(saved_export)
+        os.environ.pop(cb.PASSWORD_SLOT, None)
+        if saved_pw is not None:
+            os.environ[cb.PASSWORD_SLOT] = saved_pw
+
+
+def _td_over(td: str) -> str:
+    """Build an oversized meter file for the fail-closed quota leg."""
+    from mycore import ckxbackup as cb
+    p = Path(td) / cb.QUOTA_FILE
+    with p.open("ab") as fh:
+        fh.truncate(cb.QUOTA_MAX_BYTES + 1)
+    return td
+
+
+def execute_code_read_gate(td: str, path: str) -> str:
+    """Run the child helper namespace itself: the refusal must survive the
+    process boundary, not just the in-process registry."""
+    from mycore import execute_code
+    return execute_code.run_code(f"print(read({path!r}))",
+                                 (td,), None)
+
+
 def main() -> int:
     test_model()
     test_registry_and_tools()
@@ -13679,6 +15657,13 @@ def main() -> int:
     test_community_tool()
     test_envslots()
     test_model_key_slots()
+    test_decision()
+    test_decision_wiring()
+    test_bridge()
+    test_leash()
+    test_obedience()
+    test_watchdog_escalation()
+    test_ckxbackup()
     test_settings_models_budget()
     test_loop()
     test_compact()
@@ -13704,6 +15689,11 @@ def main() -> int:
     test_wd_locale()
     test_subagent()
     test_result_compression()
+    test_result_budget_dedupe()
+    test_compact_semantics()
+    test_token_fold()
+    test_recall()
+    test_stable_prefix()
     test_execute_code()
     test_mcp()
     test_channels()

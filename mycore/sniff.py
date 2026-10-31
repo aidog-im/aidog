@@ -903,6 +903,38 @@ def quiet_now(window: str, now: float) -> bool:
     return bool(mission._quiet_active(window, now))
 
 
+def _triage_order(rows: list[dict]) -> list[dict]:
+    """Car 4 (D6) call site 3 — decision triage reorders the delivery pool so
+    urgent findings reach the `digest_cap` first.
+
+    Contract: a reorder, NEVER a drop — the cap, the row set and the
+    `delivered` marks are untouched; only the rows the API can carry in one
+    request (mycore.decision.MAX_QUESTIONS) are asked, and they keep their
+    answered-first / oldest-first relative order inside their group; every
+    refusal (client off / no key / unreachable / bad shape) returns the input
+    byte-identical, which is exactly today's oldest-first behaviour."""
+    try:
+        from . import decision as _deci            # noqa: PLC0415 — lazy import
+        if not _deci.config()["active"]:
+            return rows
+        got = _deci.triage(rows)
+    except Exception:                              # noqa: BLE001 — no fast path
+        return rows
+    if not isinstance(got, dict) or not got:
+        return rows
+    answered: list[tuple[int, dict, float]] = []
+    untouched: list[tuple[int, dict]] = []
+    for index, row in enumerate(rows):
+        info = got.get(row.get("signature"))
+        if isinstance(info, dict) and isinstance(info.get("rank"), (int, float)):
+            answered.append((index, row, float(info["rank"])))
+        else:
+            untouched.append((index, row))
+    answered.sort(key=lambda item: (-item[2], item[0]))
+    return ([row for _, row, _ in answered]
+            + [row for _, row in untouched])
+
+
 def _delivery_line(row: dict) -> str:
     """One bounded line for a spoken finding: `[severity] source — summary`.
     Payloads never speak (privacy: a batch carries the rule's own words, not
@@ -964,6 +996,7 @@ def delivery_take(cfg: dict, *, now: float,
                 "held": "quiet", "error": ""}
     cap = max(1, min(int(cfg.get("digest_cap", DEFAULT_DIGEST_CAP)),
                      BATCH_ROW_CAP))
+    rows = _triage_order(rows)          # car 4 (D6) call site 3 — reorder only
     batch, rest = rows[:cap], rows[cap:]
     marked = mark_delivered(findings, batch)
     if own:

@@ -221,6 +221,6 @@ text contains no slot value and no secret-like keys) — applied to the
 serialized `media` block on its own as well: no URL, no slot value.
 - **Console coverage car (0.5.39)**: `env_overrides` (names only — a sweep
   asserts the exported value never serializes) and `mycore.known_tools`
-  (25 names) added to this payload; `GET /api/cron` added alongside it.
+  (25 names at that car; 27 today) added to this payload; `GET /api/cron` added alongside it.
   Evidence: `tmp/e2e_frontend_coverage.py` (`L1` `L3` `L5`) and
   `tmp/e2e_frontend_ui.js` (`U5`) — see [frontend_coverage.md](frontend_coverage.md).

@@ -173,13 +173,27 @@
           <h2 data-i18n="view.overview.title">Overview</h2>
           <p class="view-sub" data-i18n="view.overview.sub">Services, usage and channel at a glance</p>
         </div>
+        <!-- Car 7 (D11 restraint): the leash controls + tail state, merged
+             into the EXISTING Overview head (no second switchboard). STOP
+             aborts the turn running right now; PAUSE holds new turns and
+             the automatic legs until a human resumes (fail-closed). -->
+        <div class="view-actions">
+          <span class="stat-note" id="tailState" role="status">–</span>
+          <button class="btn" id="ctlStopBtn" type="button"
+                  data-i18n="ctl.stop" data-i18n-t="ctl.stopHint"
+                  title="abort the turn that is running right now">STOP</button>
+          <button class="btn" id="ctlPauseBtn" type="button"
+                  data-i18n="ctl.pause" data-i18n-t="ctl.pauseHint"
+                  title="hold new turns and automatic legs">PAUSE</button>
+          <span class="save-state" id="ctlMsg" role="status"></span>
+        </div>
       </div>
       <div class="ov-grid">
         <!-- activation & operations car (0.5.40): the first-run "am I ready?"
              checklist. Renders ONLY from GET /api/setup (presence / format /
              probe states — never a value); a build without that endpoint
              keeps the whole card hidden, an honest absence beats a guess. -->
-        <div class="card span-3" id="actCard" hidden>
+        <div class="card span-2" id="actCard" hidden>
           <h2><span data-i18n="sec.activate">Activation</span>
               <span class="chat-badge" id="actBadge">–</span></h2>
           <div class="stat-note" id="actStart" hidden></div>
@@ -203,8 +217,62 @@
             </div>
           </div>
         </div>
+        <div class="card span-2" id="authCard">
+          <h2><span data-i18n="auth.title">Your authority</span>
+              <span class="auth-stamp" data-i18n="auth.stamp">Preview · no live service</span></h2>
+          <!-- A2 (visual review): the lead copy sits ABOVE the two columns —
+               inside the narrow seal box it fought the engraving for width.
+               The box now holds only the seal, its hint and its result. -->
+          <p class="auth-lead" data-i18n="auth.lead">Hold the seal to authorise a read-only review preview. This preview does not connect to any service, sends nothing and executes nothing.</p>
+          <div class="auth-cols">
+            <div class="auth-seal">
+              <button class="sealbtn" id="authSeal" type="button"
+                      data-i18n-t="auth.sealTip" title="Hold to authorise a read-only preview">
+                <svg viewBox="-110 -110 220 220" id="authSealSvg" aria-hidden="true"></svg>
+                <span class="cap">
+                  <b id="authSealLabel" data-i18n="auth.holdLabel">Hold to seal</b>
+                  <span id="authSealSub" data-i18n="auth.holdSub">1.2s · read-only preview</span>
+                </span>
+              </button>
+              <div class="auth-hint" id="authHint" data-i18n="auth.hintIdle">Press and hold · release early to cancel</div>
+              <div class="auth-result" id="authResult">
+                <b data-i18n="auth.resultTitle">Sealed · read-only preview</b>
+                <span data-i18n="auth.resultBody">Authorised locally for this preview only. It does not connect to a service and executes no action; in the product a real write still requires its own human approval every time.</span>
+              </div>
+            </div>
+            <div class="auth-meds">
+              <div class="meds" id="authMeds">
+                <button class="med on" type="button" data-med="situation">
+                  <svg viewBox="-100 -100 200 200" aria-hidden="true"></svg>
+                  <span class="n" data-i18n="auth.med.situation.name">Situation</span>
+                  <span class="d" data-i18n="auth.med.situation.desc">local watch</span>
+                </button>
+                <button class="med" type="button" data-med="memory">
+                  <svg viewBox="-100 -100 200 200" aria-hidden="true"></svg>
+                  <span class="n" data-i18n="auth.med.memory.name">Memory</span>
+                  <span class="d" data-i18n="auth.med.memory.desc">portable</span>
+                </button>
+                <button class="med" type="button" data-med="constitution">
+                  <svg viewBox="-100 -100 200 200" aria-hidden="true"></svg>
+                  <span class="n" data-i18n="auth.med.constitution.name">Constitution</span>
+                  <span class="d" data-i18n="auth.med.constitution.desc">binding</span>
+                </button>
+                <button class="med" type="button" data-med="authority">
+                  <svg viewBox="-100 -100 200 200" aria-hidden="true"></svg>
+                  <span class="n" data-i18n="auth.med.authority.name">Authority</span>
+                  <span class="d" data-i18n="auth.med.authority.desc">always yours</span>
+                </button>
+              </div>
+              <div class="readout" id="authReadout">
+                <span class="lbl" id="authReadoutLbl" data-i18n="auth.med.situation.name">Situation</span>
+                <span id="authReadoutBody" data-i18n="auth.med.situation.body">Everything I watch stays on this machine. Signals are gathered locally, compared against your baselines, and never shipped to a third party.</span>
+              </div>
+            </div>
+          </div>
+          <div class="auth-toast" id="authToast" role="status"></div>
+        </div>
 
-        <div class="card span-3">
+        <div class="card span-2">
           <h2><span data-i18n="sec.services">Services</span>
               <span class="svc-summary" id="svcSummary">–</span></h2>
           <div class="panel-row" id="panels"></div>
@@ -259,9 +327,20 @@
           </div>
         </div>
 
-        <div class="card span-2">
-          <h2 data-i18n="sec.channel">CHANNEL</h2>
-          <table class="kv" id="cfgTable"></table>
+        <!-- UX round 2 (B2): the backup entry point Overview was missing — a
+             POINTER, not a second write surface. OPEN navigates to Settings and
+             reveals the real Backup & Restore card (active chip/search filter
+             included); the card itself, its passphrase fields and its E2E stay
+             untouched in one place. Labels reuse sec.backup / bk.hint /
+             sess.openBtn, so this pointer adds no key of its own (the badge
+             above contributes the single new key bk.ckx → packs 1189). -->
+        <div class="card span-1">
+          <h2 data-i18n="sec.backup">Backup &amp; Restore</h2>
+          <div class="stat-note" data-i18n="bk.hint">one .ckx file holds this console's credentials, settings and memory — encrypted inside this browser, read over the local loopback only</div>
+          <div class="ctl-actions">
+            <button class="btn primary" id="ovBackupOpen" type="button"
+                    data-i18n="sess.openBtn">OPEN</button>
+          </div>
         </div>
 
         <div class="card span-1">
@@ -286,7 +365,12 @@
              Both render from no-auth GET /api/capabilities and GET /api/cron
              (names and counts only); a field the server does not send shows
              "unavailable" instead of a guess, and nothing here can write. -->
-        <div class="card span-3">
+        <div class="card span-2">
+          <h2 data-i18n="sec.channel">CHANNEL</h2>
+          <table class="kv" id="cfgTable"></table>
+        </div>
+
+        <div class="card span-4">
           <h2 data-i18n="sec.system">SYSTEM CAPABILITIES</h2>
           <table class="kv" id="capGrid"></table>
           <!-- activation & operations car: doctor self-check (POST
@@ -329,57 +413,6 @@
              guilloche medallions. Honest by contract: this card previews a
              gesture only — it never claims a live service or an executed
              action (all copy lives in the locale packs, auth.*). -->
-        <div class="card span-3" id="authCard">
-          <h2><span data-i18n="auth.title">Your authority</span>
-              <span class="auth-stamp" data-i18n="auth.stamp">Preview · no live service</span></h2>
-          <div class="auth-cols">
-            <div class="auth-seal">
-              <p class="auth-lead" data-i18n="auth.lead">Hold the seal to authorise a read-only review preview. This preview does not connect to any service, sends nothing and executes nothing.</p>
-              <button class="sealbtn" id="authSeal" type="button"
-                      data-i18n-t="auth.sealTip" title="Hold to authorise a read-only preview">
-                <svg viewBox="-110 -110 220 220" id="authSealSvg" aria-hidden="true"></svg>
-                <span class="cap">
-                  <b id="authSealLabel" data-i18n="auth.holdLabel">Hold to seal</b>
-                  <span id="authSealSub" data-i18n="auth.holdSub">1.2s · read-only preview</span>
-                </span>
-              </button>
-              <div class="auth-hint" id="authHint" data-i18n="auth.hintIdle">Press and hold · release early to cancel</div>
-              <div class="auth-result" id="authResult">
-                <b data-i18n="auth.resultTitle">Sealed · read-only preview</b>
-                <span data-i18n="auth.resultBody">Authorised locally for this preview only. It does not connect to a service and executes no action; in the product a real write still requires its own human approval every time.</span>
-              </div>
-            </div>
-            <div class="auth-meds">
-              <div class="meds" id="authMeds">
-                <button class="med on" type="button" data-med="situation">
-                  <svg viewBox="-100 -100 200 200" aria-hidden="true"></svg>
-                  <span class="n" data-i18n="auth.med.situation.name">Situation</span>
-                  <span class="d" data-i18n="auth.med.situation.desc">local watch</span>
-                </button>
-                <button class="med" type="button" data-med="memory">
-                  <svg viewBox="-100 -100 200 200" aria-hidden="true"></svg>
-                  <span class="n" data-i18n="auth.med.memory.name">Memory</span>
-                  <span class="d" data-i18n="auth.med.memory.desc">portable</span>
-                </button>
-                <button class="med" type="button" data-med="constitution">
-                  <svg viewBox="-100 -100 200 200" aria-hidden="true"></svg>
-                  <span class="n" data-i18n="auth.med.constitution.name">Constitution</span>
-                  <span class="d" data-i18n="auth.med.constitution.desc">binding</span>
-                </button>
-                <button class="med" type="button" data-med="authority">
-                  <svg viewBox="-100 -100 200 200" aria-hidden="true"></svg>
-                  <span class="n" data-i18n="auth.med.authority.name">Authority</span>
-                  <span class="d" data-i18n="auth.med.authority.desc">always yours</span>
-                </button>
-              </div>
-              <div class="readout" id="authReadout">
-                <span class="lbl" id="authReadoutLbl" data-i18n="auth.med.situation.name">Situation</span>
-                <span id="authReadoutBody" data-i18n="auth.med.situation.body">Everything I watch stays on this machine. Signals are gathered locally, compared against your baselines, and never shipped to a third party.</span>
-              </div>
-            </div>
-          </div>
-          <div class="auth-toast" id="authToast" role="status"></div>
-        </div>
       </div>
     </section>
 
@@ -404,6 +437,8 @@
                  data-i18n-ph="chat.ph" placeholder="ask the assistant…">
           <button class="btn primary" id="chatSend" data-i18n="chat.send">SEND</button>
           <button class="btn" id="chatClear" data-i18n="chat.clear">CLEAR</button>
+          <button class="btn" id="chatStop" data-i18n="chat.stop"
+                  title="abort the turn that is running right now">STOP</button>
           <label class="btn" title="attach an image for your next message — the model endpoint must support vision; a non-multimodal endpoint answers with an honest refusal, never a fake"
                  data-i18n-t="img.attachT"><span data-i18n="img.attach">IMG</span>
             <input type="file" id="chatImg" accept="image/png,image/jpeg,image/webp" hidden>
@@ -491,12 +526,42 @@
     <section class="view" id="view-exchange" data-view="exchange">
       <div class="view-head">
         <div class="view-titles">
-          <h2 data-i18n="view.exchange.title">Exchange</h2>
-          <p class="view-sub" data-i18n="view.exchange.sub">Approval-gated venues, order plans and a market probe</p>
+          <h2 data-i18n="view.exchange.title">Extensions</h2>
+          <p class="view-sub" data-i18n="view.exchange.sub">Finance, home and vehicle: keyless quotes, approval gates and probes</p>
         </div>
       </div>
+      <!-- Extensions tabs (Phase B): ONE registry — a tab is a
+           .ext-tab[data-tab] button and its panel is [data-tabpanel="<name>"],
+           both inside this view. web/static/app.js setExtTab() drives every
+           tab from the DOM, so adding a category later means one button + one
+           panel and no code change. Default = finance (the exchange content
+           below keeps its ids, order and behaviour unchanged). -->
+      <div class="ext-tabs" role="tablist" data-i18n-t="ext.tabs.label"
+           title="Extensions sections">
+        <button class="ext-tab is-active" type="button" role="tab" data-tab="finance"
+                id="extTabFinance" aria-controls="extPanelFinance"
+                aria-selected="true" data-i18n="ext.tab.finance">Finance</button>
+        <button class="ext-tab" type="button" role="tab" data-tab="home"
+                id="extTabHome" aria-controls="extPanelHome"
+                aria-selected="false" data-i18n="ext.tab.home">Home</button>
+        <button class="ext-tab" type="button" role="tab" data-tab="vehicle"
+                id="extTabVehicle" aria-controls="extPanelVehicle"
+                aria-selected="false" data-i18n="ext.tab.vehicle">Vehicle</button>
+      </div>
+      <!-- Car 4 (D6) call site 1: intent routing. The operator types a
+           request and presses ROUTE — never automatic — and the answer is
+           either a tab or an honest "no fast path" reason word. -->
+      <div class="ext-route">
+        <input type="text" id="extIntent" maxlength="2000" autocomplete="off"
+               spellcheck="false" data-i18n-ph="ext.intentPh"
+               placeholder="which section owns this request?">
+        <button class="btn" id="extRouteBtn" type="button" data-i18n="ext.route">ROUTE</button>
+        <span class="save-state" id="extRouteMsg" role="status"></span>
+      </div>
+      <div class="ext-panel" data-tabpanel="finance" id="extPanelFinance"
+           role="tabpanel" aria-labelledby="extTabFinance" tabindex="0">
       <div class="ov-grid">
-        <section class="card span-3">
+        <section class="card span-2">
           <h2><span data-i18n="sec.exchange">Exchange</span>
               <span class="chat-badge" data-i18n="ex.badge">approval-gated</span></h2>
           <p class="auth-lead" data-i18n="ex.lead">Market reads are keyless. Orders exist only as plans: this panel is where you approve or reject them — the model's execute step receives a plan id and can never approve its own plan. Withdrawals and on-chain transfers do not exist in this product at all.</p>
@@ -508,7 +573,7 @@
           </ul>
         </section>
 
-        <section class="card span-3">
+        <section class="card span-2">
           <h2><span data-i18n="ex.thr">AUTO-APPROVAL THRESHOLDS</span></h2>
           <div class="head-status" id="exThreshold"></div>
           <div class="stat-note" id="exThresholdHint" hidden></div>
@@ -531,19 +596,19 @@
           </div>
         </section>
 
-        <section class="card span-3">
+        <section class="card span-4">
           <h2><span data-i18n="ex.plans">ORDER APPROVAL</span>
               <span class="gal-count" id="exPlansCount"></span></h2>
           <div class="stat-note" id="exGate" hidden></div>
           <div class="gal-grid" id="exPlans"></div>
         </section>
 
-        <section class="card span-3">
+        <section class="card span-4">
           <h2><span data-i18n="ex.venues">VENUES</span><span class="gal-count" id="exVenueCount"></span></h2>
           <div class="gal-grid" id="exVenues"></div>
         </section>
 
-        <section class="card span-1">
+        <section class="card span-2">
           <h2 data-i18n="ex.tools">REGISTERED TOOLS</h2>
           <div class="stat-note" id="exTools">–</div>
           <div class="reason-list" id="exNote" hidden></div>
@@ -566,6 +631,80 @@
           </div>
           <pre class="vs-live evo-status" id="exQuoteOut"></pre>
         </section>
+
+        <!-- Phase B: keyless market quotes (GET /api/quotes) — Sina for the
+             A-share market (GBK wire + mandatory Referer), Yahoo Finance for
+             US symbols. READ-ONLY, its own 10/60s budget, honest failures:
+             a dead upstream is reported as a dead upstream, never as a
+             fabricated number. -->
+        <section class="card span-2">
+          <h2><span data-i18n="ext.quotes.title">KEYLESS QUOTES</span>
+              <span class="chat-badge" data-i18n="ext.quotes.tag">no key</span></h2>
+          <p class="stat-note" data-i18n="ext.quotes.lead">Public market data, no credentials: A-shares straight from Sina, US stocks from Yahoo Finance. Read-only and rate-limited; nothing here is investment advice.</p>
+          <div class="ctl-row" style="margin-top:14px">
+            <label data-i18n="ext.quotes.market">Market</label>
+            <select id="extQuoteMarket" aria-label="market">
+              <option value="cn" data-i18n="ext.quotes.cn">A-shares</option>
+              <option value="us" data-i18n="ext.quotes.us">US stocks</option>
+            </select>
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="ext.quotes.symbol">Symbol</label>
+            <input type="text" id="extQuoteSymbol" value="sh600519" maxlength="16"
+                   autocomplete="off" spellcheck="false"
+                   data-i18n-ph="ext.quotes.symPh" placeholder="sh600519">
+          </div>
+          <div class="ctl-actions">
+            <button class="btn primary" id="extQuoteBtn" type="button" data-i18n="ext.quotes.go">FETCH</button>
+            <span class="save-state" id="extQuoteMsg" role="status"></span>
+          </div>
+          <div class="ext-quote" id="extQuoteResult" aria-live="polite"
+               data-i18n="ext.quotes.idle">pick a market, type a symbol, then press FETCH</div>
+        </section>
+
+        <!-- Phase B (D scheme): srsi stays an EXTERNAL link — a third-party
+             cockpit, opened in a new tab, no embedding and no data flow. -->
+        <section class="card span-2">
+          <h2><span data-i18n="ext.srsi.title">TRADING COCKPIT (EXTERNAL)</span></h2>
+          <p class="stat-note" data-i18n="ext.srsi.body">srsi.openapi.im is a third-party trading cockpit that opens in a new tab. It is an outside site - not part of this product, and it receives nothing from it.</p>
+          <div class="ctl-actions">
+            <a class="btn ext-link" id="extSrsiLink" href="https://srsi.openapi.im"
+               target="_blank" rel="noopener noreferrer"
+               data-i18n="ext.srsi.open">OPEN SRSI</a>
+          </div>
+        </section>
+      </div>
+      </div>
+
+      <!-- Home / Vehicle = thin launchers: the domain data is already
+           collected by the SNIFF board, so these tabs only point at it
+           (same setView() switch as any nav item) and never duplicate the
+           collection logic. -->
+      <div class="ext-panel" data-tabpanel="home" id="extPanelHome"
+           role="tabpanel" aria-labelledby="extTabHome" tabindex="0" hidden>
+        <div class="ov-grid">
+          <section class="card span-4">
+            <h2><span data-i18n="ext.home.title">SMART HOME</span></h2>
+            <p class="auth-lead" data-i18n="ext.home.body">Home-domain sources are already collected by SNIFF - Home Assistant bridges, sensors and web sources. This tab is a thin launcher: the SENSE board holds the sources, the rules and the sweeps.</p>
+            <div class="ctl-actions">
+              <button class="btn primary" id="extHomeGo" type="button"
+                      data-i18n="ext.home.go">OPEN THE SNIFF BOARD</button>
+            </div>
+          </section>
+        </div>
+      </div>
+      <div class="ext-panel" data-tabpanel="vehicle" id="extPanelVehicle"
+           role="tabpanel" aria-labelledby="extTabVehicle" tabindex="0" hidden>
+        <div class="ov-grid">
+          <section class="card span-4">
+            <h2><span data-i18n="ext.vehicle.title">SMART VEHICLE</span></h2>
+            <p class="auth-lead" data-i18n="ext.vehicle.body">Vehicle-domain sources are already collected by SNIFF - MCP bridges, telematics feeds and web sources. This tab is a thin launcher: open the SENSE board to inspect them.</p>
+            <div class="ctl-actions">
+              <button class="btn primary" id="extVehicleGo" type="button"
+                      data-i18n="ext.vehicle.go">OPEN THE SNIFF BOARD</button>
+            </div>
+          </section>
+        </div>
       </div>
     </section>
 
@@ -898,6 +1037,9 @@
       <!-- restyle car (0.5.56): group chips + search filter over the cards
            below. PURE FILTER — the default state (All, empty search) renders
            every card exactly as before, so no existing contract changes.
+           A card may list SEVERAL groups, space separated (UX round 2: the
+           Backup card is "general creds", so it no longer vanishes for a
+           user browsing Credentials & channels).
            The Access card is data-setgroup="always" and is never filtered:
            #saveBtn / #tokenInput must stay reachable for saving and for the
            test legs that wait on them. -->
@@ -981,6 +1123,106 @@
               </div>
             </div>
             <div class="stat-note" data-i18n="prof.note">a profile is a separate dog — own bot token, own state, own console port · remove needs an empty state dir</div>
+          </div>
+        </div>
+
+        <!-- Backup & Restore (CKX-P1, car 3): the console's own encrypted
+             backup plane. The plaintext export crosses THIS browser and the
+             local loopback only; the passphrase typed here is never sent
+             anywhere, and the .ckx artifact is produced by the vendored CKX
+             SDK (lazy-loaded on first use) with an in-page round-trip
+             self-check BEFORE any download is offered. -->
+        <div class="card" data-setgroup="general creds" id="backupCard">
+          <h2 data-i18n="sec.backup">Backup & Restore</h2>
+          <!-- UX round 2 (B2/P2): the verified-integrator badge the site
+               already carries, chained back to the public registry. It sits
+               BESIDE the h2 on purpose: loadLang() rewrites every [data-i18n]
+               node's textContent, so a child of that heading would be wiped on
+               every language switch (and #backupCard h2 keeps exactly one
+               text node for the E2E heading check). Same asset + href as site/;
+               title + alt both ride the pack key bk.ckx (en + zh), so a zh
+               session reads the badge in Chinese. -->
+          <a class="ckx-badge" href="https://cryptokey.im/registry" target="_blank"
+             rel="noopener noreferrer" data-i18n-t="bk.ckx"
+             title="CKX verified integrator — opens the public registry">
+            <img src="https://cryptokey.im/badge/ckx-verified.svg" width="160" height="40"
+                 alt="CKX verified integrator — opens the public registry"
+                 data-i18n-alt="bk.ckx"
+                 loading="lazy" decoding="async" referrerpolicy="no-referrer">
+          </a>
+          <div class="stat-note" data-i18n="bk.hint">one .ckx file holds this console's credentials, settings and memory — encrypted inside this browser, read over the local loopback only</div>
+          <fieldset class="bk-scope" id="bkScope">
+            <legend data-i18n="bk.scope">Sections</legend>
+            <label class="bk-box"><input type="checkbox" id="bkSec" checked><span data-i18n="bk.secrets">credentials</span></label>
+            <label class="bk-box"><input type="checkbox" id="bkSet" checked><span data-i18n="bk.settings">settings</span></label>
+            <label class="bk-box"><input type="checkbox" id="bkMem" checked><span data-i18n="bk.memory">memory</span></label>
+          </fieldset>
+          <div class="ctl-row">
+            <label data-i18n="bk.pass">Passphrase</label>
+            <input type="password" id="bkPass" maxlength="200" autocomplete="new-password"
+                   data-i18n-ph="bk.passPh" placeholder="choose a passphrase">
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="bk.pass2">Repeat passphrase</label>
+            <input type="password" id="bkPass2" maxlength="200" autocomplete="new-password"
+                   data-i18n-ph="bk.pass2Ph" placeholder="type it again">
+          </div>
+          <div class="stat-note" id="bkStrength" role="status"></div>
+          <div class="stat-note bk-warn" data-i18n="bk.lost">Lose this passphrase and nobody can restore the file — not us, not anyone. We keep no copy and cannot re-derive the key.</div>
+          <div class="ctl-actions">
+            <button class="btn primary" id="bkCreate" type="button" data-i18n="bk.create">CREATE BACKUP</button>
+            <span class="save-state" id="bkMsg" role="status"></span>
+          </div>
+
+          <div class="bk-sep" aria-hidden="true"></div>
+          <div class="ctl-row">
+            <label data-i18n="bk.file">Backup file</label>
+            <input type="file" id="bkFile" accept=".ckx,application/octet-stream"
+                   data-i18n-t="bk.fileT" title="a .ckx file created on this console">
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="bk.rpass">Unlock passphrase</label>
+            <input type="password" id="bkRPass" maxlength="200" autocomplete="off"
+                   data-i18n-ph="bk.rpassPh" placeholder="passphrase of that file">
+          </div>
+          <div class="stat-note" id="bkPreview" hidden role="status"></div>
+          <div class="ctl-actions">
+            <button class="btn" id="bkRestore" type="button" data-i18n="bk.restore">RESTORE</button>
+            <span class="save-state" id="bkRMsg" role="status"></span>
+          </div>
+          <div class="stat-note" data-i18n="bk.local">the plaintext never leaves this machine: export, decryption and the confirm POST all run over 127.0.0.1, and the passphrase is never sent to the server</div>
+
+          <!-- Car 8 (CKX-P2): the AGENT BACKUP section. Everything painted
+               here comes from GET /api/backup/agent — node runtime, slot
+               PRESENCE, the LOCAL call meter, the schedule row and the MCP
+               switch. No value, no path, no payload: the server never sends
+               one and this pane never asks. Fail-soft: a 404/401 from the
+               endpoint leaves honest placeholders instead of a broken card. -->
+          <div class="bk-sep" aria-hidden="true"></div>
+          <div class="sub-head"><span data-i18n="bk.agentHead">AGENT BACKUP</span></div>
+          <div class="stat-note" data-i18n="bk.agentHint">a scheduled prompt runs the backup_run tool: the console exports over the local loopback, encrypts with the AIDOG_CKX_PASSWORD slot through the vendored CKX CLI, verifies the container and proves a round-trip digest. The passphrase reaches only the child process — never a command line, never this page.</div>
+          <div class="stat-note" id="agNode" role="status">–</div>
+          <div class="stat-note" id="agPw" role="status">–</div>
+          <div class="ctl-row">
+            <label data-i18n="bk.agentSpec">Schedule</label>
+            <input type="text" id="agSpec" maxlength="120" value="daily 03:00"
+                   data-i18n-ph="bk.agentSpecPh" placeholder="daily 03:00">
+          </div>
+          <div class="ctl-actions">
+            <button class="btn primary" id="agSched" type="button" data-i18n="bk.agentSched">SCHEDULE</button>
+            <button class="btn" id="agUnsched" type="button" data-i18n="bk.agentUnsched">REMOVE</button>
+            <button class="btn" id="agMcp" type="button" data-i18n="bk.agentMcpOn">ENABLE MCP</button>
+            <span class="save-state" id="agMsg" role="status"></span>
+          </div>
+          <div class="stat-note" id="agState" role="status">–</div>
+          <div class="bar-block">
+            <label data-i18n="bk.agentQuota">Local call meter</label>
+            <div class="bar"><div class="bar-fill" id="agBar"></div></div>
+            <span class="num" id="agNum">–</span>
+          </div>
+          <div class="stat-note" data-i18n="bk.agentQuotaNote">counted locally — one per initiated encrypt, warn at 800, refuse at 1000 (the free plan). Local encrypt never calls their API, so this meter is a deliberately conservative proxy; their billing record is authoritative. RESET clears only our count.</div>
+          <div class="ctl-actions">
+            <button class="btn" id="agReset" type="button" data-i18n="bk.agentReset">RESET METER</button>
           </div>
         </div>
 
@@ -1134,6 +1376,36 @@
           </div>
           <div id="toolsOffList" hidden></div>
           <div class="stat-note" id="envOverrideChip" hidden></div>
+          <!-- Car 4 (D6): the decision endpoint row lives in the SAME Model
+               panel (no new view). OFF by default = every decision call site
+               keeps its current behavior; the credential is the
+               DECISION_API_KEY slot and shows as presence only. -->
+          <div class="ctl-row" style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--line);">
+            <label data-i18n="myc.decision" data-i18n-t="myc.decisionT"
+                   title="Typed questions to a discriminative decision model (it never generates text)">Decision endpoint (Jev)</label>
+            <button class="toggle" id="decToggle" type="button" aria-pressed="false"><span></span></button>
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="myc.decUrl">Decision base URL</label>
+            <input type="text" id="decUrl" maxlength="200" autocomplete="off"
+                   spellcheck="false" data-i18n-ph="myc.decUrlPh"
+                   placeholder="https://jevmodel.org">
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="myc.decModel">Decision model</label>
+            <input type="text" id="decModel" maxlength="120" autocomplete="off"
+                   spellcheck="false" data-i18n-ph="myc.decModelPh"
+                   placeholder="jev-latest">
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="myc.decRouter" data-i18n-t="myc.decRouterT"
+                   title="Model id this turn's router may switch to (empty = router off)">Cheap model (router)</label>
+            <input type="text" id="decRouter" maxlength="120" autocomplete="off"
+                   spellcheck="false" data-i18n-ph="myc.decRouterPh"
+                   placeholder="empty = router off">
+          </div>
+          <div class="stat-note" id="decStatus" role="status"></div>
+          <div class="stat-note" data-i18n="myc.decPriv">enabling sends bounded facts — your routed request text, order-plan numbers, SNIFF finding summaries — to this endpoint; the key stays in the DECISION_API_KEY slot on this machine and is never echoed anywhere</div>
         </div>
 
         <div class="card" data-setgroup="model">
@@ -1176,7 +1448,7 @@
           <div class="ctl-row">
             <label data-i18n="ctl.wake">Wake phrases (comma separated)</label>
             <input type="text" id="wakePhrases" maxlength="256" autocomplete="off"
-                   data-i18n-ph="ctl.wakePh" placeholder="hey aidog, ni hao ai duo">
+                   data-i18n-ph="ctl.wakePh" placeholder="hey aidog, hi aidog">
           </div>
         </div>
 
@@ -1341,6 +1613,113 @@
           <div id="credList"></div>
         </div>
 
+        <!-- Connections (car 6, D10): provider onboarding. P0 = token slots +
+             a scope checklist + a real READ-ONLY test call (no OAuth yet).
+             The slots render through the SAME presence-only mechanism as
+             Credentials (credRow) — a value never round-trips, and the
+             Credentials card skips this group so there is exactly one editor
+             per slot. -->
+        <div class="card" data-setgroup="creds" id="connectionsCard">
+          <h2 data-i18n="sec.connections">Connections</h2>
+          <div class="stat-note" data-i18n="conn.intro">optional provider credentials — read-only by default; a write scope is granted only when a task needs it</div>
+
+          <div class="conn-prov">
+            <div class="conn-head">
+              <span class="conn-name" data-i18n="conn.cf.name">Cloudflare</span>
+              <button class="btn" id="connTestCF" type="button"
+                      data-i18n="conn.test">TEST CONNECTION</button>
+            </div>
+            <div id="connListCF"></div>
+            <div class="conn-test stat-note" id="connTestCFOut" role="status"
+                 hidden></div>
+            <ul class="conn-scopes">
+              <li class="conn-scope"><i class="conn-badge" data-scope="ro" data-i18n="conn.badge.ro">read</i><b>Zone:Read</b><span data-i18n="conn.cf.ro">list this account's zones — exactly what TEST calls</span></li>
+              <li class="conn-scope"><i class="conn-badge" data-scope="rw" data-i18n="conn.badge.rw">write</i><b>Zone:DNS:Edit</b><span data-i18n="conn.cf.dns">create, change and delete DNS records</span></li>
+              <li class="conn-scope"><i class="conn-badge" data-scope="rw" data-i18n="conn.badge.rw">write</i><b>Account:Workers:Edit</b><span data-i18n="conn.cf.workers">deploy and update Worker scripts — your own bridge</span></li>
+              <li class="conn-scope"><i class="conn-badge" data-scope="rw" data-i18n="conn.badge.rw">write</i><b>Account:Pages:Edit</b><span data-i18n="conn.cf.pages">deploy and update Pages projects</span></li>
+            </ul>
+          </div>
+
+          <div class="conn-prov">
+            <div class="conn-head">
+              <span class="conn-name" data-i18n="conn.gh.name">GitHub</span>
+              <button class="btn" id="connTestGH" type="button"
+                      data-i18n="conn.test">TEST CONNECTION</button>
+            </div>
+            <div id="connListGH"></div>
+            <div class="conn-test stat-note" id="connTestGHOut" role="status"
+                 hidden></div>
+            <ul class="conn-scopes">
+              <li class="conn-scope"><i class="conn-badge" data-scope="ro" data-i18n="conn.badge.ro">read</i><b>Metadata / Contents:Read</b><span data-i18n="conn.gh.ro">read repository files and metadata — what the /readonly toolset needs</span></li>
+              <li class="conn-scope"><i class="conn-badge" data-scope="ro" data-i18n="conn.badge.ro">read</i><b>Pull requests:Read</b><span data-i18n="conn.gh.prRead">read open and closed pull requests</span></li>
+              <li class="conn-scope"><i class="conn-badge" data-scope="rw" data-i18n="conn.badge.rw">write</i><b>Contents:Write</b><span data-i18n="conn.gh.write">push to branches — grant only when a task needs it</span></li>
+              <li class="conn-scope"><i class="conn-badge" data-scope="rw" data-i18n="conn.badge.rw">write</i><b>Pull requests:Write</b><span data-i18n="conn.gh.prWrite">open and comment on pull requests</span></li>
+            </ul>
+          </div>
+
+          <div class="stat-note" data-i18n="conn.policy">Read-only is the default posture. Every mutating action — a DNS record, a Pages deploy, a pull request — is an explicit action class behind the approval gate, never an autonomous loop.</div>
+        </div>
+
+        <!-- Bridge (car 6, line 5 / D9): the user-owned reverse proxy. The
+             product ships the template, the fields, the switch and the audit
+             trail — it never operates a relay. Fail-closed three ways: the
+             switch, the Worker URL and an EMPTY allow-list each route
+             nothing. -->
+        <div class="card" data-setgroup="creds" id="bridgeCard">
+          <h2 data-i18n="sec.bridge">Bridge</h2>
+          <div class="stat-note" data-i18n="br.hint">optional — a reverse proxy YOU deploy on your own account, so the agent can reach URLs this machine cannot. The product never operates a relay for you.</div>
+          <div class="ctl-row">
+            <label data-i18n="br.workerUrl">Worker URL</label>
+            <input type="text" id="bridgeUrl" maxlength="2048" autocomplete="off"
+                   spellcheck="false" data-i18n-ph="br.workerUrlPh"
+                   placeholder="https://name.workers.dev">
+          </div>
+          <div class="ctl-row br-stack">
+            <label data-i18n="br.allow">Target allow-list</label>
+            <textarea id="bridgeAllow" rows="3" maxlength="4096"
+                      spellcheck="false" data-i18n-ph="br.allowPh"
+                      placeholder="api.example.com, *.internal.example.com"></textarea>
+          </div>
+          <div class="ctl-row br-stack">
+            <label data-i18n="br.allowAuth">Forward credentials to</label>
+            <textarea id="bridgeAuth" rows="3" maxlength="2048"
+                      spellcheck="false" data-i18n-ph="br.allowAuthPh"
+                      placeholder="host names, comma separated — empty means never"></textarea>
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="br.maxBytes">Max response bytes</label>
+            <input type="number" id="bridgeMaxBytes" min="4096" max="8388608"
+                   step="1024" style="width:130px">
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="br.enable">Route through the bridge</label>
+            <button class="toggle" id="bridgeToggle" aria-pressed="false"><span></span></button>
+          </div>
+          <div class="ctl-actions">
+            <button class="btn primary" id="bridgeSave" type="button"
+                    data-i18n="br.save">SAVE BRIDGE</button>
+            <button class="btn br-kill" id="bridgeKill" type="button"
+                    data-i18n="br.kill">DISABLE NOW</button>
+            <span class="save-state" id="bridgeMsg" role="status"></span>
+          </div>
+          <div class="stat-note" data-i18n="br.guard">guardrails: explicit allow-list, mirrored inside the Worker (no open proxy) · credentials are never forwarded · rate and size caps · one audit line per proxied request · this switch is the kill switch</div>
+
+          <div class="conn-head" style="margin-top:16px">
+            <span class="conn-name" data-i18n="br.template">Worker template</span>
+            <a class="btn" id="brTemplateDl" href="/api/bridge/template"
+               download="worker.js" data-i18n="br.download">DOWNLOAD</a>
+          </div>
+          <div class="ctl-actions">
+            <button class="btn" id="brTemplateShow" type="button"
+                    data-i18n="br.showTemplate">SHOW TEMPLATE</button>
+            <button class="btn" id="brAuditRefresh" type="button"
+                    data-i18n="br.audit">REFRESH AUDIT</button>
+          </div>
+          <pre class="br-code" id="brTemplate" hidden></pre>
+          <div class="br-audit" id="brAudit"></div>
+          <div class="ctl-actions"><span class="save-state" id="brStatusMsg" role="status"></span></div>
+        </div>
+
         <div class="card" data-setgroup="creds">
           <h2 data-i18n="sec.channels">Channels</h2>
           <div id="chanList"></div>
@@ -1386,6 +1765,65 @@
           </div>
         </div>
 
+        <!-- Car 7 (D11 restraint): the budget guardrails. Both caps 0 = OFF
+             (today's behavior unchanged); over a cap NEW turns are refused
+             with an honest line until 00:00 UTC. The status row is read from
+             GET /api/control (meter + price table + FX), never guessed. -->
+        <div class="card" data-setgroup="general" id="guardCard">
+          <h2 data-i18n="sec.guardrails">Guardrails</h2>
+          <div class="stat-note" data-i18n="gr.hint">daily caps for NEW turns — 0 = off. Over a cap the turn is refused with an honest line until 00:00 UTC.</div>
+          <div class="ctl-row">
+            <label data-i18n="gr.usdDay">USD per day</label>
+            <input type="number" id="grUsdDay" min="0" max="100000" step="0.5"
+                   style="width:130px">
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="gr.tokenDay">Tokens per day</label>
+            <input type="number" id="grTokenDay" min="0" max="10000000000" step="1000"
+                   style="width:170px">
+          </div>
+          <div class="sub-head" style="margin-top:12px">
+            <span data-i18n="gr.today">TODAY (UTC)</span>
+          </div>
+          <div class="stat-grid" id="grStats">
+            <div><div class="k" data-i18n="gr.usdDay">USD per day</div><div class="v" id="grUsdStat">–</div></div>
+            <div><div class="k" data-i18n="gr.tokenDay">Tokens per day</div><div class="v" id="grTokStat">–</div></div>
+          </div>
+          <div class="stat-note" id="grStatus" role="status">–</div>
+          <div class="stat-note" data-i18n="gr.note">USD spend = metered tokens x price table, converted at the console FX rate; an unresolvable rate shows UNKNOWN and never blocks (the token cap still applies).</div>
+          <div class="ctl-actions">
+            <span class="save-state" id="grMsg" role="status"></span>
+          </div>
+        </div>
+
+        <!-- Car 7 (D11 obedience): the operator's rules & forbidden zones —
+             injected right under the constitution (assembly), priority order
+             and the mandatory conflict disclosure are part of the message. -->
+        <div class="card" data-setgroup="general" id="obedCard">
+          <h2 data-i18n="sec.obedience">Rules &amp; Forbidden Zones</h2>
+          <div class="stat-note" data-i18n="ob.hint">injected right under the constitution: on any conflict the constitution wins and the reply must say which rule was not applied</div>
+          <div class="ctl-row">
+            <label data-i18n="ob.rules">Rules (one per line)</label>
+          </div>
+          <div class="ctl-row">
+            <textarea id="obRules" rows="4" maxlength="32768"
+                      spellcheck="false" data-i18n-ph="ob.rulesPh"
+                      placeholder="always cite a source for every claim"></textarea>
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="ob.forbidden">Forbidden zones (one per line)</label>
+          </div>
+          <div class="ctl-row">
+            <textarea id="obForbidden" rows="4" maxlength="32768"
+                      spellcheck="false" data-i18n-ph="ob.forbiddenPh"
+                      placeholder="never touch production without approval"></textarea>
+          </div>
+          <div class="stat-note" data-i18n="ob.priority">priority: constitution &gt; these rules &gt; skills/learned &gt; your judgment</div>
+          <div class="ctl-actions">
+            <span class="save-state" id="obMsg" role="status"></span>
+          </div>
+        </div>
+
         <!-- Access card: first-run onboarding (0.5.48 car 5) — what the
              token IS (secrets.env's WEB_TOKEN, named on purpose so the owner
              can match it against the file) and why the page never rewrites
@@ -1409,12 +1847,13 @@
     </section>
 
     <footer>
-      <span class="brand-line">您的忠实AI伙伴 · Your loyal AI companion</span>
+      <span class="brand-line" data-i18n="app.brandLine">Your loyal AI companion</span>
       <!-- X19: the console's documentation entry (the upstream /docs gap) —
-           one honest deep link to the public docs site, same bilingual style
-           as the neighbouring brand line. -->
+           one honest deep link to the public docs site. Car 8: language-
+           specific (owner ruling) — an English session must never render
+           Chinese here, and vice versa; both live in the locale packs. -->
       <a class="foot-docs" id="footDocs" href="https://aidog.im/"
-         target="_blank" rel="noopener noreferrer">文档 · Docs</a>
+         target="_blank" rel="noopener noreferrer" data-i18n="app.docs">Docs</a>
       <span id="footnote">loopback · free forever</span>
       <span id="ts">–</span>
     </footer>
@@ -1424,7 +1863,7 @@
 <!-- transient update-check toast (activation car): fixed, auto-hiding,
      carries the three honest check outcomes verbatim -->
 <div id="updToast" role="status" hidden
-     style="position:fixed;top:calc(var(--topbar-h,63px) + 12px);left:50%;transform:translateX(-50%);z-index:70;max-width:min(560px,92vw);background:#fff;border:1px solid var(--line);border-left:3px solid var(--blue);border-radius:10px;box-shadow:0 8px 24px rgba(0,22,51,.18);padding:10px 14px;font-size:12.5px;color:var(--navy);overflow-wrap:anywhere;"></div>
+     style="position:fixed;top:calc(var(--topbar-h,56px) + 12px);left:50%;transform:translateX(-50%);z-index:70;max-width:min(560px,92vw);background:#fff;border:1px solid var(--line);border-left:3px solid var(--blue);border-radius:10px;box-shadow:0 8px 24px rgba(0,22,51,.18);padding:10px 14px;font-size:12.5px;color:var(--navy);overflow-wrap:anywhere;"></div>
 
 <script src="/static/app.js"></script>
 </body>
