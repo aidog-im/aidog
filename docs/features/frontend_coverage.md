@@ -290,7 +290,7 @@ the restart handler logs a tmux session name and a return code only.
   restoring value/panel/dirty flags, served packs 1224/1224 with an English
   pack free of Chinese, zero `pageerror`, production health. Run:
   `PW_PATH=<playwright node path> node tmp/d1_ui_probe.js`.
-- Standing gates (after the CKX-P2 agent-backup car): `mycore/tests/run.py` **2080** ·
+- Standing gates (after the CKX-P2 agent-backup car): `mycore/tests/run.py` **2081** ·
   `tests/web_console_p3.py` **432** · `tests/ckx_roundtrip.mjs` **28** ·
   `tests/source_lang_check.py` **0/78**
   (locale packs **1224/1224**). The 0.5.39 baseline of this page was

@@ -15766,7 +15766,7 @@ def test_ledger() -> None:
     sent: list[dict] = []
 
     def ok_post(url, method, headers, data, timeout):
-        sent.append(json.loads(data))
+        sent.append({"url": url, "headers": headers, "body": data})
         return (200, "")
 
     cfg = {"ledger": {"enabled": True,
@@ -15774,7 +15774,10 @@ def test_ledger() -> None:
     lg.set_send(ok_post)
     check("ledger: first daily leg delivers", lg.maybe_report(cfg) is True)
     check("ledger: the sent report carries this install id",
-          len(sent) == 1 and sent[0].get("install_id") == iid)
+          len(sent) == 1 and json.loads(sent[0]["body"]).get("install_id") == iid)
+    check("ledger: the wire carries the product user-agent (CF 1010 leg)",
+          len(sent) == 1 and sent[0]["headers"].get("user-agent")
+          == lg.USER_AGENT, str(sent[0]["headers"] if sent else None))
     check("ledger: same-day second leg does not fire",
           lg.maybe_report(cfg) is False and len(sent) == 1)
     check("ledger: last_report_day reads the state dir",

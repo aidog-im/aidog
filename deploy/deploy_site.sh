@@ -105,12 +105,13 @@ print(json.dumps({"deployment_configs": dc}))' "$kvid")
   dbid=$(cfjson GET "$API/accounts/$AIDOG_CF_ACCOUNT_ID/d1/database" \
     | python3 -c 'import json,sys
 for db in (json.load(sys.stdin).get("result") or []):
-    if db.get("name")=="aidog-site-ledger": print(db["id"]); break' 2>/dev/null || true)
+    if db.get("name")=="aidog-site-ledger": print(db["uuid"]); break' 2>/dev/null || true)
   if [ -z "$dbid" ]; then
     resp=$(cfjson POST "$API/accounts/$AIDOG_CF_ACCOUNT_ID/d1/database" \
       "$AIDOG_CF_API_TOKEN" "{\"name\":\"$D1_NAME\"}")
+    # D1 create answers {result:{uuid:...}} — D1 never returns a key "id".
     dbid=$(printf '%s' "$resp" | python3 -c 'import json,sys
-d=json.load(sys.stdin); print(d["result"]["id"] if d.get("success") else "")' 2>/dev/null || true)
+d=json.load(sys.stdin); print(d["result"]["uuid"] if d.get("success") else "")' 2>/dev/null || true)
     [ -n "$dbid" ] && echo "DEPLOY_SITE: D1 database created ($D1_NAME)"
   else
     echo "DEPLOY_SITE: D1 database reused ($D1_NAME)"
@@ -119,10 +120,13 @@ d=json.load(sys.stdin); print(d["result"]["id"] if d.get("success") else "")' 2>
     echo "DEPLOY_SITE: WARN D1 ensure failed — token likely lacks D1 Edit; /api/ledger /api/stats /api/visits will stay pending" >&2
   else
     proj=$(cfjson GET "$API/accounts/$AIDOG_CF_ACCOUNT_ID/pages/projects/$PROJECT")
+    # Pages API quirk (measured): the d1_databases entry key is `id`, NOT
+    # `database_id` (wrangler.toml naming) — with database_id the PATCH is
+    # rejected as "Invalid database UUID ()".
     need=$(printf '%s' "$proj" | python3 -c 'import json,sys
 d=json.load(sys.stdin); dbid=sys.argv[1]
 dc=(d.get("result") or {}).get("deployment_configs") or {}
-ok=all((((dc.get(e) or {}).get("d1_databases") or {}).get("LEDGER") or {}).get("database_id")==dbid for e in ("production","preview"))
+ok=all((((dc.get(e) or {}).get("d1_databases") or {}).get("LEDGER") or {}).get("id")==dbid for e in ("production","preview"))
 print("no" if ok else "yes")' "$dbid" 2>/dev/null || echo unknown)
     if [ "$need" = "yes" ]; then
       body=$(printf '%s' "$proj" | python3 -c 'import json,sys
@@ -130,7 +134,7 @@ d=json.load(sys.stdin); dbid=sys.argv[1]
 dc=(d.get("result") or {}).get("deployment_configs") or {}
 for e in ("production","preview"):
     cfg=dc.setdefault(e, {})
-    cfg["d1_databases"]={**(cfg.get("d1_databases") or {}), "LEDGER": {"database_id": dbid, "database_name": "aidog-site-ledger"}}
+    cfg["d1_databases"]={**(cfg.get("d1_databases") or {}), "LEDGER": {"id": dbid, "database_name": "aidog-site-ledger"}}
 print(json.dumps({"deployment_configs": dc}))' "$dbid")
       out=$(cfjson PATCH "$API/accounts/$AIDOG_CF_ACCOUNT_ID/pages/projects/$PROJECT" \
         "$AIDOG_CF_API_TOKEN" "$body")
@@ -273,7 +277,7 @@ if grep -q "## Product" /tmp/deploy_site_llms.txt \
    && grep -q "nine venues" /tmp/deploy_site_llms.txt \
    && grep -q "prepare → human console approval → execute" /tmp/deploy_site_llms.txt \
    && grep -q "ACTIVATION card" /tmp/deploy_site_llms.txt \
-   && grep -q "2080/2080" /tmp/deploy_site_llms.txt \
+   && grep -q "2081/2081" /tmp/deploy_site_llms.txt \
    && grep -q "aidog.im/#capabilities" /tmp/deploy_site_llms.txt; then
   echo "DEPLOY_SITE: VERIFY OK /llms.txt facts (capabilities, web3 gate, activation, gates)"
 else

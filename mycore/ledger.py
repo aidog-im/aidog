@@ -49,6 +49,10 @@ MODELS_MAX = 32                    # per-report model rows
 MODEL_NAME_MAX = 100
 CHECK_SEC = 600                    # leg throttle (seconds)
 TIMEOUT = 10.0                     # POST timeout (seconds)
+# Measured against the live endpoint: Cloudflare's browser-signature rule
+# answers 1010/403 to the default Python-urllib signature, while a named
+# product agent passes. Honest identity, working wire.
+USER_AGENT = "AidogLedger/1.0 (+https://aidog.im)"
 STATE_FILE = "state.json"          # {"last_report": "YYYY-MM-DD"}
 ID_FILE = "install_id"             # random UUID4, resettable by deletion
 TURNS_DIR = "turns"
@@ -337,7 +341,11 @@ def _default_post(url: str, method: str, headers: dict, data: bytes,
 def send(payload: dict, endpoint: str, timeout: float = TIMEOUT) -> bool:
     """POST one report. True = the endpoint answered 2xx. Every other
     outcome (no endpoint, oversize body, network error, non-2xx) is False —
-    silent at the call site; the caller logs one line if it wants to."""
+    silent at the call site; the caller logs one line if it wants to.
+
+    The request carries a product User-Agent: Cloudflare's browser-signature
+    rule bans the default Python-urllib signature on aidog.im (measured:
+    HTTP 1010 / 403), and a named product agent passes (200)."""
     if not endpoint or not isinstance(endpoint, str):
         return False
     try:
@@ -347,11 +355,11 @@ def send(payload: dict, endpoint: str, timeout: float = TIMEOUT) -> bool:
         return False
     if len(body) > PAYLOAD_MAX_BYTES:
         return False
+    headers = {"content-type": "application/json; charset=utf-8",
+               "user-agent": USER_AGENT}
     post = _send_override or _default_post
     try:
-        status, _ = post(endpoint, "POST",
-                         {"content-type": "application/json; charset=utf-8"},
-                         body, timeout)
+        status, _ = post(endpoint, "POST", headers, body, timeout)
     except Exception:                        # noqa: BLE001 — seam safety
         return False
     return isinstance(status, int) and 200 <= status < 300
