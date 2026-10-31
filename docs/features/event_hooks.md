@@ -7,7 +7,7 @@ Run a local command on agent lifecycle events — notifications, metrics
 pings, audit trails — without forking the agent and without giving a hook
 any way to block or break a conversation.
 
-## Event whitelist (six, nothing else)
+## Event whitelist (seven, nothing else)
 
 | Event | Fires when |
 |---|---|
@@ -16,6 +16,7 @@ any way to block or break a conversation.
 | `tool_call` | A tool is dispatched inside a turn (tool name only). |
 | `compact` | Context compaction folded a conversation. |
 | `cron_fire` | A scheduled job is delivered. |
+| `mission_tick` | The mission leg ticked with an active mission (car 3, 0.5.46) — fires once per active mission per leg tick, after the tick; no active mission = no fire. |
 | `error` | The turn pipeline hit an error path. |
 
 Any other key is refused **at settings-write time** (HTTP 400 naming the
@@ -61,8 +62,12 @@ restore-only hook would be misleading.
 - **Minimal environment**: the child inherits only `PATH` and `HOME`, plus
   `AIDOG_HOOK_EVENT` (event name), optional `AIDOG_HOOK_CHAT`
   (pre-redacted `id:<last4>` — full chat ids never cross), and
-  `AIDOG_HOOK_TOOL` (tool name only, never arguments). API keys, console
-  tokens, and channel credentials do not cross into a hook process.
+  `AIDOG_HOOK_TOOL` (tool name only, never arguments). `mission_tick`
+  additionally carries exactly three more vars — `AIDOG_HOOK_MISSION`
+  (sanitized mission id ≤ 32 chars), `AIDOG_HOOK_MISSION_STATE` (state enum)
+  and `AIDOG_HOOK_MISSION_PROGRESS` (`done/total`) — id/state/progress only:
+  never the goal text, an origin, or a path. API keys, console tokens, and
+  channel credentials do not cross into a hook process.
 - **Zero echo**: hook stdout/stderr is captured and discarded. It never
   enters a chat reply, a log line, or any API response — a hook that prints
   a secret leaks nowhere on our side.
@@ -79,14 +84,16 @@ an unreadable/corrupt settings file just means "no hooks configured").
 
 ## Testing evidence
 
-- `mycore/tests/run.py::test_hooks` — **20 offline checks** (hermetic temp
+- `mycore/tests/run.py::test_hooks` — **23 offline checks** (hermetic temp
   repos, never production `data/`): schema/whitelist/bounds (unknown event,
   cmd shape, timeout range, missing argv[0], unknown keys), real background
   execution (sequential order, live-thread return without blocking), env
   whitelist (hook vars + PATH present, parent secret never crosses),
   failure isolation (`HOOK_FAIL exit:3`, no raise), timeout kill
   (`timeout:1s`), no-shell literalness (metacharacters stay data), and
-  zero-echo (a fake secret printed by the hook never reaches any log line).
+  zero-echo (a fake secret printed by the hook never reaches any log line) —
+  plus the car-3 `mission_tick` emission and its three sanitized mission
+  env vars.
 - `tests/web_console_p3.py` — **4 smoke checks**: unknown event → 400
   naming the whitelist, `cmd` as string → 400 schema error, legal write →
   200 with byte-consistent file + `GET /api/settings` readback (settings
@@ -99,4 +106,9 @@ an unreadable/corrupt settings file just means "no hooks configured").
   read-back) + `U6` (zh labels) — see
   [frontend_coverage.md](frontend_coverage.md).
 
-Suite totals after car G (v0.5.32): core **1020/1020**, smoke **154/154**.
+- **Mission-leg evidence (car 3, 0.5.46)**: `tmp/e2e_mission_pause.py` L6
+  configures a real `mission_tick` recorder through `POST /api/settings`,
+  drives one mission tick and asserts exactly ONE fire with env keys ⊆
+  `{PATH, HOME} ∪ AIDOG_HOOK_{EVENT,MISSION,MISSION_STATE,MISSION_PROGRESS}`
+  (no chat/tool var, no credential, no goal text, no machine path).
+- Suite totals after car 3 (v0.5.46): core **1477/1477**, smoke **234/234**.

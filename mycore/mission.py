@@ -11,8 +11,15 @@ owns everything that does NOT need the live service:
                     declared gap degrades the current subtask while the
                     queue keeps advancing — F4). Degraded may also pause
                     (degraded -> paused_user) and exits to done/sealed.
-                    `paused_approve` remains a reserved car-3 slot with
-                    out-edges only (see TRANSITIONS).
+                    Car 3 OPENS the paused_approve entry: a slice that
+                    prepares an order plan pending console approval
+                    suspends THAT subtask (status `awaiting_approval`) and
+                    parks the mission in paused_approve while every other
+                    subtask keeps advancing (F4); the leg observes the
+                    console decision each tick and returns to running when
+                    no subtask waits on a plan any more. paused_user and
+                    degraded have no edge INTO paused_approve (console
+                    pause during approval stays a 409 — see TRANSITIONS).
                     `done` and `sealed` are the ONLY terminal states, and
                     sealing REQUIRES an evidence list (never a silent stop).
   * plan           the plan slice yields a structured plan written into the
@@ -41,6 +48,12 @@ owns everything that does NOT need the live service:
                     all | milestones | final), per-tier min_interval throttle
                     (120s / 900s / none), same-window merging, escalation and
                     terminal reports bypass the throttle, output scrubbed.
+                    Car 3 adds two settings: `mission.quiet_hours`
+                    ("HH:MM-HH:MM", "" = off; inside the window only
+                    decision/final pass, the rest merge into the first
+                    non-quiet send) and `mission.min_interval` (0..86400s;
+                    >0 overrides the per-tier default, decision/final stay
+                    throttle-free).
                     Delivery itself is injected (the service passes its own
                     four-tier cron fallback chain: origin -> route:target ->
                     MYCORE_WD_CHAT -> log-only — no parallel implementation).
@@ -96,6 +109,9 @@ MAX_MARK_TEXT = 600            # one parsed marker line, after the prefix
 MAX_EVIDENCE = 20
 MAX_EVIDENCE_CHARS = 500
 MAX_REPORT_CHARS = 3500        # one report fragment, before merging
+MAX_REDLINE_CHARS = 500        # start param `redlines` (plain text)
+MAX_DELIVERABLE_CHARS = 200    # start param `deliverable` (plain text)
+MAX_MIN_INTERVAL = 86400       # settings `mission.min_interval` ceiling (s)
 
 STATES = ("planned", "running", "paused_user", "degraded",
           "paused_approve", "done", "sealed")
@@ -105,10 +121,13 @@ ACTIVE_STATES = frozenset({"planned", "running", "paused_user",
 
 # Legal moves. `degraded` entry opened in car 2 (a declared gap on the
 # unfinished current subtask; the queue and the leg keep going — F4).
-# `paused_approve` entry opens in car 3; its out-edges are reserved meanwhile.
+# `paused_approve` entry OPENED in car 3 (an order plan awaits the console):
+# only from `running`, never from a user pause or a degraded point — a
+# console pause during approval stays a 409, degraded stays a record.
 TRANSITIONS: dict[str, frozenset[str]] = {
     "planned": frozenset({"running", "sealed"}),
-    "running": frozenset({"paused_user", "degraded", "done", "sealed"}),
+    "running": frozenset({"paused_user", "degraded", "paused_approve",
+                          "done", "sealed"}),
     "paused_user": frozenset({"running", "sealed"}),
     "degraded": frozenset({"running", "paused_user", "done", "sealed"}),
     "paused_approve": frozenset({"running", "done", "sealed"}),  # car 3 opens entry
@@ -116,7 +135,8 @@ TRANSITIONS: dict[str, frozenset[str]] = {
     "sealed": frozenset(),
 }
 
-TASK_STATUSES = ("pending", "in_progress", "done", "degraded", "blocked")
+TASK_STATUSES = ("pending", "in_progress", "done", "degraded", "blocked",
+                 "awaiting_approval")
 
 REPORTING_TIERS = ("all", "milestones", "final")
 DEFAULT_REPORTING = "milestones"                 # owner decision (car contract #3)
@@ -130,12 +150,19 @@ BUDGET_BOUNDS: dict = {"max_slices": (1, 10000),
                        "max_wall_hours": (0.1, 8760.0),
                        "max_daily_model_calls": (1, 100000)}
 
-# settings `mission` partition — tier + the three budget guards; the console
-# always renders this block (no absence checks upstream).
-DEFAULT_SETTINGS: dict = {"reporting": DEFAULT_REPORTING, **DEFAULT_BUDGET}
+# settings `mission` partition — tier + the three budget guards + the two
+# car-3 reporter controls; the console always renders this block (no
+# absence checks upstream).
+DEFAULT_SETTINGS: dict = {"reporting": DEFAULT_REPORTING, "quiet_hours": "",
+                          "min_interval": 0, **DEFAULT_BUDGET}
 # Per-tier throttle: seconds between REPORTS (0 = no throttle). Terminal and
 # escalation reports bypass it entirely (THROTTLE_BYPASS) — never swallowed.
 MIN_INTERVAL = {"all": 120.0, "milestones": 900.0, "final": 0.0}
+
+# quiet-hours window grammar: "HH:MM-HH:MM" (24h, same-day or crossing
+# midnight e.g. "23:00-07:00"); start == end is refused (a zero-length or
+# 24h window would be meaningless/dangerous). "" = the feature is off.
+QUIET_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)-([01]\d|2[0-3]):([0-5]\d)$")
 
 # event kind -> tiers that report it (design doc 3.4 table, car-1 mapping:
 # `milestone` in car 1 = plan_ready; subtask granularity is the `all` tier).
@@ -194,6 +221,10 @@ ZH = {
     "decision_fact": "\u9700\u88c1\u51b3: {d}",
     "decision_impact": "\u8be5\u5b50\u9879\u6302\u8d77\uff0c\u5176\u4f59\u5b50\u9879\u7ee7\u7eed",
     "decision_next": "\u8bf7\u5728\u63a7\u5236\u53f0\u88c1\u51b3",
+    "approve_fact": "\u8ba2\u5355\u5f85\u5ba1\u6279: {p}",
+    "approve_impact": "\u8be5\u5b50\u9879\u6302\u8d77\uff0c\u5176\u4f59\u5b50\u9879\u7ee7\u7eed",
+    "approve_next": "\u8bf7\u5728\u63a7\u5236\u53f0 Web3 \u9762\u677f\u5ba1\u6279",
+    "reject_fact": "\u8ba2\u5355\u672a\u901a\u8fc7\u5ba1\u6279: {r}",
     "error_fact": "\u5206\u7247\u6267\u884c\u5f02\u5e38",
     "error_impact": "\u672c\u7247\u672a\u63a8\u8fdb\uff0c\u4e0b\u4e2a\u5206\u7247\u91cd\u8bd5",
     "error_next": "\u6301\u7eed\u5931\u8d25\u5c06\u6309\u9884\u7b97\u62a4\u680f\u5c01\u5b58",
@@ -372,12 +403,18 @@ def create(missions: list[dict], goal: str, *,
            manifest: dict | None = None,
            tasks: list[str] | None = None,
            slice_iters: int | None = None,
+           deadline: str | None = None,
+           redlines: str | None = None,
+           deliverable: str | None = None,
            now: float | None = None) -> dict:
     """Validate + append one mission in `planned` (mutates, returns it).
 
     Refuses (MissionError): empty/oversized goal, unknown reporting tier, a
     full history (MAX_MISSIONS) or an EXISTING ACTIVE mission — the executor
-    is single-mission by contract (one running row, ever)."""
+    is single-mission by contract (one running row, ever). Car 3: the three
+    optional start constraints (deadline ISO8601 in the future / redlines /
+    deliverable plain text) are validated here so EVERY start path shares
+    one grammar; absent or empty = None (old clients keep working verbatim)."""
     tier = reporting if reporting is not None else DEFAULT_REPORTING
     if tier not in REPORTING_TIERS:
         raise MissionError("reporting must be one of: " + "|".join(REPORTING_TIERS))
@@ -397,6 +434,10 @@ def create(missions: list[dict], goal: str, *,
                                     or not 1 <= slice_iters <= 100):
         raise MissionError("slice_iters must be an integer in 1..100")
     now = time.time() if now is None else now
+    deadline = _validate_deadline(deadline, now)
+    redlines = _validate_text("redlines", redlines, MAX_REDLINE_CHARS)
+    deliverable = _validate_text("deliverable", deliverable,
+                                 MAX_DELIVERABLE_CHARS)
     rows: list[dict] = []
     for i, text in enumerate(tasks or []):
         text = str(text).strip()[:MAX_TASK_TEXT]
@@ -412,6 +453,9 @@ def create(missions: list[dict], goal: str, *,
         "reporting": tier,
         "budget": validate_budget(budget),
         "slice_iters": int(slice_iters) if slice_iters else int(DEFAULT_MAX_ITERS),
+        "deadline": deadline,           # car 3 A-face constraints (None = unset)
+        "redlines": redlines,
+        "deliverable": deliverable,
         "counters": {"slices": 0, "daily_calls": 0, "calls_date": day_key(now)},
         "tasks": rows,
         "gaps": [],           # declared degraded paths (strings)
@@ -420,6 +464,7 @@ def create(missions: list[dict], goal: str, *,
         "manifest": dict(manifest) if isinstance(manifest, dict) else {},
         "last_report_at": None,
         "report_queue": [],   # same-window merge buffer (formatted fragments)
+        "last_progress_at": now,   # heartbeat base (watchdog car 3)
         "last_tick": None,
         "ended_at": None,
         "evidence": [],
@@ -634,6 +679,20 @@ def build_slice_prompt(mission_: dict, mode: str = "exec") -> str:
              f"slice {int((mission_.get('counters') or {}).get('slices') or 0)}"
              f"/{(mission_.get('budget') or {}).get('max_slices', '?')}",
              "", "Ultimate goal:", str(mission_.get("goal", "")), ""]
+    # Car 3 A-face constraints (deadline / redlines / deliverable): shown in
+    # BOTH the planning and execution slices — the plan must be decomposed
+    # around them (display only; F2: never wait for an answer).
+    constraints = []
+    if mission_.get("deadline"):
+        constraints.append(f"- Deadline: {mission_['deadline']}")
+    if mission_.get("redlines"):
+        constraints.append("- Red lines (never cross these): "
+                           f"{mission_['redlines']}")
+    if mission_.get("deliverable"):
+        constraints.append(f"- Expected deliverable: {mission_['deliverable']}")
+    if constraints:
+        lines += ["Owner constraints (binding — factor them into every "
+                  "step):", *constraints, ""]
     tasks = mission_.get("tasks") or []
     if mode == "plan" or not tasks:
         lines += [
@@ -896,6 +955,158 @@ def should_finish(mission_: dict, marks: dict) -> bool:
     return bool(tasks) and all(t.get("status") == "done" for t in tasks)
 
 
+# --------------------------------------------- start constraints (car 3) ----
+def _validate_deadline(val, now: float) -> str | None:
+    """Optional start param `deadline`: an ISO8601 timestamp strictly in the
+    future. Naive timestamps are read as Beijing time (owner timezone, cron
+    parity). Chat-safe English refusals (console 400 detail / chat error)."""
+    if val is None or (isinstance(val, str) and not val.strip()):
+        return None
+    if not isinstance(val, str):
+        raise MissionError("deadline must be an ISO8601 timestamp in the future")
+    text = val.strip()
+    iso = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
+    try:
+        when = datetime.fromisoformat(iso)
+    except ValueError:
+        raise MissionError(
+            "deadline must be an ISO8601 timestamp "
+            "(e.g. 2026-11-01T09:00:00+08:00)") from None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=BEIJING)
+    if when.timestamp() <= now:
+        raise MissionError("deadline must be in the future")
+    return text
+
+
+def _validate_text(key: str, val, limit: int) -> str | None:
+    """Optional start params `redlines` / `deliverable`: single-line plain
+    text within a fixed cap; absent/blank = None (old clients unaffected)."""
+    if val is None:
+        return None
+    if not isinstance(val, str):
+        raise MissionError(
+            f"{key} must be a plain-text string of at most {limit} chars")
+    text = val.strip()
+    if not text:
+        return None
+    if len(text) > limit:
+        raise MissionError(f"{key} must be at most {limit} chars")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in text):
+        raise MissionError(f"{key} must be plain text (no control characters)")
+    return text
+
+
+# ------------------------------------- web3 approval suspension (car 3) -----
+# The approval GATE itself is untouched (mycore/exchanges.py: prepare ->
+# console approve -> execute, plan id only). This block is the MISSION side:
+# detect a plan the slice prepared, park the subtask, observe the console
+# decision, resume. The service leg polls observe_approvals() every tick.
+PLAN_ID_RE = re.compile(r"\bpl_[0-9a-f]{12}\b")
+AWAIT_STATUS = "awaiting_approval"
+
+
+def approval_plan_ids(tool_log) -> list[str]:
+    """Plan ids a SUCCESSFUL `exchange_prepare_order` call left in the
+    run_turn tool log (the handler's first line is `plan pl_<12hex>
+    created — status=...`, always inside the 160-char preview). Fail-soft:
+    malformed/missing previews simply yield no ids (no suspension, car-2
+    behavior verbatim)."""
+    out: list[str] = []
+    for entry in tool_log or []:
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("name") != "exchange_prepare_order" or not entry.get("ok"):
+            continue
+        for pid in PLAN_ID_RE.findall(str(entry.get("preview") or "")):
+            if pid not in out:
+                out.append(pid)
+    return out
+
+
+def awaiting_tasks(mission_: dict) -> list[dict]:
+    return [t for t in mission_.get("tasks") or []
+            if isinstance(t, dict) and t.get("status") == AWAIT_STATUS]
+
+
+def suspend_for_approval(mission_: dict, task: dict, plan_ids: list[str],
+                         now: float) -> bool:
+    """Park ONE in-flight subtask on its pending order plan (mutates):
+    task -> awaiting_approval + plan ids recorded; running -> paused_approve.
+    A mission already in paused_approve just gains the record (second order
+    in the same window). Returns False — nothing changes — unless the target
+    was genuinely in flight (a done/blocked subtask is never hijacked)."""
+    if not isinstance(task, dict) or task.get("status") != "in_progress":
+        return False
+    pids = [str(p) for p in plan_ids if p]
+    if not pids:
+        return False
+    task["status"] = AWAIT_STATUS
+    task["plans"] = pids
+    state = mission_.get("state")
+    if state == "running":
+        transition(mission_, "paused_approve", now,
+                   reason="order plan awaiting console approval")
+    mission_["updated_at"] = now
+    return True
+
+
+def observe_approvals(mission_: dict, plan_status, now: float) -> list[dict]:
+    """Poll the console decision for every subtask waiting on an order plan
+    (the service leg calls this each tick with a read-only plan-status
+    reader). Resolution table — all plans of a subtask must settle:
+
+      * any plan `pending` or unknown (None)  -> keep waiting (fail-safe;
+        an unreadable store can never fabricate an outcome)
+      * any plan `approved` / `executed`      -> subtask returns to pending
+        (the queue re-promotes it; the next slice may execute the plan)
+      * all plans rejected/expired/cancelled  -> subtask degraded + one gap
+        + a report event (F4: the mission continues WITHOUT the order)
+
+    When NO subtask waits any more and the mission sits in paused_approve,
+    it transitions back to running. Returns report events to emit (may be
+    empty); mutates the mission. Never raises past a broken reader (a reader
+    exception counts as unknown -> keep waiting)."""
+    events: list[dict] = []
+    waiting = awaiting_tasks(mission_)
+    if not waiting:
+        if mission_.get("state") == "paused_approve":
+            transition(mission_, "running", now,
+                       reason="approval queue empty")
+        return events
+    for task in waiting:
+        ids = [str(p) for p in task.get("plans") or []]
+        statuses: list[str] = []
+        for pid in ids:
+            try:
+                raw = plan_status(pid)
+            except Exception:  # noqa: BLE001 — a reader failure = unknown
+                raw = None
+            statuses.append(str(raw) if raw else "")
+        if not statuses or any(s in ("", "pending") for s in statuses):
+            continue                              # still awaiting the owner
+        if any(s in ("approved", "executed") for s in statuses):
+            task["status"] = "pending"
+            task.pop("plans", None)
+            continue
+        verdict = next((s for s in statuses if s), "unknown")
+        task["status"] = "degraded"
+        task.pop("plans", None)
+        gap = (f"order plan {ids[0] if ids else '?'} {verdict} — subtask "
+               "continues without the order")
+        gaps = mission_.setdefault("gaps", [])
+        if gap not in gaps:
+            gaps.append(scrub(gap))
+        events.append({"kind": "degraded", "level": "WARN",
+                       "fact": ZH["reject_fact"].format(r=verdict),
+                       "impact": ZH["degraded_impact"],
+                       "next": ZH["degraded_next"]})
+    if not awaiting_tasks(mission_) \
+            and mission_.get("state") == "paused_approve":
+        transition(mission_, "running", now, reason="approvals resolved")
+    return events
+
+
 # --------------------------------------------------------------- reporter ----
 _PATH_RE = re.compile(
     r"/(?:mnt|home|root|etc|var|opt|usr|srv|tmp|dev|proc|sys|run|media)"
@@ -931,7 +1142,8 @@ def fmt_final(mission_: dict, done: bool) -> str:
     tasks = mission_.get("tasks") or []
     done_rows = _task_rows(mission_, ("done",))
     open_rows = _task_rows(mission_,
-                           ("pending", "in_progress", "degraded", "blocked"))
+                           ("pending", "in_progress", "degraded", "blocked",
+                            "awaiting_approval"))
     gaps = [str(g)[:200] for g in (mission_.get("gaps") or [])]
     done_n = len(done_rows)
     sec_done = ZH["tasks_done"].format(d=done_n, t=len(tasks))
@@ -957,31 +1169,65 @@ def fmt_final(mission_: dict, done: bool) -> str:
     return scrub(f"[MISSION {mid}] {level} {title}\n{body}")
 
 
-def emit(mission_: dict, kind: str, fragment: str, deliver, now: float) -> str:
-    """Tier gate + throttle + same-window merge for one report.
+def _quiet_active(window: str, now: float) -> bool:
+    """Is `now` inside the quiet-hours window? Beijing time (owner
+    timezone, cron parity). Same-day windows use start <= t < end; a
+    midnight-crossing window (start > end) wraps; "" / malformed = off
+    (fail-soft: a hand-edited bad window never silences the reporter)."""
+    m = QUIET_RE.match(str(window or ""))
+    if not m:
+        return False
+    sh, sm, eh, em = (int(g) for g in m.groups())
+    start, end = sh * 60 + sm, eh * 60 + em
+    if start == end:
+        return False
+    local = _bj(now)
+    mins = local.hour * 60 + local.minute
+    if start < end:
+        return start <= mins < end
+    return mins >= start or mins < end          # crosses midnight
+
+
+def emit(mission_: dict, kind: str, fragment: str, deliver, now: float, *,
+         quiet_hours: str = "", min_interval: object = 0) -> str:
+    """Tier gate + throttle + quiet-hours + same-window merge for one report.
 
     Returns "sent" (delivery attempted — including log-only fallback),
-    "queued" (tier-eligible but inside the min_interval window; merged into
-    the next send) or "suppressed" (tier does not carry this kind — dropped,
-    never queued). Escalation and terminal fragments bypass the throttle so
-    a budget seal or a decision request can never be swallowed. Never
-    raises: a delivery failure is an honest "error" label, execution
-    continues (F5: no channel, no stall)."""
+    "queued" (tier-eligible but inside the min_interval window OR inside a
+    quiet window; merged into the next send) or "suppressed" (tier does not
+    carry this kind — dropped, never queued). Escalation and terminal
+    fragments bypass the throttle AND the quiet window so a budget seal or a
+    decision request can never be swallowed; inside a quiet window a bypass
+    fragment sends ALONE (queued progress merges only at the first
+    non-quiet send — the window contract). `min_interval` > 0 overrides the
+    per-tier default (0 = tier default: 120/900/none). Never raises: a
+    delivery failure is an honest "error" label, execution continues (F5)."""
     tier = mission_.get("reporting") or DEFAULT_REPORTING
     if tier not in REPORTING_TIERS:
         tier = DEFAULT_REPORTING
     if tier not in REPORTABLE.get(kind, frozenset()):
         return "suppressed"
-    min_interval = MIN_INTERVAL.get(tier, 0.0)
+    bypass = kind in THROTTLE_BYPASS
+    eff = (float(min_interval)
+           if isinstance(min_interval, (int, float))
+           and not isinstance(min_interval, bool) and float(min_interval) > 0
+           else MIN_INTERVAL.get(tier, 0.0))
     last = mission_.get("last_report_at")
-    due = (kind in THROTTLE_BYPASS or min_interval <= 0 or last is None
-           or now - float(last) >= min_interval)
+    due = (bypass or eff <= 0 or last is None
+           or now - float(last) >= eff)
     queue = mission_.setdefault("report_queue", [])
+    quiet = _quiet_active(quiet_hours, now)
+    if quiet and not bypass:
+        queue.append(fragment)                  # merges into first non-quiet send
+        return "queued"
     if not due:
         queue.append(fragment)
         return "queued"
-    text = "\n".join([*queue, fragment]) if queue else fragment
-    mission_["report_queue"] = []
+    if quiet:
+        text = fragment                         # bypass alone; queue preserved
+    else:
+        text = "\n".join([*queue, fragment]) if queue else fragment
+        mission_["report_queue"] = []
     mission_["last_report_at"] = now
     try:
         deliver(scrub(text))
@@ -991,6 +1237,45 @@ def emit(mission_: dict, kind: str, fragment: str, deliver, now: float) -> str:
 
 
 # ------------------------------------------------------------- settings -----
+def validate_quiet_hours(val) -> str:
+    """-> "" when valid, else a chat-safe English reason (one source for
+    both the settings write gate and the defensive readers)."""
+    if not isinstance(val, str):
+        return 'mission.quiet_hours must be "" or a HH:MM-HH:MM window'
+    if val == "":
+        return ""
+    m = QUIET_RE.match(val)
+    if not m:
+        return ('mission.quiet_hours must be "" or HH:MM-HH:MM '
+                "(e.g. 23:00-07:00)")
+    sh, sm, eh, em = (int(g) for g in m.groups())
+    if (sh, sm) == (eh, em):
+        return "mission.quiet_hours start and end must differ"
+    return ""
+
+
+def settings_quiet_hours(block) -> str:
+    """Effective quiet window from the settings `mission` block — live at
+    every emit (design face B: save = effective, no restart). Invalid or
+    absent stored values fall back to "" (off): a bad window must never
+    silence the reporter."""
+    if not isinstance(block, dict):
+        return ""
+    val = block.get("quiet_hours")
+    return val if isinstance(val, str) and not validate_quiet_hours(val) else ""
+
+
+def settings_min_interval(block) -> int:
+    """Effective report min_interval override (0 = per-tier default)."""
+    if not isinstance(block, dict):
+        return 0
+    val = block.get("min_interval")
+    if isinstance(val, bool) or not isinstance(val, int) \
+            or not 0 <= val <= MAX_MIN_INTERVAL:
+        return 0
+    return val
+
+
 def validate_mission_settings(doc) -> tuple[dict, list[str]]:
     """Strict validation for the settings `mission` partition (evolution
     parity): unknown keys, out-of-enum tiers and out-of-range budget guards
@@ -1010,6 +1295,20 @@ def validate_mission_settings(doc) -> tuple[dict, list[str]]:
         else:
             errors.append("mission.reporting must be one of: "
                           + "|".join(REPORTING_TIERS))
+    if "quiet_hours" in doc:
+        reason = validate_quiet_hours(doc["quiet_hours"])
+        if reason:
+            errors.append(reason)
+        else:
+            clean["quiet_hours"] = doc["quiet_hours"]
+    if "min_interval" in doc:
+        val = doc["min_interval"]
+        if isinstance(val, bool) or not isinstance(val, int) \
+                or not 0 <= val <= MAX_MIN_INTERVAL:
+            errors.append("mission.min_interval must be an integer in "
+                          f"0..{MAX_MIN_INTERVAL}")
+        else:
+            clean["min_interval"] = val
     for key in ("max_slices", "max_daily_model_calls"):
         if key not in doc:
             continue
@@ -1064,9 +1363,12 @@ def plan_detail(mission_: dict) -> dict | None:
             status = str(t.get("status") or "pending")
             if status == "in_progress":
                 status = "running"
-            subs.append({"id": str(t.get("id", "")),
-                         "text": str(t.get("text", "")),
-                         "status": status})
+            row = {"id": str(t.get("id", "")),
+                   "text": str(t.get("text", "")),
+                   "status": status}
+            if t.get("status") == AWAIT_STATUS:   # car 3: plan ids for the deep link
+                row["plans"] = [str(p) for p in t.get("plans") or []]
+            subs.append(row)
         milestones.append({"id": str(m.get("id", "")),
                            "title": str(m.get("title", "")),
                            "subtasks": subs})
@@ -1182,6 +1484,14 @@ def public_row(mission_: dict) -> dict:
         "daily_calls": int(counters.get("daily_calls") or 0),
         "gaps": len(mission_.get("gaps") or []),
         "blocked": sum(1 for t in tasks if t.get("status") == "blocked"),
+        # car 3: A-face constraints (null when unset — old rows stay honest)
+        "deadline": mission_.get("deadline"),
+        "redlines": mission_.get("redlines"),
+        "deliverable": mission_.get("deliverable"),
+        # car 3: subtasks parked on an order plan (paused_approve badge data)
+        "approvals": [{"task": str(t.get("id")),
+                       "plans": [str(p) for p in t.get("plans") or []]}
+                      for t in tasks if t.get("status") == AWAIT_STATUS],
         "budget": {**DEFAULT_BUDGET,
                    **{k: v for k, v in (mission_.get("budget") or {}).items()
                       if k in DEFAULT_BUDGET}},

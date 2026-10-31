@@ -1,23 +1,25 @@
 # Feature spec — 守夜任务（mission / autonomous ops）
 
 Status: **implemented**（2026-10-26，随 v0.5.44 发布车 1 最小闭环；同日
-v0.5.45 车 2「编排与看板」增量落地，见 §7）。
+v0.5.45 车 2「编排与看板」增量落地，见 §7；同日 v0.5.46 车 3「守夜加固」
+增量落地，见 §8）。
 设计锚点：`docs/design/autonomous_ops_design.md` §3（操作流）与 §5 车 1/
 车 2 验收闸。本页是第 32 份能力文档，覆盖 mission 的生命周期、三档汇报、
 预算护栏、API/设置面与红线关系。
 
 **边界**：车 1 = 最小闭环（立标 → 串行子任务逐分片执行 → 三档汇报 → 完成/
 封存）；车 2 = 编排与看板（里程碑拆解、delegate 并行、`degraded` **入边**、
-预算可配化与固化、`GET ?id=` 详情、控制台看板 + 只读编排视图，§7）。
-**仍属车 3**：`paused_approve` 入边（web3 审批联动）、静默期（quiet
-hours）、`mission_tick` hook、watchdog 心跳告警。没有通道也永不停摆：汇报
+预算可配化与固化、`GET ?id=` 详情、控制台看板 + 只读编排视图，§7）；
+**车 3 = 守夜加固**（`paused_approve` 入边与 web3 审批门联动、watchdog
+心跳告警、`mission_tick` hook、静默期与最小间隔、A 面三约束，§8）。
+没有通道也永不停摆：汇报
 四级回退的最后一级是「仅写日志」。
 
 Companion pages: [capabilities.md](capabilities.md)（能力目录契约）、
 [natural_language_cron.md](natural_language_cron.md)（同源的定时腿与投递回退）、
 [evolution_loop.md](evolution_loop.md)（同级的服务腿）、
 [console_chat.md](console_chat.md)（分片执行复用的 run_turn）、
-[event_hooks.md](event_hooks.md)（车 3 将增 `mission_tick` 事件）、
+[event_hooks.md](event_hooks.md)（含车 3 新增的 `mission_tick` 事件）、
 [frontend_coverage.md](frontend_coverage.md)（控制台设置面总矩阵）。
 
 ## 1. 生命周期（五态状态机）
@@ -32,7 +34,9 @@ planned → running ⇄ paused_user          （控制台暂停/恢复）
              ├→ degraded ⇄ running        （GAP 入边；下一子项启动/UNBLOCK
              │                             回 running——车 2 开）
              └→ sealed                    （证据性封存：停止、预算触顶）
-paused_approve                            （仅枚举 + 出边，入边车 3 开）
+running → paused_approve ⇄ running        （web3 子项下单待批：该子项
+                                            awaiting_approval、其余子项继续；
+                                            审批清空自动回 running，车 3 开，§8）
 ```
 
 - `done` 与 `sealed` 是**唯二终态**；`sealed` 必须携带 evidence（至少一条），
@@ -42,7 +46,8 @@ paused_approve                            （仅枚举 + 出边，入边车 3 �
 - `planned` 是 create 落点，控制台 start 立即推进到 `running`；执行器 tick
   里还有一道防御性 promote。
 - **pause 允许的起点是 `running | degraded`**（车 2 放宽），resume 只从
-  `paused_user`；degraded 入边语义详见 §7。
+  `paused_user`；degraded 入边语义详见 §7；**`paused_approve` 态下
+  pause/resume 恒 409**（detail 报 allowed states，车 3，E2E L6）。
 
 ## 2. 分片执行（守夜循环）
 
@@ -102,7 +107,7 @@ paused_approve                            （仅枚举 + 出边，入边车 3 �
   evidence）。
 - **投递四级回退**（与 cron 完全同一条链，`_origin_deliver` 唯一实现）：
   `origin(route:target 或 chat id)` → env/槽 `MYCORE_WD_CHAT` → **仅写日志**
-  （`delivered=none`）。mission 报告不发 hook（车 3 增 `mission_tick`）；
+  （`delivered=none`）。mission 报告不发 hook（观察事件 `mission_tick` 车 3 已增，§8）；
   控制台 `stop` 的终报**不发 bot**（响应当场带回）。
 - **凭据零回显**：所有出站报告经 `mycore.mission.scrub()` 单出口——
   token/bearer/`sk-` 形状与绝对机器路径替换为占位符（E2E 哨兵扫描零命中）。
@@ -115,8 +120,9 @@ paused_approve                            （仅枚举 + 出边，入边车 3 �
 | `max_wall_hours` | 24 | 0.1..8760（≤1 位小数） |
 | `max_daily_model_calls` | 200（按北京日历滚动） | 1..100000 |
 
-- **settings 四键（车 2 可配化）**：settings `mission` 块 =
-  `{reporting, max_slices, max_wall_hours, max_daily_model_calls}`，
+- **settings 六键（车 2 可配化 + 车 3 两键）**：settings `mission` 块 =
+  `{reporting, max_slices, max_wall_hours, max_daily_model_calls,
+  quiet_hours, min_interval}`，
   `mission.DEFAULT_SETTINGS` 常驻、`/api/settings` 正常读写，范围校验同源
   `mission.validate_mission_settings` / `mission.BUDGET_BOUNDS`。
 - **start 可带 `budget{...}` 覆盖**：缺省取 settings 当时值，body 覆盖后做
@@ -132,9 +138,9 @@ paused_approve                            （仅枚举 + 出边，入边车 3 �
 | 端点 | 认证 | 契约 |
 |---|---|---|
 | `GET /api/mission` | loopback，无 auth | `{reporting, active: null\|row, recent[≤10], count}`；损坏/缺失 → 空结构，绝不 500；**无 id 行为即旧列表 4 键形状**（前端兼容，E2E 断言） |
-| `GET /api/mission?id=<mid>` | loopback，无 auth | `{mission: {row, plan, events[≤20 升序], budget, budget_used}}`；未知 id → 404；车 2 前的旧 mission → `plan: null`（看板诚实显示“尚无计划”，车 2） |
-| `POST /api/mission` | `Bearer WEB_TOKEN` | `{action: start\|stop\|pause\|resume, goal?, id?, reporting?, budget?}` → 200 行；400 校验 · 401 · 404 未知 id · 409 冲突（已有 active 再 start / 历史满 50 / 状态机不合法），409 带 `mission_id` 或原因；pause 接受 `running \| degraded`（车 2） |
-| `POST /api/settings {"mission": {...}}` | `Bearer WEB_TOKEN` | `mission.reporting ∈ all\|milestones\|final`（默认 `milestones`），未知键/非法档 400；与写验证同源 `mission.validate_mission_settings` |
+| `GET /api/mission?id=<mid>` | loopback，无 auth | `{mission: {row, plan, events[≤20 升序], budget, budget_used}}`；row 带车 3 字段 `deadline/redlines/deliverable\|null` + `approvals:[{task, plans}]`，awaiting 子项行带 `plans`（审批深链）；未知 id → 404；车 2 前的旧 mission → `plan: null`（看板诚实显示“尚无计划”，车 2） |
+| `POST /api/mission` | `Bearer WEB_TOKEN` | `{action: start\|stop\|pause\|resume, goal?, id?, reporting?, budget?, deadline?, redlines?, deliverable?}` → 200 行；400 校验 · 401 · 404 未知 id · 409 冲突（已有 active 再 start / 历史满 50 / 状态机不合法），409 带 `mission_id` 或原因；pause 接受 `running \| degraded`（车 2）；**`paused_approve` 下 pause/resume 恒 409 并在 detail 报 allowed states**（车 3）；三约束校验单一语法在 `mission.create`，非法 400 detail 以字段名开头 |
+| `POST /api/settings {"mission": {...}}` | `Bearer WEB_TOKEN` | `mission.reporting ∈ all\|milestones\|final`（默认 `milestones`）+ 车 3 两键：`quiet_hours`（`""` 或 `HH:MM-HH:MM`，起≠止、可跨午夜）+ `min_interval`（0..86400，0=档默认），未知键/非法值 400 点名键；与写验证同源 `mission.validate_mission_settings` |
 | `GET /api/capabilities` → `mission` | 无 auth | `{active, running, total, reporting}` 摘要——目标文本不上无认证目录 |
 
 - start 语义：`goal` ≤4000 字符非空；`reporting` 参数**只覆盖该任务的档**，
@@ -151,8 +157,9 @@ paused_approve                            （仅枚举 + 出边，入边车 3 �
 
 - **提现/链上转账零代码**：mission 不新增任何资金出向工具——既有源码断言
   继续生效。
-- **web3 审批门 fail-closed**：本车只推进到 prepare/plan；下单类子项的
-  `paused_approve` 挂起态车 3 才接入，审批入口与 Bearer 闸形态不变。
+- **web3 审批门 fail-closed**：mission 仍只推进到 prepare/plan；下单类子项
+  挂起进 `paused_approve`（0.5.46 车 3 已接入，E2E 红线断言 **execute 无
+  审批仍被拒**），审批入口与 Bearer 闸形态不变。
 - **社区 MCP 永久禁用**：manifest 生成期即写死 `mcp: disabled`，穷举方法
   不等于找野路子（C3：缺能力 = 降级登记）。
 - **写盘范围**：分片复用 `execute_code` allowed-roots 与 checkpoint 写前
@@ -191,18 +198,95 @@ resume 后 gaps 原样保留；`degraded` 态分片照常执行。
 （start 时只提交填写项，留空 = 取 settings）；新增只读 `#orchCard` 编排卡
 （工具/渠道/web3/槽位/skills 五源汇总 + 深链到现有控件，**不建第二套开
 关**，数据源 = `/api/capabilities` 等既有端点）；locales 新增
-`mission.*`/`orch.*` 32 键 → packs **594/594**。
+`mission.*`/`orch.*` 32 键 → packs **594/594**（车 3 再 +20 → **614/614**，
+见 §8（6））。
 
-**（6）车 2 验收闸证据**：`tmp/e2e_mission_orch.py` 四态 E2E（§8）——
+**（6）车 2 验收闸证据**：`tmp/e2e_mission_orch.py` 四态 E2E（§9）——
 拆解 → 并行 → 降级 → 封存全链真跑。
 
-## 8. 证据（gates & tests）
+## 8. 车 3 增量（0.5.46）：守夜加固
 
-- `python3 -m mycore.tests.run` → `test_mission`：**201 个运行时 check**
-  （状态机合法/非法边含 degraded 入边、registry 原子与 cap、标记协议折入
-  含 MILESTONE 分组、reporter 三档 + 节流 + 合并 + 旁路、预算三护栏封存、
-  scrub、manifest、settings 校验含四键、`public_row` 白名单、detail 投影
-  与事件尾 20 行截断）；全套件 **1381/1381**。
+**（1）web3 `paused_approve` 联动（后端 Lane K）**：分片中成功的
+`exchange_prepare_order` 预览出 `pl_<12hex>` 且计划仍 `pending` 时，该
+子项挂起为 `awaiting_approval`（记录 plan ids），`running → paused_approve`
+入边打开（同窗第二单只记录、不重复转移；degraded/paused_user/planned 入边
+恒非法）；`paused_approve` 照常执行分片，`set_current` 跳过挂起子项——
+**其余子项逐 tick 继续推进**（F4）。服务腿每 tick 先 `observe_approvals`
+（approved/executed → 子项回 pending 重新排队；rejected/expired/cancelled →
+子项 degraded + gap + 汇报，不停摆；pending/未知/读取异常 → 继续等，读失败
+绝不编造裁决；全部落定 → `paused_approve → running`，事件 `via=approval`）。
+**审批门形态零改动**（prepare→approve→execute、Bearer、当日 ledger 全不
+动），`execute` 无审批仍被拒；`paused_approve` 态 pause/resume 恒 409
+（detail 报 allowed states）。detail 新增 `deadline/redlines/deliverable|null`
++ `approvals:[{task, plans}]`，awaiting 子项行带 `plans`（深链数据）。
+
+**（2）watchdog 心跳告警**：`MISSION_STALE_SEC=900`，active 态
+（running/degraded/paused_approve）的 `last_progress_at`（旧行回退
+updated_at/created_at）超阈 → `⚠️ [MISSION HEARTBEAT] 任务 {id} 已 {N} 分钟
+无进展（{state}）· {goal}` 走既有 notify 路径（goal 经 scrub、零凭据；
+dry_run 只闸重启、不抑告警）；内存节流按 `throttle_sec` 重报（never-
+silent，重启即重报），恢复进度/进入终态即静默；registry 读失败 fail-soft。
+
+**（3）`mission_tick` hook**：白名单 +1 事件；每个 active mission 每 tick
+恰好一次（无 active 不发，paused_user 也算 active——观察腿不观察模型），
+子进程 env 仅 `AIDOG_HOOK_MISSION`（净化 id≤32）/ `_MISSION_STATE`（枚举）/
+`_MISSION_PROGRESS`（`d/t`）+ PATH/HOME——零回显、不阻塞、不超时即丢弃
+非法值（E2E L6 对真实脚本捕获的 env 逐键断言）。
+
+**（4）静默期与最小间隔（settings 两键）**：`mission.quiet_hours`（`""` =
+关，或 `HH:MM-HH:MM`，起≠止、可跨午夜）——窗内只放行 decision/final
+（旁路且**单独**发出、合并队列保留），其余进队列、窗后首个非静默点**合并**
+发出；`mission.min_interval`（0..86400，0 = 档默认 120/900/∞）与窗口都
+逐 tick 活读（save = effective）；非法值 400 detail 点名键，坏窗口绝不静默
+（fail-soft 退回关）。
+
+**（5）A 面三约束**：start 可选 `deadline`（ISO8601 且须在未来，naive 按
++08:00）/ `redlines`（≤500 纯文本）/ `deliverable`（≤200 纯文本），空/空白
+= 不传；校验单一语法在 `mission.create`（所有 start 路径同源），非法 400
+detail 以字段名开头；三约束注入**计划片与执行片** prompt（`Owner constraints`
+段，F2 展示不等待），detail/row 回显、缺省 null。
+
+**（6）控制台（Lane K2）**：MISSIONS 卡新增可折叠约束区（datetime-local →
+ISO8601 传参、redlines textarea ≤500 实时计数、deliverable ≤200，只传填写
+项，不挤爆主表单）；详情区显示三约束（deadline 相对时间 + 过期红字、
+redlines/deliverable 文本块）与 **APPROVALS 区**（`paused_approve` 待批红
+徽章 + 每项 `{task, plans[]}` 列表、plan id 点击深链到既有 Web3 面板并高亮
+对应卡片 + 「在 Web3 面板完成审批后自动恢复，无需在此操作」文案，审批完成
+控制台零操作、下 tick 自动回 running）；档位旁新增 quiet_hours / min_interval
+控件（change 即写 `/api/settings` 同款机制，400 detail 原样显示）；五态徽章
+补全（paused_approve 红 vs degraded 琥珀）+ awaiting_approval 子项符号；
+locales 新增 20 个 `mission.*` 键 → packs **614/614**；既有
+`mission_card_verify` / `mission_board_verify` 两探针 0 FAILED（
+`#missionCard` 内 `<button>` 恒 4、三档 select、五符号集均不破）。
+
+**（7）车 3 验收闸证据**：`tmp/e2e_mission_pause.py` — **E2E 73/73 PASS ·
+7 legs (L1–L7)**：L1 审批挂起/恢复（prepare → paused_approve +
+approvals 深链数据 + decision 上线 + 其余子项继续推进；console approve →
+下 tick 回 running → 推进到 done + 终报；红线：execute 无审批被拒、模型
+工具集无 approve 路径、本地 mock 收到 0 次 order POST）· L2 心跳（900s+
+陈旧 → notify 路径告警一次 → 节流窗内不重复 → 越窗重报 → 恢复进度即
+静默，dry_run 全程开、告警零机器路径）· L3 quiet hours（窗内
+plan_ready/task_done 排队零上线、decision 单独放行且队列保留、窗后首个
+非静默点合并发出；min_interval 3600 与档默认 120 两档实测：60s 间隔排队 /
+4000s、200s 间隔发出）· L4 三约束（4 种非法 400 点名字段、缺省 null、
+合法回显三字段、计划片请求体含 `Owner constraints` 三值）· L5 checkpoint
+续跑压测（新进程 `MISSION_CATCHUP`、进度与计划结构不丢、分片号连续不重
+置、事件流严格 append-only、重启后终报照发）· L6 暂停窗（pause/resume
+409 报 allowed states + mission_tick env 逐键断言每 tick 恰一次、零回显）·
+L7 生产 `secrets.env`/`web/settings.json` 字节恒等 + 全程哨兵/机器路径清扫
++ 目标文本永在 user 层。隔离姿势同车 1/2（throwaway profile + stub 模型
++ stub TG + 本地 OKX book mock、无订单端点）。另有 `tmp/lane_k_probe.py`
+**19/19**（静默期合并/三约束注入/心跳三探）。Run:
+`python3 tmp/e2e_mission_pause.py`（rc 0 = 0 fail）。
+
+## 9. 证据（gates & tests）
+
+- `python3 -m mycore.tests.run` → `test_mission`：**285 个运行时 check**
+  （状态机合法/非法边含 degraded 入边与车 3 挂起/恢复、registry 原子与
+  cap、标记协议折入含 MILESTONE 分组、reporter 三档 + 节流 + 合并 + 旁路
+  + 静默窗 + min_interval、预算三护栏封存、scrub、manifest、settings 校验
+  含六键、`public_row` 白名单含三约束与 approvals、detail 投影与事件尾 20
+  行截断）；全套件 **1477/1477**。
 - **`tmp/e2e_mission.py`（本车验收闸，Lane G）— `E2E 54/54 PASS` ·
   8 legs (L1–L8)**：L1 立标（三档 settings 回读 + 非法档 400 + start/
   409/capabilities 摘要）· L2 真实分片（事件流 state+slice + 看板进度）·
@@ -230,11 +314,16 @@ resume 后 gaps 原样保留；`degraded` 态分片照常执行。
   扫描）· L6 生产 `secrets.env` + `web/settings.json` 字节恒等 + 全进程
   哨兵/机器路径清扫 + 目标文本永在 user 层。隔离姿势与车 1 完全同款。
   Run: `python3 tmp/e2e_mission_orch.py`（rc 0 = 0 fail）。
+- **`tmp/e2e_mission_pause.py`（车 3 验收闸，Lane K2）— `E2E 73/73 PASS` ·
+  7 legs (L1–L7)**：详见 §8（7）（审批挂起/恢复主线 + 心跳告警 + 静默期/
+  最小间隔两档实测 + 三约束 + checkpoint 续跑压测 + 409/hook env + 生产
+  字节恒等与哨兵清扫）。Run: `python3 tmp/e2e_mission_pause.py`（rc 0 = 0
+  fail）；辅以 `tmp/lane_k_probe.py` **19/19**。
 - `python3 deploy/check_publish.py` → READY(0)（本页在 allow 域，无机器
   路径/凭据/品牌词）；`python3 tests/source_lang_check.py` → 源码零 CJK
   （本页 docs 豁免，中文按仓库文档惯例）。
 
-## 9. 文件索引
+## 10. 文件索引
 
 | 文件 | 职责 |
 |---|---|
@@ -243,6 +332,10 @@ resume 后 gaps 原样保留；`degraded` 态分片照常执行。
 | `web/server.py` | `GET/POST /api/mission`、settings `mission` 分区、`capabilities.mission` |
 | `overlay/constitution/SOUL.md` | `## Mission conduct (autonomous ops)` C0-C5 |
 | `mycore/tests/run.py` | `test_mission` 单测 |
-| `tmp/e2e_mission.py` | 车 1 验收闸（本页 §8） |
-| `tmp/e2e_mission_orch.py` | 车 2 四态验收闸（本页 §8） |
+| `tmp/e2e_mission.py` | 车 1 验收闸（本页 §9） |
+| `tmp/e2e_mission_orch.py` | 车 2 四态验收闸（本页 §9） |
+| `tmp/e2e_mission_pause.py` | 车 3 审批挂起/恢复 + 守夜加固验收闸（本页 §9） |
+| `tmp/lane_k_probe.py` | 车 3 三探（静默期/三约束/心跳） |
+| `mycore/watchdog.py` | 车 3 心跳告警（`MISSION_STALE_SEC` / 节流重报） |
+| `mycore/hooks.py` | 事件白名单 + `mission_tick` env（零回显） |
 | `docs/design/autonomous_ops_design.md` | 设计书（车 1–5 分期、红线全表） |

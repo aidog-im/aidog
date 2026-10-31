@@ -1711,6 +1711,67 @@ def test_watchdog() -> None:
         except Exception as e:  # noqa: BLE001
             check("wd: no-chat notify log-only", False, str(e))
 
+        # --- car 3: mission heartbeat (stale -> alert -> throttle -> recovery)
+        from mycore.watchdog import MISSION_STALE_SEC, MISSION_WATCH_STATES
+        hb_lines: list[str] = []
+        mpath = tdp / "missions_hb.json"
+        hb_clock = [5_000_000.0]
+        wd_hb = Watchdog(WatchConfig.load(cfg_path), tdp / "state_mhb.json",
+                         log=hb_lines.append, probe=lambda t: True,
+                         now=lambda: hb_clock[0], missions_path=mpath)
+        wd_hb.check_once()          # no mission registry file at all
+        check("wd hb: no mission registry -> zero mission alerts",
+              not any("MISSION HEARTBEAT" in l for l in hb_lines),
+              str(hb_lines))
+
+        def _save_missions(rows):
+            mpath.write_text(json.dumps({"missions": rows, "last_tick": None}),
+                             encoding="utf-8")
+
+        _save_missions([{"id": "hb0001", "state": "running",
+                         "goal": "grow /mnt/" + "d/private thing",
+                         "last_progress_at": hb_clock[0] - 2000,
+                         "created_at": 0, "updated_at": 0}])
+        wd_hb.check_once()
+        hb_alerts = [l for l in hb_lines if "MISSION HEARTBEAT" in l]
+        check("wd hb: stale active mission alerts with a scrubbed goal",
+              len(hb_alerts) == 1 and "[MISSION HEARTBEAT]" in hb_alerts[0]
+              and "hb0001" in hb_alerts[0] and "/mnt/" not in hb_alerts[0]
+              and "[path]" in hb_alerts[0], str(hb_alerts))
+        check("wd hb: dry_run never suppresses the alert (restarts only)",
+              wd_hb.cfg.dry_run is True
+              and len([l for l in hb_lines
+                       if "MISSION HEARTBEAT" in l]) == 1)
+        wd_hb.check_once()          # inside throttle_sec -> no re-report
+        check("wd hb: throttle suppresses the re-report window",
+              len([l for l in hb_lines if "MISSION HEARTBEAT" in l]) == 1)
+        hb_clock[0] += 400          # past throttle_sec (300) -> re-alert
+        wd_hb.check_once()
+        check("wd hb: persistent staleness re-alerts (never silent)",
+              len([l for l in hb_lines if "MISSION HEARTBEAT" in l]) == 2)
+        _save_missions([{"id": "hb0001", "state": "running",
+                         "goal": "g", "last_progress_at": hb_clock[0],
+                         "created_at": 0, "updated_at": 0}])
+        wd_hb.check_once()
+        check("wd hb: a recovered mission reports nothing",
+              len([l for l in hb_lines if "MISSION HEARTBEAT" in l]) == 2)
+        _save_missions([{"id": "hb0001", "state": "running",
+                         "goal": "g", "last_progress_at": hb_clock[0] - 2000,
+                         "created_at": 0, "updated_at": 0}])
+        wd_hb.check_once()
+        check("wd hb: a fresh stall alerts immediately (slot dropped)",
+              len([l for l in hb_lines if "MISSION HEARTBEAT" in l]) == 3)
+        _save_missions([{"id": "hb0002", "state": "paused_user",
+                         "goal": "g2", "last_progress_at": hb_clock[0] - 99999,
+                         "created_at": 0, "updated_at": 0}])
+        wd_hb.check_once()
+        check("wd hb: a user-paused mission never alerts",
+              not any("hb0002" in l for l in hb_lines),
+              str([l for l in hb_lines if "MISSION HEARTBEAT" in l]))
+        check("wd hb: stale threshold is the documented 15 minutes",
+              MISSION_STALE_SEC == 900 and "running" in MISSION_WATCH_STATES
+              and "paused_approve" in MISSION_WATCH_STATES)
+
 
 class FakeTgTransport:
     """Offline Telegram transport: scripted getUpdates batches + recorded sends.
@@ -5232,6 +5293,13 @@ def test_hooks() -> None:
               and "turn_start" in errs[0] and "cron_fire" in errs[0],
               str(errs))
 
+        clean_mt, errs_mt = hk.validate_hooks(
+            {"mission_tick": [{"cmd": ["/bin/true"]}]}, tdp)
+        check("hooks: mission_tick accepted by the whitelist (car 3)",
+              not errs_mt and clean_mt.get("mission_tick")
+              == [{"cmd": ["/bin/true"], "timeout": hk.DEFAULT_TIMEOUT}],
+              str(errs_mt))
+
         _, errs = hk.validate_hooks({"turn_end": {"cmd": ["/bin/true"]}}, tdp)
         check("hooks: event value must be a list",
               any("must be a list" in e for e in errs), str(errs))
@@ -5417,6 +5485,52 @@ def test_hooks() -> None:
                   got.startswith("x; touch ") and not (tdp / "pwned.txt").exists()
                   and not Path(str(tdp / "pwned.txt")).exists(),
                   f"got={got!r}")
+
+            # --- car 3: mission_tick payload env (id/state/progress only) ---
+            envdump_m = tdp / "env_mission.json"
+            cfg["mission_tick"] = [
+                {"cmd": [sys.executable, "-c",
+                         "import json,os,sys;"
+                         "open(sys.argv[1],'w').write(json.dumps(dict(os.environ)))",
+                         str(envdump_m)], "timeout": 10}]
+            (tdp / "web" / "settings.json").write_text(
+                json.dumps({"hooks": cfg}), encoding="utf-8")
+            th = hk.fire("mission_tick", repo=tdp, mission="ab12cd",
+                         mission_state="paused_approve",
+                         mission_progress="1/3", chat="id:4242",
+                         log=collect)
+            if th:
+                th.join(timeout=15)
+            env_m = (json.loads(envdump_m.read_text(encoding="utf-8"))
+                     if envdump_m.is_file() else {})
+            check("hooks: mission_tick payload lands in the child env",
+                  env_m.get("AIDOG_HOOK_EVENT") == "mission_tick"
+                  and env_m.get("AIDOG_HOOK_MISSION") == "ab12cd"
+                  and env_m.get("AIDOG_HOOK_MISSION_STATE") == "paused_approve"
+                  and env_m.get("AIDOG_HOOK_MISSION_PROGRESS") == "1/3"
+                  and env_m.get("AIDOG_HOOK_CHAT") == "id:4242",
+                  str(sorted(env_m))[:200])
+            # an unsanitized payload value is DROPPED, never passed through
+            envdump_m2 = tdp / "env_mission2.json"
+            cfg["mission_tick"] = [
+                {"cmd": [sys.executable, "-c",
+                         "import json,os,sys;"
+                         "open(sys.argv[1],'w').write(json.dumps(dict(os.environ)))",
+                         str(envdump_m2)], "timeout": 10}]
+            (tdp / "web" / "settings.json").write_text(
+                json.dumps({"hooks": cfg}), encoding="utf-8")
+            th = hk.fire("mission_tick", repo=tdp,
+                         mission="evil\nvalue", mission_state=None,
+                         mission_progress="1/3", log=collect)
+            if th:
+                th.join(timeout=15)
+            env_m2 = (json.loads(envdump_m2.read_text(encoding="utf-8"))
+                      if envdump_m2.is_file() else {})
+            check("hooks: unsanitized mission payload value is dropped",
+                  "AIDOG_HOOK_MISSION" not in env_m2
+                  and "AIDOG_HOOK_MISSION_STATE" not in env_m2
+                  and env_m2.get("AIDOG_HOOK_MISSION_PROGRESS") == "1/3",
+                  str(sorted(env_m2))[:200])
         finally:
             os.environ.pop("AIDOG_HOOK_FAKESECRET", None)
 
@@ -9153,6 +9267,33 @@ def test_mission() -> None:
         except ms.MissionError as e:
             check(f"mission: illegal transition {cur}->{nxt} refused",
                   "allowed" in str(e), str(e))
+    # ---- car 3: paused_approve entry (running only) and its exits ---------
+    m_entry = _at("running")
+    ms.transition(m_entry, "paused_approve", 1001.0)
+    check("mission: running -> paused_approve entry is legal (car 3)",
+          m_entry["state"] == "paused_approve")
+    ms.transition(m_entry, "running", 1002.0)
+    check("mission: paused_approve -> running exit is legal (car 3)",
+          m_entry["state"] == "running")
+    for cur, nxt in (("paused_approve", "paused_user"),
+                     ("paused_approve", "planned"),
+                     ("paused_user", "paused_approve"),
+                     ("planned", "paused_approve"),
+                     ("degraded", "paused_approve")):
+        if cur == "paused_approve":
+            m0 = _pa()
+        elif cur == "degraded":
+            m0 = _at("running")
+            ms.transition(m0, "degraded", 1000.0)
+        else:
+            m0 = _at(cur)
+        try:
+            ms.transition(m0, nxt, 1001.0, evidence=["x"])
+            check(f"mission: illegal transition {cur}->{nxt} refused", False,
+                  "accepted")
+        except ms.MissionError:
+            check(f"mission: illegal transition {cur}->{nxt} refused", True)
+
     check("mission: terminal states are exactly done+sealed",
           ms.TERMINAL_STATES == frozenset({"done", "sealed"}))
     try:
@@ -9352,6 +9493,71 @@ def test_mission() -> None:
           ms.emit(m_scr, "final", "f", _boom, 11.0) == "error")
     check("mission: unknown event kinds are dropped fail-closed",
           ms.emit(m_scr, "mystery", "m", sent5.append, 12.0) == "suppressed")
+
+    # ---- car 3 reporter: quiet_hours + min_interval override ------------
+    from datetime import datetime as _dt
+    now_q = 1700000000.0
+    bj_q = _dt.fromtimestamp(now_q, ms.BEIJING)
+    _mins = bj_q.hour * 60 + bj_q.minute
+    _qs, _qe = (_mins - 60) % 1440, (_mins + 60) % 1440
+    win = (f"{_qs // 60:02d}:{_qs % 60:02d}-"
+           f"{_qe // 60:02d}:{_qe % 60:02d}")
+    mq = ms.create([], "quiet goal", reporting="all", now=now_q - 5000)
+    qsent: list[str] = []
+    check("mission: quiet window queues a progress report",
+          ms.emit(mq, "task_done", "progress-line", qsent.append, now_q,
+                  quiet_hours=win) == "queued"
+          and qsent == [] and mq["report_queue"] == ["progress-line"],
+          f"win={win} qsent={qsent}")
+    check("mission: quiet window passes escalation alone (queue preserved)",
+          ms.emit(mq, "decision", "dec-line", qsent.append, now_q + 1,
+                  quiet_hours=win) == "sent"
+          and qsent == ["dec-line"]
+          and mq["report_queue"] == ["progress-line"])
+    check("mission: quiet window passes the final report",
+          ms.emit(mq, "final", "final-line", qsent.append, now_q + 2,
+                  quiet_hours=win) == "sent" and len(qsent) == 2)
+    check("mission: after the window the queue merges at the first send",
+          ms.emit(mq, "task_done", "after-line", qsent.append, now_q + 7200.0,
+                  quiet_hours=win) == "sent"
+          and "progress-line" in qsent[-1] and "after-line" in qsent[-1]
+          and qsent[-1].count("\n") == 1,
+          qsent[-1])
+    ts_2330 = _dt(2026, 1, 10, 23, 30, tzinfo=ms.BEIJING).timestamp()
+    ts_0600 = _dt(2026, 1, 11, 6, 0, tzinfo=ms.BEIJING).timestamp()
+    ts_1200 = _dt(2026, 1, 11, 12, 0, tzinfo=ms.BEIJING).timestamp()
+    check("mission: quiet window 23:00-07:00 crosses midnight correctly",
+          ms._quiet_active("23:00-07:00", ts_2330)
+          and ms._quiet_active("23:00-07:00", ts_0600)
+          and not ms._quiet_active("23:00-07:00", ts_1200)
+          and not ms._quiet_active("", ts_2330)
+          and not ms._quiet_active("23:00-23:00", ts_2330)
+          and not ms._quiet_active("bogus", ts_2330))
+    mo = ms.create([], "min goal", reporting="all", now=0.0)
+    osent: list[str] = []
+    ms.emit(mo, "task_done", "first", osent.append, 1000.0)
+    check("mission: min_interval override tightens the tier default",
+          ms.emit(mo, "task_done", "second", osent.append, 1100.0,
+                  min_interval=30) == "sent" and len(osent) == 2)
+    mo2 = ms.create([], "min goal 2", reporting="all", now=0.0)
+    osent2: list[str] = []
+    ms.emit(mo2, "task_done", "first", osent2.append, 1000.0)
+    check("mission: min_interval override loosens the tier default",
+          ms.emit(mo2, "task_done", "second", osent2.append, 1100.0,
+                  min_interval=300) == "queued",
+          str(osent2))
+    check("mission: decision stays throttle-free under any override",
+          ms.emit(mo2, "decision", "dec", osent2.append, 1101.0,
+                  min_interval=300) == "sent" and len(osent2) == 2)
+    check("mission: reporter settings readers fall back defensively",
+          ms.settings_quiet_hours(None) == ""
+          and ms.settings_quiet_hours({"quiet_hours": "nope"}) == ""
+          and ms.settings_quiet_hours({"quiet_hours": "09:00-17:00"})
+          == "09:00-17:00"
+          and ms.settings_min_interval({"min_interval": "600"}) == 0
+          and ms.settings_min_interval({"min_interval": -5}) == 0
+          and ms.settings_min_interval({"min_interval": 600}) == 600
+          and ms.settings_min_interval(None) == 0)
 
     # ---- E. markers, queue folding, prompt, manifest -----------------------
     marks = ms.parse_slice("\n".join([
@@ -9580,6 +9786,149 @@ def test_mission() -> None:
     check("mission: blocked-only prompt asks for UNBLOCK or escalation",
           ms.MARK_UNBLOCK in blk_prompt and ms.MARK_DECISION in blk_prompt)
 
+    # ---- car 3: A-face start constraints (deadline/redlines/deliverable) --
+    cn = 1700000000.0
+    mcon = ms.create([], "constrained goal",
+                     deadline="2030-05-05T09:00:00+08:00",
+                     redlines="no paid ads, no third-party MCP",
+                     deliverable="a published report", now=cn)
+    check("mission: start constraints stored on the record",
+          mcon["deadline"] == "2030-05-05T09:00:00+08:00"
+          and mcon["redlines"] == "no paid ads, no third-party MCP"
+          and mcon["deliverable"] == "a published report"
+          and mcon["last_progress_at"] == cn,
+          str({k: mcon.get(k) for k in ("deadline", "redlines", "deliverable")}))
+    plan_c = ms.build_slice_prompt(mcon, mode="plan")
+    exec_c = ms.build_slice_prompt(mcon, mode="exec")
+    check("mission: constraints injected into BOTH plan and exec prompts",
+          all("Owner constraints" in p and "no paid ads" in p
+              and "a published report" in p and "2030-05-05" in p
+              for p in (plan_c, exec_c)))
+    mplain = ms.create([], "plain goal", now=cn)
+    check("mission: absent constraints keep the old prompt verbatim",
+          "Owner constraints"
+          not in ms.build_slice_prompt(mplain, mode="plan")
+          and "Owner constraints"
+          not in ms.build_slice_prompt(mplain, mode="exec"))
+    prow0 = ms.public_row(mplain)
+    check("mission: public row carries null constraints + empty approvals",
+          prow0["deadline"] is None and prow0["redlines"] is None
+          and prow0["deliverable"] is None and prow0["approvals"] == [])
+    for why, kw, frag in (
+            ("past deadline", {"deadline": "2020-01-01T00:00:00Z"},
+             "future"),
+            ("garbage deadline", {"deadline": "tomorrow"}, "ISO8601"),
+            ("non-string deadline", {"deadline": 12345}, "ISO8601"),
+            ("oversized redlines", {"redlines": "x" * 501}, "500"),
+            ("control-char redlines", {"redlines": "bad\tx"}, "control"),
+            ("oversized deliverable", {"deliverable": "y" * 201}, "200"),
+            ("non-string deliverable", {"deliverable": 7}, "plain-text")):
+        try:
+            ms.create([], "refused goal", now=cn, **kw)
+            check(f"mission: {why} refused", False, "accepted")
+        except ms.MissionError as e:
+            check(f"mission: {why} refused", frag in str(e), str(e))
+    check("mission: blank constraint strings degrade to None",
+          ms.create([], "blank c", redlines="   ", deliverable="",
+                    now=cn)["redlines"] is None
+          and ms.create([], "blank c2", deadline="  ",
+                        now=cn)["deadline"] is None)
+
+    # ---- car 3: paused_approve suspension + console-decision observation --
+    tl_drill = [
+        {"name": "exchange_prepare_order", "ok": True,
+         "preview": "plan pl_0123456789ab created - status=pending"},
+        {"name": "exchange_prepare_order", "ok": False,
+         "preview": "ERROR: plan pl_aabbccddeeff unknown"},
+        {"name": "read_file", "ok": True, "preview": "pl_111111111111"}]
+    check("mission: approval plan ids come only from successful prepares",
+          ms.approval_plan_ids(tl_drill) == ["pl_0123456789ab"]
+          and ms.approval_plan_ids(None) == []
+          and ms.approval_plan_ids([]) == []
+          and ms.approval_plan_ids([{"name": "x", "ok": True,
+                                     "preview": ""}]) == [])
+    mas = ms.create([], "order goal", tasks=["buy BTC", "write summary"],
+                    reporting="all", now=100.0)
+    ms.transition(mas, "running", 101.0)
+    ms.set_current(mas, 101.0)
+    check("mission: suspension parks the in-flight subtask and the mission",
+          ms.suspend_for_approval(mas, mas["tasks"][0],
+                                  ["pl_0123456789ab"], 102.0)
+          and mas["state"] == "paused_approve"
+          and mas["tasks"][0]["status"] == "awaiting_approval"
+          and mas["tasks"][0]["plans"] == ["pl_0123456789ab"])
+    mas["plan"] = {"milestones": [{"id": "m1", "title": "T",
+                                    "subtasks": ["t1", "t2"]}],
+                   "generated_at": 101.0}
+    detp = ms.plan_detail(mas)
+    check("mission: plan detail exposes the awaiting subtask plan ids",
+          detp["milestones"][0]["subtasks"][0]
+          == {"id": "t1", "text": "buy BTC",
+              "status": "awaiting_approval",
+              "plans": ["pl_0123456789ab"]}, str(detp))
+    check("mission: badge data on the public row",
+          ms.public_row(mas)["approvals"]
+          == [{"task": "t1", "plans": ["pl_0123456789ab"]}])
+    nxt_aw = ms.set_current(mas, 103.0)
+    check("mission: other subtasks keep advancing while parked (F4)",
+          nxt_aw is not None and nxt_aw["id"] == "t2"
+          and mas["state"] == "paused_approve",
+          str([(t["id"], t["status"]) for t in mas["tasks"]]))
+    check("mission: observe keeps waiting on a pending plan",
+          ms.observe_approvals(mas, lambda p: "pending", 104.0) == []
+          and mas["state"] == "paused_approve"
+          and mas["tasks"][0]["status"] == "awaiting_approval")
+    check("mission: an unknown plan keeps waiting (never fabricates)",
+          ms.observe_approvals(mas, lambda p: None, 105.0) == []
+          and mas["tasks"][0]["status"] == "awaiting_approval")
+
+    def _boom_plan(_pid):
+        raise RuntimeError("store down")
+
+    check("mission: a broken reader keeps waiting (fail-safe)",
+          ms.observe_approvals(mas, _boom_plan, 106.0) == []
+          and mas["tasks"][0]["status"] == "awaiting_approval")
+    check("mission: approval resumes the subtask and the mission",
+          ms.observe_approvals(mas, lambda p: "approved", 107.0) == []
+          and mas["state"] == "running"
+          and mas["tasks"][0]["status"] == "pending"
+          and "plans" not in mas["tasks"][0])
+    mrej = ms.create([], "reject goal", tasks=["buy BTC"], reporting="all",
+                     now=100.0)
+    ms.transition(mrej, "running", 101.0)
+    ms.set_current(mrej, 101.0)
+    ms.suspend_for_approval(mrej, mrej["tasks"][0], ["pl_aabbccddeeff"], 102.0)
+    evs_rej = ms.observe_approvals(mrej, lambda p: "rejected", 103.0)
+    check("mission: a refused plan degrades the subtask with gap + report",
+          [e["kind"] for e in evs_rej] == ["degraded"]
+          and mrej["state"] == "running"
+          and mrej["tasks"][0]["status"] == "degraded"
+          and any("pl_aabbccddeeff" in g for g in mrej["gaps"]),
+          str(evs_rej))
+    mdef = ms.create([], "defensive goal", tasks=["x"], now=100.0)
+    mdef["state"] = "paused_approve"   # hand-edited row: nobody waiting
+    check("mission: paused_approve with nobody waiting returns to running",
+          ms.observe_approvals(mdef, lambda p: None, 101.0) == []
+          and mdef["state"] == "running")
+    mfin = ms.create([], "done goal", tasks=["x"], now=100.0)
+    ms.transition(mfin, "running", 101.0)
+    mfin["tasks"][0]["status"] = "done"
+    check("mission: suspension refuses a subtask that is not in flight",
+          ms.suspend_for_approval(mfin, mfin["tasks"][0],
+                                  ["pl_ffffffffffffffffff"], 102.0) is False
+          and mfin["state"] == "running"
+          and not ms.awaiting_tasks(mfin))
+    mcur = ms.create([], "cur goal", tasks=["a", "b"], now=100.0)
+    ms.transition(mcur, "running", 101.0)
+    ms.set_current(mcur, 101.0)
+    ms.suspend_for_approval(mcur, mcur["tasks"][0],
+                            ["pl_0123456789ab"], 102.0)
+    check("mission: an awaiting subtask is never current — queue moves on",
+          ms.current_task(mcur) is not None
+          and ms.current_task(mcur)["id"] == "t2"
+          and ms.set_current(mcur, 103.0)["id"] == "t2"
+          and mcur["tasks"][0]["status"] == "awaiting_approval")
+
     # ---- F. service mission leg (fake transport, injected model) -----------
     saved_tok = os.environ.get(POLL_BOT_ENV)
     saved_wd = os.environ.get("MYCORE_WD_CHAT")
@@ -9803,6 +10152,179 @@ def test_mission() -> None:
                   and fake.sends == [("777099", "wd-ping")])
             os.environ.pop("MYCORE_WD_CHAT", None)
 
+            # ---- car 3 drill: web3 paused_approve over the REAL plan store -
+            # The approval gate itself is untouched: the drill runs the real
+            # prepare (stubbed venue transport, thresholds pinned to 0 = never
+            # auto) + the real console approve simulation (plan_decide) and
+            # asserts execute-without-approval is STILL refused in between.
+            from mycore import exchanges as ex
+            from mycore.tools import Tool
+            saved_slot_d, saved_thr_d = ex._slot, ex.thresholds
+            ex._slot = lambda name: "DRILL-KEY"
+            ex.thresholds = lambda settings=None: {"per_tx": 0.0,
+                                                   "daily": 0.0}
+            drill_book = {"bids": [["80.0", "5"]],
+                          "asks": [["90.0", "5"], ["91.0", "5"]]}
+
+            def drill_transport(url, method, headers, payload, timeout):
+                if "/api/v5/market/books" in url:
+                    return json.dumps({"code": "0", "data": [drill_book]})
+                if "/api/v5/account/trade-fee" in url:
+                    return json.dumps({"code": "0",
+                                       "data": [{"takerFeeRate": "0.001"}]})
+                raise AssertionError(f"unexpected url {url}")
+
+            def drill_prepare(venue="okx", side="buy", symbol="BTC-USDT",
+                              order_type="limit", qty=1, price=88, **_kw):
+                return ex.prepare_order(venue, side, symbol, order_type, qty,
+                                        price, transport=drill_transport,
+                                        state_dir=str(svc.state))
+
+            orig_tool = svc.registry._tools.get("exchange_prepare_order")
+            svc.registry._tools["exchange_prepare_order"] = Tool(
+                "exchange_prepare_order", "drill stub",
+                {"type": "object", "properties": {}}, drill_prepare)
+            hook_calls: list = []
+            orig_fire_hooks = svc._fire_hooks
+
+            def rec_fire_hooks(event, *args, **kw):
+                hook_calls.append((event, kw))
+                return orig_fire_hooks(event, *args, **kw)
+
+            svc._fire_hooks = rec_fire_hooks
+            try:
+                doc_w = {"missions": [], "last_tick": clock[0] - 700.0}
+                m_w = ms.create(doc_w["missions"], "rebalance the book",
+                                reporting="all", origin=424242,
+                                manifest=man, now=clock[0])
+                ms.transition(m_w, "running", clock[0])
+                ms.save(reg_path, doc_w)
+                w_script = ScriptedChat([
+                    fake_response(text="plan\n"
+                                   "SUBTASK: place the BTC buy order\n"
+                                   "SUBTASK: write the summary"),
+                    fake_response(text=None,
+                                  calls=[("exchange_prepare_order",
+                                          {"venue": "okx", "side": "buy",
+                                           "symbol": "BTC-USDT",
+                                           "order_type": "limit",
+                                           "qty": 1, "price": 88})]),
+                    fake_response(text="order prepared, waiting for the owner"),
+                    fake_response(text="summary written\nTASK DONE"),
+                    fake_response(text="order executed\nTASK DONE"),
+                ])
+                svc.chat = w_script.chat
+                fake.sends.clear()
+                hook_calls.clear()
+                # tick 1: plan slice (2 subtasks, one hook emission)
+                svc._mission_check = 0.0
+                svc._maybe_tick_missions()
+                wrow = ms.load(reg_path)["missions"][0]
+                check("approve drill: plan slice lands + one mission_tick hook",
+                      wrow["counters"]["slices"] == 1
+                      and len(hook_calls) == 1
+                      and hook_calls[0][0] == "mission_tick"
+                      and set(hook_calls[0][1]) == {"mission",
+                                                   "mission_state",
+                                                   "mission_progress"}
+                      and hook_calls[0][1]["mission"] == m_w["id"]
+                      and hook_calls[0][1]["mission_progress"] == "0/2",
+                      str(hook_calls[:1]))
+                # tick 2: the subtask prepares a PENDING order plan
+                clock[0] += 130.0
+                svc._mission_check = 0.0
+                svc._maybe_tick_missions()
+                wrow = ms.load(reg_path)["missions"][0]
+                pid_drill = (wrow["tasks"][0].get("plans") or [None])[0]
+                check("approve drill: subtask parks, mission enters "
+                      "paused_approve, queue intact",
+                      wrow["state"] == "paused_approve"
+                      and wrow["tasks"][0]["status"] == "awaiting_approval"
+                      and isinstance(pid_drill, str)
+                      and pid_drill.startswith("pl_")
+                      and wrow["tasks"][1]["status"] == "pending",
+                      str([(t["id"], t["status"]) for t in wrow["tasks"]]))
+                check("approve drill: approval request reported to the owner",
+                      any(ms.ZH["approve_fact"].format(p=pid_drill or "x")
+                          in t[1] for t in fake.sends),
+                      str(fake.sends[-1:]) )
+                ev_rows_w = [json.loads(ln) for ln in
+                             ms.events_path(reg_path).read_text(
+                                 encoding="utf-8").splitlines()]
+                check("approve drill: suspension recorded in the event stream",
+                      any(r.get("to") == "paused_approve"
+                          and r.get("via") == "slice"
+                          and r.get("plans") == [pid_drill]
+                          for r in ev_rows_w if r.get("mission") == m_w["id"]),
+                      str(ev_rows_w[-3:]))
+                check("approve drill: heartbeat stamped on the slice",
+                      isinstance(wrow.get("last_progress_at"), (int, float))
+                      and wrow["last_progress_at"] > 0)
+                # RED LINE drill: execute WITHOUT approval still refused
+                try:
+                    ex.execute_order(pid_drill, state_dir=str(svc.state))
+                    check("approve drill: execute without approval refused",
+                          False, "accepted")
+                except ex.ExchangeError as e:
+                    check("approve drill: execute without approval refused "
+                          "(gate untouched)", "approval" in str(e), str(e))
+                # tick 3: the OTHER subtask keeps advancing while parked (F4)
+                clock[0] += 130.0
+                svc._mission_check = 0.0
+                svc._maybe_tick_missions()
+                wrow = ms.load(reg_path)["missions"][0]
+                check("approve drill: other subtask advances while parked (F4)",
+                      wrow["state"] == "paused_approve"
+                      and wrow["tasks"][0]["status"] == "awaiting_approval"
+                      and wrow["tasks"][1]["status"] == "done"
+                      and w_script.calls == 4,
+                      str([(t["id"], t["status"]) for t in wrow["tasks"]]))
+                # the owner approves in the console (existing simulation)
+                ex.plan_decide(pid_drill, "approve", decided_by="console",
+                               state_dir=str(svc.state))
+                clock[0] += 130.0
+                svc._mission_check = 0.0
+                svc._maybe_tick_missions()
+                wrow = ms.load(reg_path)["missions"][0]
+                check("approve drill: approval resumes the queue -> done",
+                      wrow["state"] == "done"
+                      and all(t["status"] == "done" for t in wrow["tasks"])
+                      and w_script.calls == 5
+                      and any(ms.ZH["done_report"] in t[1]
+                              for t in fake.sends),
+                      f"state={wrow['state']} calls={w_script.calls}")
+                ev_rows_w = [json.loads(ln) for ln in
+                             ms.events_path(reg_path).read_text(
+                                 encoding="utf-8").splitlines()]
+                check("approve drill: resume recorded via approval in the stream",
+                      any(r.get("to") == "running"
+                          and r.get("via") == "approval"
+                          for r in ev_rows_w
+                          if r.get("mission") == m_w["id"]))
+                check("approve drill: exactly one mission_tick hook per tick",
+                      len(hook_calls) == 4
+                      and all(ev == "mission_tick" for ev, _ in hook_calls),
+                      str([ev for ev, _ in hook_calls]))
+                check("approve drill: hook payload carries id/state/progress only",
+                      all("rebalance" not in json.dumps(kw)
+                          and "424242" not in json.dumps(kw)
+                          for _ev, kw in hook_calls))
+                # no active mission -> no hook, no slice (idle leg)
+                hooks_idle = len(hook_calls)
+                fake.sends.clear()
+                svc._mission_check = 0.0
+                svc._maybe_tick_missions()
+                check("approve drill: idle leg emits no mission_tick hook",
+                      len(hook_calls) == hooks_idle
+                      and w_script.calls == 5 and fake.sends == [])
+            finally:
+                ex._slot, ex.thresholds = saved_slot_d, saved_thr_d
+                svc._fire_hooks = orig_fire_hooks
+                if orig_tool is None:
+                    svc.registry._tools.pop("exchange_prepare_order", None)
+                else:
+                    svc.registry._tools["exchange_prepare_order"] = orig_tool
+
         # ---- G. console API + settings partition (temp profile) ------------
         prof_root = Path(tempfile.mkdtemp(prefix="mission_prof_"))
         (prof_root / "slots").mkdir(parents=True)
@@ -9980,9 +10502,10 @@ def test_mission() -> None:
                   and (caps.get("mission") or {}).get("reporting") == "all",
                   str(caps.get("mission")))
             # ---- car 2: budget settings partition + start override ----------
-            check("mission settings: defaults carry reporting + 3 guards",
+            check("mission settings: defaults carry reporting + guards + car-3 keys",
                   ms.DEFAULT_SETTINGS
-                  == {"reporting": "milestones", "max_slices": 40,
+                  == {"reporting": "milestones", "quiet_hours": "",
+                      "min_interval": 0, "max_slices": 40,
                       "max_wall_hours": 24.0,
                       "max_daily_model_calls": 200},
                   str(ms.DEFAULT_SETTINGS))
@@ -10104,6 +10627,132 @@ def test_mission() -> None:
                       s == 400 and any(frag in str(d)
                                        for d in body.get("details", [])),
                       f"{s} {body}")
+            # ---- car 3: quiet_hours + min_interval settings partition ----
+            for good_q in ("", "09:00-17:00", "23:00-07:00"):
+                clean_q, errs_q = ws.validate_settings_patch(
+                    {"mission": {"quiet_hours": good_q}})
+                check(f"mission settings: quiet_hours {good_q!r} accepted",
+                      clean_q == {"mission": {"quiet_hours": good_q}}
+                      and not errs_q, str(errs_q))
+            for bad_q, frag_q in (("9:00-17:00", "HH:MM-HH:MM"),
+                                  ("25:00-10:00", "HH:MM-HH:MM"),
+                                  ("09:00-09:00", "differ"),
+                                  ("0900-1700", "HH:MM-HH:MM"),
+                                  (1700, "must be"),
+                                  (None, "must be")):
+                clean_q, errs_q = ws.validate_settings_patch(
+                    {"mission": {"quiet_hours": bad_q}})
+                check(f"mission settings: quiet_hours {bad_q!r} refused",
+                      not clean_q and any(frag_q in e for e in errs_q),
+                      str(errs_q))
+            for good_i in (0, 1, 600, 86400):
+                clean_i, errs_i = ws.validate_settings_patch(
+                    {"mission": {"min_interval": good_i}})
+                check(f"mission settings: min_interval {good_i} accepted",
+                      clean_i == {"mission": {"min_interval": good_i}}
+                      and not errs_i, str(errs_i))
+            for bad_i, frag_i in ((-1, "0..86400"), (86401, "0..86400"),
+                                  ("60", "0..86400"), (True, "0..86400"),
+                                  (1.5, "0..86400")):
+                clean_i, errs_i = ws.validate_settings_patch(
+                    {"mission": {"min_interval": bad_i}})
+                check(f"mission settings: min_interval {bad_i!r} refused",
+                      not clean_i and any(frag_i in e for e in errs_i),
+                      str(errs_i))
+            s, body = call("/api/settings",
+                           {"mission": {"quiet_hours": "23:00-07:00",
+                                        "min_interval": 300}}, auth=token)
+            s2, st = call("/api/settings")
+            mis_st2 = st.get("mission") or {}
+            check("mission settings: quiet_hours + min_interval land and read back",
+                  s == 200 and s2 == 200
+                  and mis_st2.get("quiet_hours") == "23:00-07:00"
+                  and mis_st2.get("min_interval") == 300
+                  and mis_st2.get("reporting") == "all", str(mis_st2))
+            s, body = call("/api/settings",
+                           {"mission": {"quiet_hours": "9am-5pm"}},
+                           auth=token)
+            check("mission settings: console write refuses a bad window",
+                  s == 400 and any("quiet_hours" in str(d)
+                                   for d in body.get("details", [])),
+                  f"{s} {body}")
+            call("/api/settings",
+                 {"mission": {"quiet_hours": "", "min_interval": 0}},
+                 auth=token)   # restore defaults for the remaining legs
+
+            # ---- car 3: A-face constraints via the console API ------------
+            for payload, frag in (
+                    ({"action": "start", "goal": "x", "deadline": "someday"},
+                     "deadline"),
+                    ({"action": "start", "goal": "x",
+                      "deadline": "2020-01-01T00:00:00Z"}, "future"),
+                    ({"action": "start", "goal": "x", "redlines": "r" * 501},
+                     "500"),
+                    ({"action": "start", "goal": "x",
+                      "redlines": "tab\there"}, "control"),
+                    ({"action": "start", "goal": "x",
+                      "deliverable": "d" * 201}, "200")):
+                s, body = call("/api/mission", payload, auth=token)
+                check(f"mission constraints: 400 on {frag}",
+                      s == 400 and any(frag in str(d)
+                                       for d in body.get("details", [])),
+                      f"{s} {body}")
+            s, body = call("/api/mission",
+                           {"action": "start", "goal": "constrained run",
+                            "deadline": "2031-06-01T00:00:00+08:00",
+                            "redlines": "no paid ads",
+                            "deliverable": "weekly report"}, auth=token)
+            crow = body.get("mission") or {}
+            cid = crow.get("id")
+            check("mission constraints: start lands the three fields",
+                  s == 200
+                  and crow.get("deadline") == "2031-06-01T00:00:00+08:00"
+                  and crow.get("redlines") == "no paid ads"
+                  and crow.get("deliverable") == "weekly report"
+                  and crow.get("approvals") == [], f"{s} {crow}")
+            s, det = call(f"/api/mission?id={cid}")
+            drow = det.get("mission") or {}
+            check("mission constraints: detail echoes the three fields",
+                  s == 200 and drow.get("deadline")
+                  == "2031-06-01T00:00:00+08:00"
+                  and drow.get("redlines") == "no paid ads"
+                  and drow.get("deliverable") == "weekly report"
+                  and isinstance(drow.get("approvals"), list),
+                  str(drow)[:200])
+            # ---- car 3: illegal transitions from paused_approve -> 409 ----
+            reg_w = ms.load(ms.default_path())
+            rw = ms.find(reg_w["missions"], cid)
+            ms.transition(rw, "paused_approve",
+                          rw.get("updated_at") or 1700000000.0)
+            ms.save(ms.default_path(), reg_w)
+            s, body = call("/api/mission", {"action": "pause", "id": cid},
+                           auth=token)
+            check("mission api: pause while awaiting approval -> 409",
+                  s == 409 and any("paused_approve" in str(d)
+                                   for d in body.get("details", [])),
+                  f"{s} {body}")
+            s, body = call("/api/mission", {"action": "resume", "id": cid},
+                           auth=token)
+            check("mission api: resume from paused_approve -> 409",
+                  s == 409, f"{s} {body}")
+            s, body = call("/api/mission", {"action": "stop", "id": cid},
+                           auth=token)
+            check("mission api: stop from paused_approve seals (F4 exit)",
+                  s == 200 and body["mission"]["state"] == "sealed",
+                  f"{s} {body}")
+            # backward compat: a plain start carries null constraints
+            s, body = call("/api/mission",
+                           {"action": "start", "goal": "plain start"},
+                           auth=token)
+            prow2 = body.get("mission") or {}
+            pid2 = prow2.get("id")
+            check("mission constraints: plain start stays null (old clients)",
+                  s == 200 and prow2.get("deadline") is None
+                  and prow2.get("redlines") is None
+                  and prow2.get("deliverable") is None
+                  and prow2.get("approvals") == [], f"{s} {prow2}")
+            call("/api/mission", {"action": "stop", "id": pid2}, auth=token)
+
             # pause/resume from the degraded state (car 2 entry edges)
             s, body = call("/api/mission",
                            {"action": "start", "goal": "degrade me"},

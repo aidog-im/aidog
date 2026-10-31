@@ -757,6 +757,21 @@
               <option value="final" data-i18n="mission.tierFinal">final — only the outcome</option>
             </select>
           </div>
+          <!-- car 3 (0.5.46 Lane K2): reporter settings next to the tier
+               select — the quiet window and the min_interval override ride
+               the SAME settings partition (write on change, the server's 400
+               detail renders verbatim in #missionMsg). -->
+          <div class="ctl-row">
+            <label data-i18n="mission.quietHours">Quiet hours</label>
+            <input type="text" id="missionQuietHours" spellcheck="false"
+                   placeholder="23:00-07:00" autocomplete="off">
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="mission.minInterval">Min report interval (s)</label>
+            <input type="number" id="missionMinInterval" min="0" max="86400"
+                   step="1" placeholder="0" inputmode="numeric">
+          </div>
+          <div class="stat-note" data-i18n="mission.reportCfgHint">quiet window (HH:MM-HH:MM, blank = off) lets only decisions and finals through · interval 0 = tier default (120 / 900 / none) · saved on change</div>
           <!-- car 2 (0.5.45 Lane I): optional per-mission budget override —
                three number inputs ride along with START; blank = the settings
                defaults (40 / 24 / 200). Out-of-range values are refused by
@@ -782,6 +797,32 @@
             </label>
           </div>
           <div class="stat-note" data-i18n="mission.budgetHint">leave blank to use the settings defaults (40 / 24 / 200)</div>
+          <!-- car 3 (0.5.46 Lane K2): the three A-face start constraints in
+               a collapsed <details> so the main form stays compact — only
+               FILLED fields travel with START, and the server owns every
+               validation rule (its 400 detail renders verbatim). The
+               datetime-local value converts to an ISO8601 instant here. -->
+          <details class="mission-cs" id="missionCsRow">
+            <summary data-i18n="mission.csLbl">Constraints (optional)</summary>
+            <div class="mission-cs-body">
+              <label class="cs-field">
+                <span data-i18n="mission.csDeadline">deadline</span>
+                <input type="datetime-local" id="missionDeadline">
+              </label>
+              <div class="cs-field">
+                <span><span data-i18n="mission.csRedlines">red lines (never cross)</span>
+                  <span class="cs-count" id="missionRedlinesCount">0/500</span></span>
+                <textarea id="missionRedlines" rows="2" maxlength="500"
+                          spellcheck="false"></textarea>
+              </div>
+              <label class="cs-field">
+                <span data-i18n="mission.csDeliverable">expected deliverable</span>
+                <input type="text" id="missionDeliverable" maxlength="200"
+                       spellcheck="false">
+              </label>
+            </div>
+            <div class="stat-note" data-i18n="mission.csHint">optional · an invalid deadline or an over-long field is refused by the server — its 400 detail shows verbatim</div>
+          </details>
           <div class="ctl-actions">
             <button class="btn primary" id="missionStartBtn" type="button"
                     data-i18n="mission.start">START</button>

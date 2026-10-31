@@ -5,6 +5,13 @@ Design (owner authorized process switches, 2026-10-18):
   - state machine per target: up -> down (restart attempt) -> up (recovered)
   - persistent-down retry on a throttle window, NEVER silent (lesson from the
     2026-10-17 boot blind spot: a failed bring-up must keep alerting)
+  - mission heartbeat (car 3): every cycle reads the mission registry —
+    an ACTIVE mission (running/degraded/paused_approve) whose
+    last_progress_at is older than MISSION_STALE_SEC alerts
+    `[MISSION HEARTBEAT] ...` on the same notify path, re-reported on the
+    throttle cadence while stale and silent again once progress resumes.
+    No active mission = one fail-soft read, zero alerts. dry_run never
+    suppresses alerts (it only gates restarts — same as the down alerts).
   - notifications via TgClient.send_message ONLY (stateless — no getUpdates
     conflict with the live gateway); chat id comes from env, token never echoed
   - **dry_run default ON**: shadow mode evaluates and logs every decision but
@@ -40,6 +47,14 @@ from .envslots import wd_chat_target  # noqa: E402  (slot fallback, car 1.6)
 DEFAULT_INTERVAL = 60
 DEFAULT_THROTTLE = 300
 RESTART_TIMEOUT = 60
+
+# Car 3 mission heartbeat: an active mission that shows no progress for this
+# long triggers a TG alert (tunable — one constant, seconds).
+MISSION_STALE_SEC = 900
+
+# States the heartbeat watches (design 3.2 + car 3 spec): a user-paused or
+# not-yet-started mission is never an alert.
+MISSION_WATCH_STATES = ("running", "degraded", "paused_approve")
 
 
 class WatchConfigError(ValueError):
@@ -164,7 +179,8 @@ class Watchdog:
                  probe: Callable[[dict], bool] = probe_target,
                  restart: Callable[[dict], tuple[bool, str]] = run_restart,
                  pending: Callable[[dict], bool] = pending_expected,
-                 now: Callable[[], float] = time.time) -> None:
+                 now: Callable[[], float] = time.time,
+                 missions_path: str | Path | None = None) -> None:
         self.cfg = cfg
         self.state_path = Path(state_path)
         self.tg = tg
@@ -173,9 +189,16 @@ class Watchdog:
         self._restart = restart
         self._pending = pending
         self._now = now
+        # Car 3 heartbeat: registry path (None = mycore.mission.default_path,
+        # resolved at check time so env/profile seams stay authoritative).
+        self.missions_path = Path(missions_path) if missions_path else None
         self.states: dict[str, TargetState] = {t["name"]: TargetState() for t in cfg.targets}
         self._load_state()
         self._last_heartbeat_day = ""
+        # Last [MISSION HEARTBEAT] alert per mission id (in-memory on purpose:
+        # a watchdog restart re-alerts immediately while the mission is still
+        # stale — never-silent survives restarts).
+        self._mission_alerts: dict[str, float] = {}
 
     # ---------------------------------------------------------- state I/O --
     def _load_state(self) -> None:
@@ -296,8 +319,61 @@ class Watchdog:
                             f"{int(self.cfg.throttle_sec - (now - st.last_restart))}s)")
             results[name] = "down"
         self._save_state()
+        self._check_missions(now)          # car 3 heartbeat (never silent)
         self._maybe_heartbeat(now, results)
         return results
+
+    # ------------------------------------------------- mission heartbeat --
+    def _check_missions(self, now: float) -> None:
+        """Car 3: one fail-soft read of the mission registry per cycle.
+
+        An ACTIVE mission (running/degraded/paused_approve) whose
+        last_progress_at (fallback updated_at/created_at for pre-car-3 rows)
+        is older than MISSION_STALE_SEC alerts `[MISSION HEARTBEAT]` on the
+        existing notify path (Chinese, scrubbed goal, never a credential or
+        a raw path). Stale state re-alerts on the cfg.throttle_sec cadence
+        (never-silent parity with the down path); a mission that made
+        progress — or ended — drops its alert slot, so a FRESH stall alerts
+        immediately and a recovered mission reports nothing. No registry / no
+        active mission = zero alerts. dry_run is irrelevant here: notify()
+        gates nothing (dry_run only gates restarts)."""
+        try:
+            from . import mission as ms
+            path = (self.missions_path if self.missions_path is not None
+                    else ms.default_path())
+            doc = ms.load(path)
+        except Exception:  # noqa: BLE001 — a heartbeat bug never breaks the cycle
+            return
+        stale: set[str] = set()
+        for rec in doc.get("missions") or []:
+            if not isinstance(rec, dict):
+                continue
+            mid = str(rec.get("id") or "")
+            state = str(rec.get("state") or "")
+            if not mid or state not in MISSION_WATCH_STATES:
+                continue
+            base = (rec.get("last_progress_at") or rec.get("updated_at")
+                    or rec.get("created_at") or 0)
+            try:
+                age = now - float(base)
+            except (TypeError, ValueError):
+                continue
+            if age < MISSION_STALE_SEC:
+                continue                      # healthy: never an alert
+            stale.add(mid)
+            last = self._mission_alerts.get(mid)
+            if last is not None and now - last < self.cfg.throttle_sec:
+                continue                      # inside the re-report window
+            self._mission_alerts[mid] = now
+            mins = max(1, int(age // 60))
+            goal = ms.scrub(str(rec.get("goal") or ""))[:80]
+            msg = (f"\u26a0\ufe0f [MISSION HEARTBEAT] \u4efb\u52a1 {mid} "
+                   f"\u5df2 {mins} \u5206\u949f\u65e0\u8fdb\u5c55"
+                   f"\uff08{state}\uff09 \u00b7 {goal}")
+            self.notify(ms.scrub(msg))
+        for mid in list(self._mission_alerts):
+            if mid not in stale:
+                self._mission_alerts.pop(mid, None)   # recovered / ended
 
     def _maybe_heartbeat(self, now: float, results: dict[str, str]) -> None:
         """Daily heartbeat in Beijing time (owner timezone), once per day."""

@@ -1146,8 +1146,9 @@ class ChatService:
         and an unknown route or an honest send failure falls through), then
         an int origin, then env/slot MYCORE_WD_CHAT, then log-only ("none").
         `hook_event`, when set, fires hooks before delivery — the cron leg
-        passes "cron_fire"; mission reports fire none (mission_tick joins the
-        whitelist in car 3). Returns the delivery label (observed fact)."""
+        passes "cron_fire"; mission reports fire none (mission_tick is a
+        per-TICK emission from _maybe_tick_missions, not a per-report one).
+        Returns the delivery label (observed fact)."""
         if hook_event:
             self._fire_hooks(hook_event,
                              origin if isinstance(origin, (int, str)) else None)
@@ -1235,10 +1236,49 @@ class ChatService:
         """One mission report -> the SAME four-tier fallback chain the cron
         leg owns (origin -> route:target -> MYCORE_WD_CHAT -> log-only), via
         the single _origin_deliver implementation — nothing is re-copied here.
-        Mission reports fire no hook event (car 3 adds `mission_tick`).
+        Mission reports fire no hook event: `mission_tick` is emitted once
+        per active mission per leg tick in _maybe_tick_missions (car 3).
         Reporter egress (credential/path scrub) already ran in
         mycore.mission.emit before the text arrives."""
         return self._origin_deliver(mission_rec.get("origin"), text)
+
+    def _mission_plan_status(self, plan_id: str) -> str | None:
+        """Read-only observer for ONE order plan's console decision (car 3).
+        Reads the SAME store the console approves in (state-root parity:
+        service state == profile state dir == exchanges default), never
+        writes, never executes — the approval gate itself lives untouched in
+        mycore/exchanges.py. Missing plan or store trouble -> None (the
+        subtask keeps waiting; a reader failure never fabricates a verdict)."""
+        try:
+            from . import exchanges
+            for plan in exchanges.plans_list(state_dir=self.state):
+                if plan.get("id") == plan_id:
+                    return str(plan.get("status") or "")
+        except Exception:  # noqa: BLE001 — fail-safe: unknown -> keep waiting
+            return None
+        return None
+
+    def _mission_tick_hook(self, rec: dict) -> None:
+        """Car 3: ONE `mission_tick` hook emission for this active mission.
+        Payload carries ONLY mission id (sanitized), state (enum) and
+        progress (done/total integers) — no goal text, no origin, no paths:
+        the zero-echo / scrub discipline of the hook contract. Fail-soft like
+        every hook fire (never raises, never blocks the leg)."""
+        try:
+            mid = re.sub(r"[^0-9a-z_-]", "", str(rec.get("id") or ""))[:32]
+            if not mid:
+                return
+            state = str(rec.get("state") or "")
+            if state not in mission_mod.STATES:
+                state = "unknown"
+            tasks = rec.get("tasks") or []
+            done = sum(1 for t in tasks if isinstance(t, dict)
+                       and t.get("status") == "done")
+            self._fire_hooks("mission_tick", mission=mid,
+                             mission_state=state,
+                             mission_progress=f"{done}/{len(tasks)}")
+        except Exception:  # noqa: BLE001 — a hook problem never breaks a tick
+            pass
 
     def _maybe_tick_missions(self) -> None:
         """Mission leg (0.5.44 minimal loop, design 3.2): throttled to
@@ -1247,8 +1287,14 @@ class ChatService:
         slice, never duplicates one (the cron leg's philosophy); a budget
         guard reached seals the mission with evidence and a final report
         (never a silent stop). No active mission = one fail-soft read and
-        return (near-zero overhead); a pause never executes. A fire failure
-        never kills the poll loop."""
+        return (near-zero overhead, NO hook emission); a pause never executes
+        a slice — but a user-paused mission still counts as active for the
+        mission_tick hook (a configured hook observes the leg, not the
+        model). Car 3 additions: approvals observed BEFORE each tick
+        (paused_approve subtasks resolve on the console decision), quiet
+        hours + min_interval read live from settings (save = effective), and
+        exactly ONE mission_tick hook per active mission per tick. A fire
+        failure never kills the poll loop."""
         nowt = self._now()
         if nowt - self._mission_check < MISSION_TICK_SEC:
             return
@@ -1259,17 +1305,25 @@ class ChatService:
         except OSError:
             return
         missions = doc.get("missions") or []
-        if not any(m.get("state") in mission_mod.ACTIVE_STATES for m in missions):
-            return
+        active = [m for m in missions
+                  if m.get("state") in mission_mod.ACTIVE_STATES]
+        if not active:
+            return                          # no active mission = no emit
         last = doc.get("last_tick")
         if isinstance(last, (int, float)) and nowt - last > MISSION_CATCHUP_SEC:
             self.log.write("MISSION_CATCHUP", f"gap={int(nowt - last)}s")
         doc["last_tick"] = nowt
-        for rec in missions:
-            if rec.get("state") not in mission_mod.ACTIVE_STATES:
-                continue
+        # reporter controls: live from settings (face B: save = effective)
+        mis_block = self._settings_doc().get("mission")
+        quiet_hours = mission_mod.settings_quiet_hours(mis_block)
+        min_interval = mission_mod.settings_min_interval(mis_block)
+        for rec in active:
             try:
-                self._tick_one_mission(doc, rec, path, nowt)
+                self._observe_approvals(doc, rec, path, nowt,
+                                        quiet_hours, min_interval)
+                self._tick_one_mission(doc, rec, path, nowt,
+                                       quiet_hours=quiet_hours,
+                                       min_interval=min_interval)
             except Exception as e:  # noqa: BLE001 — one bad mission, one line
                 self.log.write("MISSION_ERR", f"id={rec.get('id', '?')}",
                                f"err={type(e).__name__}")
@@ -1277,23 +1331,73 @@ class ChatService:
                     mission_mod.save(path, doc)
                 except OSError:
                     pass
+        # car 3: one mission_tick emission per active mission per tick
+        # (payload = id/state/progress only — zero-echo, scrubbed upstream)
+        for rec in active:
+            self._mission_tick_hook(rec)
+
+    def _observe_approvals(self, doc: dict, rec: dict, path: Path,
+                           nowt: float, quiet_hours: str,
+                           min_interval: int) -> None:
+        """Car 3: poll the console decision for subtasks parked on an order
+        plan (paused_approve), BEFORE the slice gate. Approval resolves the
+        subtask back to pending; a refusal degrades it with a gap + report;
+        when nobody waits any more the mission returns to running. Persisted
+        immediately (state fold, not execution — mark-first stays about
+        slices). No awaiting subtask and no paused_approve state = no-op."""
+        if rec.get("state") != "paused_approve" \
+                and not mission_mod.awaiting_tasks(rec):
+            return
+        before = rec.get("state")
+        events = mission_mod.observe_approvals(rec, self._mission_plan_status,
+                                               nowt)
+        moved = rec.get("state") != before
+        if not moved and not events:
+            return
+        if moved:
+            mission_mod.append_event(path, rec["id"], "state",
+                                     {"to": rec.get("state"),
+                                      "via": "approval"})
+        mission_mod.save(path, doc)
+        deliver = lambda text: self._mission_deliver(rec, text)  # noqa: E731
+        for ev in events:
+            label = mission_mod.emit(rec, ev["kind"],
+                                     mission_mod.fmt_event(rec["id"], ev),
+                                     deliver, nowt,
+                                     quiet_hours=quiet_hours,
+                                     min_interval=min_interval)
+            mission_mod.append_event(path, rec["id"], "report",
+                                     {"event": ev["kind"],
+                                      "delivered": label,
+                                      "tier": rec.get("reporting")})
+        mission_mod.save(path, doc)
+        self.log.write("MISSION_APPROVE", f"id={rec.get('id', '?')}",
+                       f"state={rec.get('state')}", f"events={len(events)}")
 
     def _tick_one_mission(self, doc: dict, rec: dict, path: Path,
-                          nowt: float) -> None:
+                          nowt: float, *, quiet_hours: str = "",
+                          min_interval: int = 0) -> None:
         """Exactly one tick of one mission: promote -> budget gate -> mark
         first -> one run_turn slice -> fold markers -> report -> persist.
         `degraded` executes like `running` (car 2 — a degraded point is a
         record on the current subtask, never a stall; set_current moves the
         queue on and the state back to running when the next subtask starts).
-        Reports go through mission_mod.emit (tier + throttle + merge + scrub)
-        into the shared fallback chain; delivery is best-effort by design."""
+        `paused_approve` executes like `running` TOO (car 3): only the
+        subtask parked on a pending order plan is skipped by set_current, so
+        every other subtask keeps advancing while the owner decides (F4).
+        Car 3 also detects a plan the slice prepared: the in-flight subtask
+        suspends and the mission enters paused_approve (the approval GATE
+        itself — prepare/approve/execute — lives untouched in exchanges).
+        Reports go through mission_mod.emit (tier + throttle + quiet hours +
+        merge + scrub) into the shared fallback chain; delivery is
+        best-effort by design."""
         state = rec.get("state")
         if state == "planned":        # defensive promote (the API lands running)
             mission_mod.transition(rec, "running", nowt, reason="executor tick")
             mission_mod.append_event(path, rec["id"], "state",
                                      {"to": "running", "via": "tick"})
             state = "running"
-        if state not in ("running", "degraded"):   # paused_user / paused_approve
+        if state not in ("running", "degraded", "paused_approve"):
             mission_mod.save(path, doc)   # persist the mark only, no work
             return
         guard = mission_mod.budget_breach(rec, nowt)
@@ -1305,7 +1409,8 @@ class ChatService:
                                      {"guard": guard})
             label = mission_mod.emit(
                 rec, "final", mission_mod.fmt_final(rec, done=False),
-                lambda text: self._mission_deliver(rec, text), nowt)
+                lambda text: self._mission_deliver(rec, text), nowt,
+                quiet_hours=quiet_hours, min_interval=min_interval)
             mission_mod.save(path, doc)       # persist throttle state
             self.log.write("MISSION_SEAL", f"id={rec['id']}",
                            f"guard={guard}", f"delivered={label}")
@@ -1317,8 +1422,12 @@ class ChatService:
         rec["updated_at"] = nowt
         mission_mod.save(path, doc)
         mode = "plan" if not rec.get("tasks") else "exec"
+        cur_id = None
         if mode == "exec":
             mission_mod.set_current(rec, nowt)
+            cur = next((t for t in rec.get("tasks") or []
+                        if t.get("status") == "in_progress"), None)
+            cur_id = cur.get("id") if cur is not None else None
         prompt = mission_mod.build_slice_prompt(rec, mode=mode)
         # constitution stack: assembly puts SOUL.md first; the goal text only
         # ever enters the USER layer (design 3.3).
@@ -1335,6 +1444,7 @@ class ChatService:
             mission_mod.save(path, doc)
             return
         mission_mod.note_model_calls(rec, res.iterations, nowt)
+        rec["last_progress_at"] = nowt   # heartbeat: the slice DID work (car 3)
         output = res.text or ""
         marks = mission_mod.parse_slice(output)
         events = mission_mod.apply_slice(rec, marks, nowt, mode=mode)
@@ -1350,6 +1460,33 @@ class ChatService:
                                   "delegate": mission_mod.delegate_count(
                                       res.tool_log),
                                   "preview": mission_mod.scrub(output)[:300]})
+        # car 3: an order plan this slice prepared and the console has NOT
+        # approved yet parks the in-flight subtask — the mission enters
+        # paused_approve while every other subtask keeps ticking (F4). The
+        # decision report (kind=decision: all tiers, throttle/quiet bypass)
+        # tells the owner to approve in the console's exchange panel.
+        if mode == "exec" and cur_id:
+            plan_ids = mission_mod.approval_plan_ids(res.tool_log)
+            pending = [p for p in plan_ids
+                       if self._mission_plan_status(p) == "pending"]
+            if pending:
+                target = next((t for t in rec.get("tasks") or []
+                               if t.get("id") == cur_id), None)
+                was_state = rec.get("state")
+                if target is not None \
+                        and mission_mod.suspend_for_approval(rec, target,
+                                                             pending, nowt):
+                    if rec.get("state") != was_state:
+                        mission_mod.append_event(
+                            path, rec["id"], "state",
+                            {"to": "paused_approve", "via": "slice",
+                             "plans": pending})
+                    events.append({
+                        "kind": "decision", "level": "WARN",
+                        "fact": mission_mod.ZH["approve_fact"].format(
+                            p=", ".join(pending)),
+                        "impact": mission_mod.ZH["approve_impact"],
+                        "next": mission_mod.ZH["approve_next"]})
         finished = mode == "exec" and mission_mod.should_finish(rec, marks)
         if finished:
             mission_mod.transition(rec, "done", nowt)
@@ -1359,7 +1496,9 @@ class ChatService:
         for ev in events:
             label = mission_mod.emit(rec, ev["kind"],
                                      mission_mod.fmt_event(rec["id"], ev),
-                                     deliver, nowt)
+                                     deliver, nowt,
+                                     quiet_hours=quiet_hours,
+                                     min_interval=min_interval)
             mission_mod.append_event(path, rec["id"], "report",
                                      {"event": ev["kind"],
                                       "delivered": label,
@@ -1367,7 +1506,9 @@ class ChatService:
         if finished:
             label = mission_mod.emit(rec, "final",
                                      mission_mod.fmt_final(rec, done=True),
-                                     deliver, nowt)
+                                     deliver, nowt,
+                                     quiet_hours=quiet_hours,
+                                     min_interval=min_interval)
             mission_mod.append_event(path, rec["id"], "report",
                                      {"event": "final", "delivered": label,
                                       "tier": rec.get("reporting")})
@@ -1525,15 +1666,22 @@ class ChatService:
         return stop.set
 
     def _fire_hooks(self, event: str, chat_id: int | str | None = None,
-                    tool: str | None = None) -> None:
+                    tool: str | None = None, *, mission: str | None = None,
+                    mission_state: str | None = None,
+                    mission_progress: str | None = None) -> None:
         """Event hook (car 4a): fire the settings `hooks` block for `event`
         on a background thread — never blocks, never raises, never echoes
         output (mycore.hooks contract). `chat_id` is redacted here (service
-        log discipline) before it reaches the hook environment."""
+        log discipline) before it reaches the hook environment. The three
+        `mission*` kwargs feed only the mission_tick event (car 3): id/state/
+        progress, already sanitized by the caller."""
         try:
             hooks_mod.fire(event, repo=self.repo,
                            chat=redact_chat(chat_id) if chat_id is not None else None,
-                           tool=tool, log=self.log.write)
+                           tool=tool, mission=mission,
+                           mission_state=mission_state,
+                           mission_progress=mission_progress,
+                           log=self.log.write)
         except Exception:  # noqa: BLE001 — a hook problem never breaks a turn
             pass
 

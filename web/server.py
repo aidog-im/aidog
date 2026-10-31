@@ -66,12 +66,17 @@ Routes:
                                    budget + budget_used}; 404 unknown id;
                                    WITHOUT id the list shape is unchanged
   POST /api/mission             -> Bearer; {action: start|stop|pause|resume,
-                                   goal?, id?, reporting?, budget?} -> mission
+                                   goal?, id?, reporting?, budget?, deadline?,
+                                   redlines?, deliverable?} -> mission
                                    row (400 validation / 404 unknown id / 409
                                    conflict — one active mission at a time;
                                    start's budget{max_slices, max_wall_hours,
                                    max_daily_model_calls} freezes into the
-                                   mission, defaults = settings at start time)
+                                   mission, defaults = settings at start time;
+                                   car 3: optional deadline (ISO8601, future)
+                                   / redlines (<=500) / deliverable (<=200) —
+                                   all null when absent, injected into the
+                                   plan/slice prompts)
   GET  /api/exchange/quote      -> READ-ONLY public market probe: venue +
                                    optional symbol -> {venue, symbol, lines};
                                    own 10/60s sliding window -> 429
@@ -3078,10 +3083,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_mission_post(self) -> None:
         """POST /api/mission {action: start|stop|pause|resume, goal?, id?,
-        reporting?} — Bearer gate, then the mycore.mission state machine.
-        400 bad action/goal/reporting · 404 unknown id · 409 conflict (an
-        active mission exists, or the move does not fit the state). This
-        route only writes the registry under the board lock: the chat
+        reporting?, budget?, deadline?, redlines?, deliverable?} — Bearer
+        gate, then the mycore.mission state machine.
+        400 bad action/goal/reporting/constraint · 404 unknown id · 409
+        conflict (an active mission exists, or the move does not fit the
+        state — a console pause while an order awaits approval stays 409).
+        The three car-3 start constraints are optional: deadline = ISO8601
+        in the future, redlines <= 500 chars, deliverable <= 200 chars —
+        validated in mycore.mission.create (one grammar, every path).
+        This route only writes the registry under the board lock: the chat
         service's mission leg executes slices — a console action never runs
         a model turn, and stop seals with evidence (F4: no silent ends)."""
         if not self._require_token():
@@ -3158,6 +3168,11 @@ class Handler(BaseHTTPRequestHandler):
                                          reporting=reporting or tier,
                                          budget=eff_budget,
                                          origin=None, manifest=manifest,
+                                         # car 3 A-face constraints (all
+                                         # optional; validated inside create)
+                                         deadline=doc.get("deadline"),
+                                         redlines=doc.get("redlines"),
+                                         deliverable=doc.get("deliverable"),
                                          now=now)
                     mission.transition(rec, "running", now,
                                        reason="console start")

@@ -6,7 +6,8 @@ Configuration lives in web/settings.json under the top-level `hooks` block:
 
 Contract (docs/features/event_hooks.md):
   * events whitelist: turn_start, turn_end, tool_call, compact, cron_fire,
-    error — unknown event keys are refused at settings-write time (400);
+    error, mission_tick — unknown event keys are refused at settings-write
+    time (400);
   * `cmd` is an argv array executed DIRECTLY via subprocess (never through a
     shell): shell metacharacters in arguments are literal text, never
     syntax. argv[0] is resolved before exec — a path (contains "/" or starts
@@ -20,7 +21,10 @@ Contract (docs/features/event_hooks.md):
   * environment is a minimal whitelist: PATH, HOME (when present), plus
     AIDOG_HOOK_EVENT, optional AIDOG_HOOK_CHAT (pre-redacted by the caller,
     id:<last4> only — redact_chat discipline) and AIDOG_HOOK_TOOL (tool name
-    only, never arguments);
+    only, never arguments); `mission_tick` additionally carries
+    AIDOG_HOOK_MISSION (mission id), AIDOG_HOOK_MISSION_STATE (state enum)
+    and AIDOG_HOOK_MISSION_PROGRESS ("done/total") — id/state/progress only,
+    never the goal text, origin or any path (zero-echo discipline);
   * hook output is NEVER echoed — not into chat replies, not into log lines
     (zero-echo: a hook printing a secret leaks nowhere). A failure becomes
     one HOOK_FAIL line: event name + status/exit code + duration.
@@ -43,10 +47,13 @@ from lib import profile_paths as pp  # noqa: E402  (car F: per-profile settings)
 
 # Event whitelist — converged to the service's REAL wiring points (v1):
 # turn_start/turn_end/tool_call/compact/error live in ChatService, cron_fire
-# in _cron_deliver. `checkpoint` is deliberately NOT in the list: snapshots
-# happen inside the tool layer (not this car's partition), and a restore-only
-# hook would be misleading — see docs/features/event_hooks.md.
-EVENTS = ("turn_start", "turn_end", "tool_call", "compact", "cron_fire", "error")
+# in _cron_deliver, mission_tick in ChatService._maybe_tick_missions (car 3:
+# one emission per active mission per mission-leg tick). `checkpoint` is
+# deliberately NOT in the list: snapshots happen inside the tool layer (not
+# this car's partition), and a restore-only hook would be misleading — see
+# docs/features/event_hooks.md.
+EVENTS = ("turn_start", "turn_end", "tool_call", "compact", "cron_fire",
+          "error", "mission_tick")
 
 DEFAULT_TIMEOUT = 5
 MIN_TIMEOUT = 1
@@ -165,8 +172,20 @@ def load_hooks(repo: str | Path | None = None) -> tuple[dict, list[str]]:
     return validate_hooks(block, root)
 
 
+def _env_str(val: object, limit: int = 64) -> str | None:
+    """Sanitize one optional hook env value: a single short line, no NUL /
+    CR / LF (an env var can never smuggle a second line into a child)."""
+    if not isinstance(val, str) or not val:
+        return None
+    if any(c in val for c in "\n\r\x00") or len(val) > limit:
+        return None
+    return val
+
+
 def fire(event: str, *, repo: str | Path | None = None,
          chat: str | None = None, tool: str | None = None,
+         mission: str | None = None, mission_state: str | None = None,
+         mission_progress: str | None = None,
          log: Callable[..., None] | None = None) -> threading.Thread | None:
     """Fire every registered hook for `event` on a background thread.
 
@@ -175,7 +194,10 @@ def fire(event: str, *, repo: str | Path | None = None,
     HOOK_FAIL status=config_invalid line (reason lives at settings-write
     time), execution problems become HOOK_FAIL lines inside the thread.
     `chat` must arrive PRE-REDACTED (redact_chat: id:<last4>) and `tool` is a
-    bare tool name — arguments never cross the boundary."""
+    bare tool name — arguments never cross the boundary. The three
+    `mission*` values feed only the mission_tick environment
+    (AIDOG_HOOK_MISSION / _MISSION_STATE / _MISSION_PROGRESS); anything
+    unsanitized is dropped, never echoed (car 3)."""
     if event not in EVENTS:
         return None
     try:
@@ -192,14 +214,18 @@ def fire(event: str, *, repo: str | Path | None = None,
     if not specs:
         return None
     root = Path(repo) if repo is not None else REPO
-    env_chat = chat if isinstance(chat, str) and chat else None
-    if env_chat and ("\n" in env_chat or "\r" in env_chat or "\x00" in env_chat):
-        env_chat = None                     # one line only, fail-soft
-    env_tool = tool if isinstance(tool, str) and tool else None
-    if env_tool and ("\n" in env_tool or "\x00" in env_tool):
-        env_tool = None
+    env_chat = _env_str(chat)
+    env_tool = _env_str(tool, 128)
+    env_extra: dict[str, str] = {}
+    for key, val in (("AIDOG_HOOK_MISSION", mission),
+                     ("AIDOG_HOOK_MISSION_STATE", mission_state),
+                     ("AIDOG_HOOK_MISSION_PROGRESS", mission_progress)):
+        got = _env_str(val)
+        if got:
+            env_extra[key] = got
     th = threading.Thread(target=_run_hooks,
-                          args=(event, specs, str(root), env_chat, env_tool, log),
+                          args=(event, specs, str(root), env_chat, env_tool,
+                                env_extra, log),
                           daemon=True, name=f"hooks-{event}")
     th.start()
     return th
@@ -207,17 +233,19 @@ def fire(event: str, *, repo: str | Path | None = None,
 
 def _run_hooks(event: str, specs: list[dict], repo: str,
                chat: str | None, tool: str | None,
+               env_extra: dict[str, str],
                log: Callable[..., None] | None) -> None:
     """Sequential execution of one event's hooks, registration order."""
     for i, spec in enumerate(specs):
         try:
-            _run_one(event, i, spec, repo, chat, tool, log)
+            _run_one(event, i, spec, repo, chat, tool, env_extra, log)
         except Exception as e:  # noqa: BLE001 — one bad hook, one line, next
             _fail(log, event, i, f"error:{type(e).__name__}", None, 0.0)
 
 
 def _run_one(event: str, idx: int, spec: dict, repo: str,
              chat: str | None, tool: str | None,
+             env_extra: dict[str, str],
              log: Callable[..., None] | None) -> None:
     """Run ONE hook to completion; log HOOK_FAIL on any non-zero outcome.
     Output (stdout+stderr) is captured and discarded — zero echo."""
@@ -237,6 +265,7 @@ def _run_one(event: str, idx: int, spec: dict, repo: str,
         env["AIDOG_HOOK_CHAT"] = chat
     if tool:
         env["AIDOG_HOOK_TOOL"] = tool
+    env.update(env_extra)   # mission_tick payload: id/state/progress only
     t0 = time.monotonic()
     status = "ok"
     try:

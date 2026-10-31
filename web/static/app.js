@@ -2993,6 +2993,7 @@ function initSettingsPanels() {
   loadCreds();
   evoPrefill();                // B2: evolution schedule form <- settings
   exCapPrefill();              // B2: exchange caps form <- settings.web3
+  missionPrefillCfg();         // car 3: quiet hours + min_interval <- settings
 }
 
 /* repainted after a language switch: the save row may carry a restart hint
@@ -3893,7 +3894,7 @@ const MISSION_SYM = { done: "✓", running: "▸", degraded: "⊘",
 function missionStateChip(st) {
   const tone = (st === "running" || st === "done") ? "ok"
     : (st === "degraded") ? "warn"
-    : (st === "sealed") ? "bad" : "";
+    : (st === "sealed" || st === "paused_approve") ? "bad" : "";
   return actChip(missionStateLabel(st), tone);
 }
 
@@ -3908,6 +3909,108 @@ function missionBudSeg(label, used, max, fmt) {
   const txt = t(label.k, label.f)
     .replace("{u}", fmt(uu)).replace("{m}", fmt(mm));
   return `<span class="md-seg${cls}">${escapeHtml(txt)}</span>`;
+}
+
+/* ------------------- car 3 (0.5.46 Lane K2): constraints + approvals ---
+   The three A-face start constraints travel in GET ?id= detail rows as
+   `deadline` / `redlines` / `deliverable` (null = unset, never invented).
+   The deadline renders as a RELATIVE time with a red past-deadline line —
+   the server validated "future" at start, time keeps running. The
+   approvals block is badge + deep links ONLY: approval happens in the
+   EXISTING Web3 panel behind the Bearer gate, never here. */
+function missionSpan(sec) {
+  const s = Math.max(0, Math.round(Number(sec) || 0));
+  if (s < 60) return s + "s";
+  if (s < 3600) return Math.round(s / 60) + "m";
+  if (s < 86400) {
+    const h = Math.floor(s / 3600), m = Math.round((s % 3600) / 60);
+    return m ? h + "h " + m + "m" : h + "h";
+  }
+  const d = Math.floor(s / 86400), h2 = Math.round((s % 86400) / 3600);
+  return h2 ? d + "d " + h2 + "h" : d + "d";
+}
+
+function missionConstraintsHtml(m) {
+  const parts = [];
+  if (m.deadline) {
+    const raw = String(m.deadline);
+    const ts = Date.parse(raw);
+    let inner, over = false;
+    if (Number.isNaN(ts)) {           // an odd stored value shows verbatim
+      inner = t("mission.deadlineLbl", "DEADLINE") + ": " + raw;
+    } else if (ts <= Date.now()) {
+      over = true;
+      inner = "\u23f0 " + t("mission.deadlineOver", "deadline {ago}")
+        .replace("{ago}", missionAgo(ts / 1000));
+    } else {
+      inner = "\u23f0 " + t("mission.deadlineIn", "deadline in {v}")
+        .replace("{v}", missionSpan((ts - Date.now()) / 1000));
+    }
+    parts.push(`<div class="md-cs${over ? " over" : ""}">${escapeHtml(inner)}</div>`);
+  }
+  if (m.redlines) {
+    parts.push(`<div class="md-cs"><span class="md-cs-l">` +
+      `${escapeHtml(t("mission.redlinesLbl", "RED LINES"))}</span>` +
+      `${escapeHtml(String(m.redlines))}</div>`);
+  }
+  if (m.deliverable) {
+    parts.push(`<div class="md-cs"><span class="md-cs-l">` +
+      `${escapeHtml(t("mission.deliverableLbl", "DELIVERABLE"))}</span>` +
+      `${escapeHtml(String(m.deliverable))}</div>`);
+  }
+  return parts.join("");
+}
+
+function missionApprovalsHtml(m) {
+  const appr = Array.isArray(m.approvals) ? m.approvals : [];
+  if (m.state !== "paused_approve" && !appr.length) return "";
+  let rows;
+  if (appr.length) {
+    rows = appr.map(a => {
+      const ids = (a && Array.isArray(a.plans)) ? a.plans : [];
+      const links = ids.map(pid =>
+        `<a class="md-planlink" href="#" data-plan-link="` +
+        `${escapeHtml(String(pid))}" title="` +
+        `${escapeHtml(t("mission.apprOpen", "open in the Web3 panel"))}">` +
+        `${escapeHtml(String(pid))}</a>`).join(" ");
+      const lab = t("mission.apprTask", "task {t} · {n} plan(s) waiting")
+        .replace("{t}", String((a && a.task) || "?"))
+        .replace("{n}", String(ids.length));
+      return `<div class="md-appr"><span class="md-appr-t">` +
+        `${escapeHtml(lab)}</span> ${links}</div>`;
+    }).join("");
+  } else {
+    rows = `<div class="stat-note">${escapeHtml(
+      t("mission.apprEmpty", "approval queue empty"))}</div>`;
+  }
+  return `<div class="md-sec">${escapeHtml(
+      t("mission.approvals", "APPROVALS"))}</div>` + rows +
+    `<div class="stat-note">${escapeHtml(t("mission.approveHint",
+      "approve in the Web3 panel — the mission resumes on its own, " +
+      "nothing to do here"))}</div>`;
+}
+
+/* deep link into the EXISTING Web3 panel: switch view (the actFix/orch
+   posture), let the approval queue load, then scroll + pulse the plan card
+   that carries this id. No second decision surface, no fetch of our own. */
+function missionGoPlan(pid) {
+  const id = String(pid || "").replace(/["\\]/g, "");
+  if (!id) return;
+  setView("exchange", true);
+  const focus = () => {
+    const el = document.querySelector('#exPlans [data-plan="' + id + '"]');
+    if (!el || typeof el.scrollIntoView !== "function") return false;
+    el.scrollIntoView({ block: "center" });
+    el.classList.add("plan-focus");
+    setTimeout(() => el.classList.remove("plan-focus"), 2400);
+    return true;
+  };
+  if (focus()) return;
+  let tries = 0;                       // the list may still be loading
+  const iv = setInterval(() => {
+    tries += 1;
+    if (focus() || tries >= 24) clearInterval(iv);
+  }, 150);
 }
 
 function renderMissionDetail() {
@@ -3944,6 +4047,10 @@ function renderMissionDetail() {
         .replace("{ago}", missionAgo(m.last_report_at))
     : t("mission.lastReport", "last report {ago}")
         .replace("{ago}", t("mission.never", "never"));
+
+  /* car 3: the three constraints + the approval queue (badge + deep links) */
+  const csHtml = missionConstraintsHtml(m);
+  const apprHtml = missionApprovalsHtml(m);
 
   /* budget + usage: the resolved guard values (frozen at start) vs honest
      counters — >=80% amber, >=100% red (missionBudSeg paints it). */
@@ -4030,6 +4137,7 @@ function renderMissionDetail() {
     `<span class="stat-note md-meta">${meta}${degChip}</span></div>` +
     `<div class="md-goal">${escapeHtml(missionTrunc(m.goal, 400))}</div>` +
     `<div class="stat-note">${escapeHtml(lastRep)}</div>` +
+    csHtml + apprHtml +
     budHtml + planHtml + methHtml +
     `<div class="md-sec">${escapeHtml(t("mission.events", "EVENT TAIL"))}</div>` +
     evHtml;
@@ -4080,10 +4188,15 @@ function renderMission() {
       String(active.reporting || missionData.reporting || ""),
     ].map(escapeHtml).join(" · ");
     stateEl.hidden = false;
-    // the ACTIVE line opens its own detail too (the board's primary target)
+    // the ACTIVE line opens its own detail too (the board's primary target);
+    // car 3: a paused_approve row also carries the red "approval pending"
+    // badge — the detail pane holds the plan deep links behind it
+    const actBadge = active.state === "paused_approve"
+      ? " " + actChip(t("mission.awaitBadge", "approval pending"), "bad")
+      : "";
     stateEl.innerHTML = `<div class="md-open" role="button" tabindex="0"` +
       ` data-mid="${escapeHtml(String(active.id || ""))}">` +
-      `<div>${meta}</div>` +
+      `<div>${meta}${actBadge}</div>` +
       `<div style="opacity:.85;">${escapeHtml(goal)}</div></div>`;
   }
 
@@ -4100,12 +4213,15 @@ function renderMission() {
         const mid = String(row.id || "");
         const meta = [mid, missionStateLabel(row.state)]
           .map(escapeHtml).join(" · ");
+        const rowBadge = row.state === "paused_approve"
+          ? " " + actChip(t("mission.awaitBadge", "approval pending"), "bad")
+          : "";
         const sel = (mid && mid === missionDetailId) ? " is-sel" : "";
         return `<div class="ctl-row mission-row${sel}" role="button" tabindex="0"` +
           ` data-mid="${escapeHtml(mid)}">` +
           `<label style="flex:1;min-width:0;overflow-wrap:anywhere;">` +
           `${escapeHtml(missionTrunc(row.goal, 90))}</label>` +
-          `<span class="stat-note" style="margin-top:0;">${meta}</span></div>`;
+          `<span class="stat-note" style="margin-top:0;">${meta}${rowBadge}</span></div>`;
       }).join("");
     }
   }
@@ -4159,6 +4275,21 @@ async function missionAction(action) {
     const bc = bget("missionBudgetCalls");
     if (bc !== null) budget.max_daily_model_calls = bc;
     if (Object.keys(budget).length) payload.budget = budget;
+    // car 3 constraints: only FILLED fields travel (blank = unset); the
+    // datetime-local value becomes an ISO8601 instant — the server owns
+    // every rule (future / <=500 / <=200) and its 400 detail renders
+    // verbatim below, never a local guess
+    const dlEl = document.getElementById("missionDeadline");
+    if (dlEl && dlEl.value) {
+      const when = new Date(dlEl.value);
+      if (!Number.isNaN(when.getTime())) payload.deadline = when.toISOString();
+    }
+    const rlEl = document.getElementById("missionRedlines");
+    const rl = rlEl ? String(rlEl.value || "").trim() : "";
+    if (rl) payload.redlines = rl;
+    const dvEl = document.getElementById("missionDeliverable");
+    const dv = dvEl ? String(dvEl.value || "").trim() : "";
+    if (dv) payload.deliverable = dv;
   } else {
     const active = missionData && missionData.active;
     if (!active || !active.id) return;
@@ -4245,6 +4376,83 @@ async function missionTierWrite(value) {
       msg.textContent = String(e).slice(0, 120); }
   }
   await refreshMission();
+}
+
+/* car 3 (0.5.46 Lane K2): the reporter settings next to the tier select —
+   quiet window ("" or HH:MM-HH:MM, may cross midnight) + min_interval
+   (0..86400, 0 = tier default). Same write posture as missionTierWrite:
+   Bearer POST /api/settings {mission:{...}} on `change`, server 400 detail
+   VERBATIM in #missionMsg (it names the grammar, never a value), and the
+   stored values re-prefill from the write response so the form can never
+   drift from what the server actually holds. */
+async function missionCfgWrite() {
+  const msg = document.getElementById("missionMsg");
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    if (msg) { msg.className = "save-state err";
+      msg.textContent = t("save.needToken", "token required"); }
+    return;
+  }
+  const qEl = document.getElementById("missionQuietHours");
+  const iEl = document.getElementById("missionMinInterval");
+  const quiet = qEl ? String(qEl.value || "").trim() : "";
+  const rawI = iEl ? String(iEl.value || "").trim() : "";
+  let mi = 0;
+  if (rawI !== "") {
+    const n = Number(rawI);
+    mi = Number.isFinite(n) ? n : rawI;   // a non-number still travels: the
+  }                                       // server refuses it 400, honestly
+  if (msg) { msg.className = "save-state"; msg.textContent = "…"; }
+  try {
+    const res = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify({ mission: { quiet_hours: quiet,
+                                        min_interval: mi } }),
+    });
+    let body = {};
+    try { body = await res.json(); } catch (e) { body = {}; }
+    if (res.status === 401) {
+      if (msg) { msg.className = "save-state err";
+        msg.textContent = t("save.badToken", "401 · unauthorized"); }
+      return;
+    }
+    if (!res.ok) {
+      const details = Array.isArray(body.details) ? body.details : [];
+      if (msg) { msg.className = "save-state err";
+        msg.textContent = details.length ? details.join("; ")
+          : (body.error || "error"); }
+      return;
+    }
+    if (body.settings && typeof body.settings === "object") {
+      settings.mission = body.settings.mission || settings.mission;
+      missionPrefillCfg();
+    }
+    if (msg) { msg.className = "save-state";
+      msg.textContent = t("save.ok", "saved ✓"); }
+    beep(880, 0.06);
+  } catch (e) {
+    if (msg) { msg.className = "save-state err";
+      msg.textContent = String(e).slice(0, 120); }
+  }
+}
+
+/* form <- GET /api/settings mission partition (always present: the server
+   keeps DEFAULT_SETTINGS resident). Never fight the caret: an element the
+   user is editing keeps its local value. */
+function missionPrefillCfg() {
+  const m = (settings && settings.mission
+    && typeof settings.mission === "object") ? settings.mission : {};
+  const q = document.getElementById("missionQuietHours");
+  if (q && document.activeElement !== q) {
+    q.value = m.quiet_hours == null ? "" : String(m.quiet_hours);
+  }
+  const i = document.getElementById("missionMinInterval");
+  if (i && document.activeElement !== i) {
+    const v = Number(m.min_interval);
+    i.value = Number.isFinite(v) ? String(v) : "0";
+  }
 }
 
 /* ------------------------------------------- orchestration card (0.5.45) --
@@ -4554,6 +4762,21 @@ if (cronListDelEl) cronListDelEl.addEventListener("click", e => {
 const missionReportingEl = document.getElementById("missionReporting");
 if (missionReportingEl) missionReportingEl.addEventListener("change",
   e => missionTierWrite(e.target.value));
+/* car 3 reporter settings: both inputs write on `change` (commit/blur) —
+   never per keystroke, so a half-typed window never fires a 400 */
+["missionQuietHours", "missionMinInterval"].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener("change", () => missionCfgWrite());
+});
+/* car 3 redlines: honest live character count (the server cap is 500) */
+const missionRlEl = document.getElementById("missionRedlines");
+if (missionRlEl) missionRlEl.addEventListener("input", () => {
+  const c = document.getElementById("missionRedlinesCount");
+  if (!c) return;
+  const n = missionRlEl.value.length;
+  c.textContent = n + "/500";
+  c.classList.toggle("at-max", n >= 500);
+});
 /* car 2 task board (Lane I): row -> detail wiring. Delegated on the three
    containers (their innerHTML is rebuilt on every poll), so rows rendered
    later stay live; Enter/Space on a focused row mirrors the click. */
@@ -4580,11 +4803,23 @@ if (missionDetailEl) {
       ? e.target.closest("#missionDetailBack") : null;
     if (b) missionBack();
   };
-  missionDetailEl.addEventListener("click", backAct);
+  /* car 3: an approval plan id is a deep link into the EXISTING Web3
+     panel (view switch + scroll/pulse) — approving stays over there */
+  const detailAct = e => {
+    const pl = e.target && e.target.closest
+      ? e.target.closest("[data-plan-link]") : null;
+    if (pl) {
+      e.preventDefault();
+      missionGoPlan(pl.getAttribute("data-plan-link"));
+      return;
+    }
+    backAct(e);
+  };
+  missionDetailEl.addEventListener("click", detailAct);
   missionDetailEl.addEventListener("keydown", e => {
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
-      backAct(e);
+      detailAct(e);
     }
   });
 }
