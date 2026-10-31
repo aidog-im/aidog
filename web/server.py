@@ -19,6 +19,11 @@ Routes:
   POST /api/settings            -> Bearer WEB_TOKEN; validated merge; idempotent
   GET  /api/usage               -> model-channel usage/cost aggregation (cached)
   GET  /api/events              -> sanitized recent event stream
+  GET  /api/evolution           -> evolution loop status (schedule/state/log tail)
+  POST /api/learn               -> Bearer; lint+pre-screen, writes a skill or
+                                   memory artifact (evolution loop console leg)
+  POST /api/evolution           -> Bearer; {action:"reflect", period} generates
+                                   the period skeleton (same core as /reflect)
   GET  /api/voice               -> voice engine capability (edge-tts presence)
   POST /api/say                 -> synthesize speech -> audio/mpeg (cached,
                                    rate-limited, sanitized, JSON-only origin-guarded)
@@ -57,6 +62,7 @@ if str(REPO) in sys.path:
     sys.path.remove(str(REPO))
 sys.path.insert(0, str(REPO))
 from lib import i18n  # noqa: E402
+from mycore import evolution  # noqa: E402  (institutional evolution loop)
 HOST, PORT = "127.0.0.1", int(os.environ.get("AIDOG_WEB_PORT", "8790"))
 try:
     VERSION = (REPO / "VERSION").read_text(encoding="utf-8").strip()  # single source of truth
@@ -137,7 +143,8 @@ DEFAULT_SETTINGS: dict = {
               "log_dir": ""},
 }
 ALLOWED_TOP = ("language", "refresh_sec", "sound", "voice_volume",
-               "alert_preview", "currency", "fx_rate", "mycore", "usage")
+               "alert_preview", "currency", "fx_rate", "mycore", "usage",
+               "evolution")
 USAGE_KEYS = ("metrics_url", "pricing_config", "log_dir")
 MYCORE_KEYS = ("base_url", "model")
 MYCORE_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$")
@@ -524,6 +531,12 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                 clean_usage[key] = val
             if clean_usage:
                 clean["usage"] = clean_usage
+    if "evolution" in patch:
+        clean_evo, evo_errors = evolution.validate_evolution_settings(
+            patch["evolution"])
+        errors.extend(evo_errors)
+        if clean_evo:
+            clean["evolution"] = clean_evo
     return clean, errors
 
 
@@ -1338,6 +1351,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(collect_usage(load_settings()))
         if path == "/api/events":
             return self._json(collect_events())
+        if path == "/api/evolution":
+            return self._json(evolution.status_summary())
         if path == "/api/version":
             return self._json(collect_version())
         if path == "/api/skills":
@@ -1360,7 +1375,134 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_settings_write()
         if path == "/api/say":
             return self._handle_say()
+        if path == "/api/learn":
+            return self._handle_learn()
+        if path == "/api/evolution":
+            return self._handle_evolution()
         return self._json({"error": "not found"}, 404)
+
+    # ------------------------------------------------------ evolution legs ---
+    def _require_token(self) -> bool:
+        """Bearer WEB_TOKEN gate (same contract as the settings write). The
+        token value never appears in any response, log line, or exception."""
+        token = read_env_slot("WEB_TOKEN")
+        if not token:
+            self._json({"error": "WEB_TOKEN not configured in secrets.env"}, 503)
+            return False
+        auth = self.headers.get("Authorization", "")
+        provided = auth[7:] if auth.startswith("Bearer ") else ""
+        if not provided or not hmac.compare_digest(provided.encode(),
+                                                   token.encode()):
+            self._json({"error": "unauthorized"}, 401)
+            return False
+        return True
+
+    def _read_json_body(self) -> dict | None:
+        """Length/JSON/dict validation with responses on failure (None = a
+        response was already sent)."""
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._json({"error": "bad content-length"}, 400)
+            return None
+        if length <= 0:
+            self._json({"error": "empty body"}, 400)
+            return None
+        if length > MAX_BODY:
+            self._json({"error": f"body too large (max {MAX_BODY} bytes)"}, 413)
+            return None
+        try:
+            doc = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            self._json({"error": "invalid JSON body"}, 400)
+            return None
+        if not isinstance(doc, dict):
+            self._json({"error": "body must be a JSON object"}, 400)
+            return None
+        return doc
+
+    @staticmethod
+    def _repo_rel(path: object) -> str:
+        p = Path(str(path))
+        try:
+            return p.resolve().relative_to(REPO.resolve()).as_posix()
+        except (OSError, ValueError):
+            return p.name
+
+    def _handle_learn(self) -> None:
+        """Console leg of /learn: same gate (lint + skill_route pre-screen),
+        same artifact rules. Shape errors answer 400 before any write; lint
+        rejects answer 400 with rule ids and write nothing."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        kind = doc.get("kind")
+        if kind == "memory":
+            text = doc.get("text")
+            if not isinstance(text, str) or not text.strip():
+                return self._json({"error": "validation failed",
+                                   "details": ["text is required (kind=memory)"]}, 400)
+            res = evolution.learn_memory(text)
+        elif kind == "skill":
+            fields = {k: doc.get(k) for k in ("name", "description", "body")}
+            bad = [k for k, v in fields.items()
+                   if not isinstance(v, str) or not v.strip()]
+            if bad:
+                return self._json({"error": "validation failed",
+                                   "details": ["missing or empty: "
+                                               + ", ".join(sorted(bad))]}, 400)
+            res = evolution.learn_skill(fields["name"].strip(),
+                                        fields["description"].strip(),
+                                        fields["body"].strip())
+        else:
+            return self._json({"error": "validation failed",
+                               "details": ["kind must be 'skill' or 'memory'"]}, 400)
+        if not res.ok:
+            sys.stderr.write(f"evolution learn rejected kind={kind} "
+                             f"rules={','.join(res.errors)}\n")
+            return self._json({"error": "lint rejected",
+                               "details": res.errors}, 400)
+        sys.stderr.write(f"evolution learn kind={kind} "
+                         f"path={self._repo_rel(res.path)}\n")
+        return self._json({"ok": True, "kind": kind,
+                           "path": self._repo_rel(res.path),
+                           "prescreen": res.prescreen})
+
+    def _handle_evolution(self) -> None:
+        """Console leg of /reflect (explicit trigger; the window key is
+        marked done exactly like the cron leg)."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        if doc.get("action", "reflect") != "reflect":
+            return self._json({"error": "validation failed",
+                               "details": ["action must be 'reflect'"]}, 400)
+        period = doc.get("period", "daily")
+        if period not in evolution.PERIODS:
+            return self._json({"error": "validation failed",
+                               "details": ["period must be one of: "
+                                           + ",".join(evolution.PERIODS)]}, 400)
+        try:
+            res = evolution.reflect(period)
+        except (OSError, ValueError) as e:
+            sys.stderr.write(f"evolution reflect failed period={period} "
+                             f"err={type(e).__name__}\n")
+            return self._json({"error": "reflect failed"}, 500)
+        sys.stderr.write(f"evolution reflect period={period} "
+                         f"created={int(res.created)} "
+                         f"path={self._repo_rel(res.path)}\n")
+        return self._json({"ok": True, "period": period,
+                           "created": res.created,
+                           "path": self._repo_rel(res.path),
+                           "facts": {"skills": len(res.facts.get("skills") or []),
+                                     "entries": sum((res.facts.get("entries")
+                                                     or {}).values()),
+                                     "commits": (res.facts.get("git") or {}) \
+                                         .get("count")}})
 
     def _handle_say(self) -> None:
         """Speech synthesis. No bearer required (loopback console feature),

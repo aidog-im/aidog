@@ -341,7 +341,7 @@ def test_assembly() -> None:
         mem1 = tdp / "MEMORY_curated.md"
         mem1.write_text("- memory fact", encoding="utf-8")
         mem2 = tdp / "USER_curated.md"   # intentionally missing
-        stack = build_system_stack(cons, (mem1, mem2))
+        stack = build_system_stack(cons, (mem1, mem2), learned_path=None)
         check("assembly: stack shape", len(stack) == 4 and
               all(m["role"] == "system" for m in stack))
         check("assembly: constitution first", "SOUL test constitution" in stack[0]["content"])
@@ -353,17 +353,18 @@ def test_assembly() -> None:
         d1, d2 = stack_digest(stack), stack_digest(stack)
         check("assembly: digest deterministic", d1 == d2 and len(d1) == 16)
         mem1.write_text("- different memory", encoding="utf-8")
-        stack2 = build_system_stack(cons, (mem1, mem2))
+        stack2 = build_system_stack(cons, (mem1, mem2), learned_path=None)
         check("assembly: digest tracks content", stack_digest(stack2) != d1)
         # all-missing body layer -> notices, no exception (last stack entry is
         # the skill hint, which never says "missing")
-        stack3 = build_system_stack(tdp / "nope.md", (tdp / "nope2.md",))
+        stack3 = build_system_stack(tdp / "nope.md", (tdp / "nope2.md",),
+                                    learned_path=None)
         check("assembly: all-missing still a stack",
               len(stack3) == 3 and all("missing" in m["content"] for m in stack3[:2])
               and "skill_route" in stack3[2]["content"])
         # oversized constitution truncated honestly
         cons.write_text("x" * 9000, encoding="utf-8")
-        stack4 = build_system_stack(cons, (mem1,))
+        stack4 = build_system_stack(cons, (mem1,), learned_path=None)
         check("assembly: oversized slot truncated",
               "truncated" in stack4[0]["content"] and len(stack4[0]["content"]) < 8500)
 
@@ -974,7 +975,9 @@ def test_service() -> None:
             svc.handle_update(mk_update(6, 111, 123456789, "/help"))
             help_reply = fake.sends[-1][1]
             check("service: /help lists commands with descriptions",
-                  all(c in help_reply for c in ("/help", "/reset", "/model", "/status"))
+                  all(c in help_reply for c in
+                      ("/help", "/reset", "/model", "/status",
+                       "/learn", "/reflect", "/evolution"))
                   and help_reply.startswith("Commands:"), help_reply[:60])
             svc.handle_update(mk_update(7, 111, 123456789, "/reset"))
             check("service: /reset archives the session",
@@ -1029,6 +1032,92 @@ def test_service() -> None:
                   "/help" in fake.sends[-1][1] and
                   fake.sends[-1][1].startswith("unknown command"),
                   fake.sends[-1][1])
+
+            # evolution commands (Phase A loop — offline, tmp repo root)
+            evo_repo = tdp / "evo_repo"
+            (evo_repo / "web").mkdir(parents=True)
+            fake_v = FakeTgTransport()
+            svc_v = ChatService(tdp / "st_evo", frozenset({111}),
+                                transport=fake_v, chat=ok_chat,
+                                repo=evo_repo, now=nowf)
+            svc_v.handle_update(mk_update(20, 111, 77, "/learn"))
+            check("service: /learn without args -> usage",
+                  "/learn memory" in fake_v.sends[-1][1],
+                  fake_v.sends[-1][1][:80])
+            svc_v.handle_update(mk_update(
+                21, 111, 77,
+                "/learn skill evo-tst-skill :: Quuxlify the flimnap prototype "
+                ":: - steps to quuxlify\n- verify flimnap"))
+            learn_reply = fake_v.sends[-1][1]
+            check("service: /learn skill writes artifact + answers",
+                  "skill saved" in learn_reply
+                  and "overlay/skills/evo-tst-skill/SKILL.md" in learn_reply
+                  and (evo_repo / "overlay" / "skills" / "evo-tst-skill"
+                       / "SKILL.md").is_file(), learn_reply)
+            evo_log = evo_repo / "overlay" / "evolution" / "EVOLUTION.md"
+            check("service: accepted learn appends the evolution log",
+                  evo_log.is_file() and "learn.skill" in evo_log.read_text())
+            svc_v.handle_update(mk_update(
+                22, 111, 77,
+                "/learn skill bad name :: Quuxlify it :: content here"))
+            reject_reply = fake_v.sends[-1][1]
+            check("service: /learn lint reject -> localized, nothing written",
+                  "rejected by the lint gate" in reject_reply
+                  and not (evo_repo / "overlay" / "skills" / "bad name").exists(),
+                  reject_reply)
+            check("service: lint reject stays out of the tracked log",
+                  "reject" not in evo_log.read_text())
+            svc_v.handle_update(mk_update(
+                23, 111, 77,
+                "/learn memory Quuxlify the flimnap before every deploy"))
+            mem_reply = fake_v.sends[-1][1]
+            learned = evo_repo / "overlay" / "memory" / "EVOLUTION_learned.md"
+            check("service: /learn memory writes the learned slot",
+                  "memory learned" in mem_reply and learned.is_file()
+                  and "flimnap" in learned.read_text(), mem_reply)
+            svc_v.handle_update(mk_update(24, 111, 77, "/reflect bogus"))
+            check("service: /reflect bad period -> usage",
+                  "usage: /reflect" in fake_v.sends[-1][1],
+                  fake_v.sends[-1][1])
+            svc_v.handle_update(mk_update(25, 111, 77, "/reflect daily"))
+            refl_reply = fake_v.sends[-1][1]
+            drafts = list((evo_repo / "overlay" / "evolution" / "reflect")
+                          .glob("*.daily.md"))
+            check("service: /reflect daily drafts the skeleton",
+                  "drafted" in refl_reply and len(drafts) == 1
+                  and "pending" in drafts[0].read_text(), refl_reply)
+            check("service: /reflect marks the window in service state",
+                  json.loads((svc_v.state / "evolution_state.json")
+                             .read_text()).get("daily") == "1970-01-01")
+            svc_v.handle_update(mk_update(26, 111, 77, "/reflect daily"))
+            check("service: /reflect second run -> already on file",
+                  "already on file" in fake_v.sends[-1][1],
+                  fake_v.sends[-1][1])
+            svc_v.handle_update(mk_update(27, 111, 77, "/evolution"))
+            evo_reply = fake_v.sends[-1][1]
+            check("service: /evolution status (schedule/counts/log tail)",
+                  evo_reply.startswith("evolution:") and "skills=1" in evo_reply
+                  and "learn.skill" in evo_reply, evo_reply[:160])
+
+            # cron leg: enabled + due -> one pass, then throttle (no repeat)
+            (evo_repo / "web" / "settings.json").write_text(json.dumps(
+                {"evolution": {"enabled": True, "daily_at": "00:00"}}),
+                encoding="utf-8")
+            (svc_v.state / "evolution_state.json").unlink()
+            svc_v._reflect_check = 0.0
+            svc_v._maybe_reflect()
+            log_text = svc_v.log.read_text()
+            check("service: cron leg reflects when enabled+due",
+                  log_text.count("trigger=cron") == 3
+                  and "created=1" in log_text, log_text[-300:])
+            check("service: cron leg produced weekly+monthly drafts too",
+                  len(list((evo_repo / "overlay" / "evolution" / "reflect")
+                           .glob("*.weekly.md"))) == 1
+                  and len(list((evo_repo / "overlay" / "evolution" / "reflect")
+                               .glob("*.monthly.md"))) == 1)
+            svc_v._maybe_reflect()          # inside the throttle window
+            check("service: cron leg throttled within REFLECT_CHECK_SEC",
+                  svc_v.log.read_text().count("trigger=cron") == 3)
 
             # empty model output -> honest fallback
             fake_e = FakeTgTransport()
@@ -1155,6 +1244,219 @@ def test_skill_dirs_chain() -> None:
             sr.REPO = real_repo
 
 
+def test_evolution() -> None:
+    """Phase A self-evolution loop: lint gate, learn, reflect, log, state,
+    cron keys, status, lint-tree — all offline against a tmp repo."""
+    from datetime import datetime, timedelta, timezone
+    from mycore import evolution as ev
+    from mycore.assembly import build_system_stack
+
+    # --- lint gate: content rules ---
+    check("evolution: secret assignment rejected",
+          "secret-assignment" in ev.lint_text('api_key = "abcdefghijkl1234"'))
+    check("evolution: token shape rejected",
+          "secret-shape" in ev.lint_text("use sk-" + "a" * 24 + " inline"))
+    check("evolution: private key rejected",
+          "private-key" in ev.lint_text("-----BEGIN PRIVATE KEY-----\nzz"))
+    check("evolution: bearer rejected",
+          "bearer" in ev.lint_text("Authorization: Bearer " + "x" * 24))
+    check("evolution: machine path rejected",
+          "machine-path" in ev.lint_text("the files live under <MNT_PATH>/data"))
+    check("evolution: windows path rejected",
+          "windows-path" in ev.lint_text(r"saved to C:\Users\me\notes.md"))
+    check("evolution: personal bot handle rejected",
+          # the handle is CONCATENATED on purpose: the publish gate scans this
+          # source for the literal `@my_*_bot` shape and must stay clean —
+          # runtime string is contiguous, so the evolution rule still fires
+          "bot-handle" in ev.lint_text("ping @my_" + "example_dev" + "_bot first"))
+    check("evolution: clean text passes the content gate",
+          ev.lint_text("check the watchdog state before retrying") == [])
+    # --- lint gate: structure rules ---
+    check("evolution: skill slug rule",
+          "name-slug" in ev.lint_skill("Bad Slug", "d", "body"))
+    check("evolution: description one line, capped",
+          "description" in ev.lint_skill("ok", "line1\nline2", "body")
+          and "description" in ev.lint_skill("ok", "x" * 201, "body"))
+    check("evolution: empty skill body rejected",
+          "empty" in ev.lint_skill("ok", "d", "   "))
+    check("evolution: self-authored frontmatter rejected",
+          "frontmatter" in ev.lint_skill("ok", "d",
+                                         "---\nname: x\n---\nbody"))
+    check("evolution: skill size cap",
+          "size-cap" in ev.lint_skill("ok", "d", "x" * (ev.MAX_SKILL_BODY + 1)))
+    check("evolution: memory size cap",
+          "size-cap" in ev.lint_memory("x" * (ev.MAX_MEMORY_TEXT + 1)))
+
+    with tempfile.TemporaryDirectory() as td:
+        repo = Path(td)
+        NOW = datetime(2026, 10, 20, 22, 0,
+                       tzinfo=timezone(timedelta(hours=8))).timestamp()
+
+        # --- learn: skill ---
+        r = ev.learn_skill("release-gate",
+                           "Checklist gates for shipping a release car",
+                           "- verify suite counts\n- bump VERSION",
+                           now=NOW, repo=repo, roots=[])
+        md = repo / "overlay" / "skills" / "release-gate" / "SKILL.md"
+        check("evolution: learn skill writes SKILL.md",
+              r.ok and r.path == md and md.is_file())
+        check("evolution: SKILL.md frontmatter generated",
+              md.read_text(encoding="utf-8").startswith(
+                  "---\nname: release-gate\ndescription: Checklist gates"))
+        check("evolution: accepted learn appends the log",
+              [e["kind"] for e in ev.read_log(repo=repo)] == ["learn.skill"])
+        r2 = ev.learn_skill("release-gate", "d", "b",
+                            now=NOW, repo=repo, roots=[])
+        check("evolution: same-name skill rejected (exists)",
+              not r2.ok and "exists" in r2.errors)
+        r3 = ev.learn_skill("Bad Slug", "d", "password=supersecretvalue123",
+                            now=NOW, repo=repo, roots=[])
+        check("evolution: lint reject writes nothing",
+              not r3.ok and "name-slug" in r3.errors
+              and "secret-assignment" in r3.errors
+              and not (repo / "overlay" / "skills" / "Bad Slug").exists())
+        rd = ev.learn_skill("gate-check-b",
+                            "Checklist gates for shipping a release car",
+                            "same words here",
+                            now=NOW, repo=repo, roots=[ev.skills_dir(repo)])
+        check("evolution: route pre-screen blocks a duplicate",
+              not rd.ok and "duplicate" in rd.errors
+              and any("duplicate of" in n for n in rd.prescreen),
+              str(rd))
+        rn = ev.learn_skill("release-notes-tidy", "Write tidy release notes",
+                            "body text here",
+                            now=NOW, repo=repo, roots=[ev.skills_dir(repo)])
+        check("evolution: near-miss pre-screen notes but allows",
+              rn.ok and any(n.startswith("near ") for n in rn.prescreen),
+              str(rn))
+
+        # --- learn: memory ---
+        lesson = "When a deploy fails, check the watchdog state first."
+        m = ev.learn_memory(lesson, now=NOW, repo=repo)
+        learned = repo / "overlay" / "memory" / "EVOLUTION_learned.md"
+        check("evolution: learn memory appends the learned slot",
+              m.ok and m.path == learned and learned.is_file()
+              and lesson in learned.read_text(encoding="utf-8"))
+        m2 = ev.learn_memory(lesson, now=NOW, repo=repo)
+        check("evolution: identical memory is a no-op success",
+              m2.ok and m2.prescreen
+              and learned.read_text(encoding="utf-8").count(lesson) == 1)
+        m3 = ev.learn_memory("token: ghp_" + "a" * 30, now=NOW, repo=repo)
+        check("evolution: memory secret rejected",
+              not m3.ok and bool(m3.errors))
+        check("evolution: rejects never enter the tracked log",
+              "ghp_" not in ev.log_path(repo).read_text(encoding="utf-8")
+              and all("reject" not in e["kind"]
+                      for e in ev.read_log(repo=repo)))
+
+        # --- assembly: learned slot (optional, present-only) ---
+        cons = repo / "SOUL.md"
+        cons.write_text("# constitution", encoding="utf-8")
+        mem = repo / "MEMORY_curated.md"
+        mem.write_text("- curated", encoding="utf-8")
+        stack = build_system_stack(cons, (mem,), learned_path=learned)
+        check("evolution: assembly appends the learned slot when present",
+              len(stack) == 4 and lesson in stack[2]["content"]
+              and "skill_route" in stack[3]["content"])
+        stack_b = build_system_stack(cons, (mem,), learned_path=None)
+        check("evolution: assembly stack unchanged without the slot",
+              len(stack_b) == 3)
+
+        # --- reflect ---
+        sp = repo / "state.json"
+        res = ev.reflect("daily", now=NOW, repo=repo, state_path=sp)
+        check("evolution: reflect daily creates the draft",
+              res.created and res.path.is_file()
+              and res.path.name == "2026-10-20.daily.md")
+        txt = res.path.read_text(encoding="utf-8")
+        check("evolution: draft = facts + pending human conclusion",
+              "## Facts" in txt and "Human conclusion" in txt
+              and "pending" in txt and "2026-10-20T00:00+08:00" in txt)
+        check("evolution: draft counts this window's entries",
+              "learn.skill=2" in txt and "learn.memory=1" in txt, txt[:300])
+        res2 = ev.reflect("daily", now=NOW, repo=repo, state_path=sp)
+        check("evolution: reflect idempotent per window",
+              not res2.created and res2.path == res.path)
+        check("evolution: reflect marks state + logs exactly once",
+              ev.load_state(sp).get("daily") == "2026-10-20"
+              and sum(1 for e in ev.read_log(repo=repo)
+                      if e["kind"] == "reflect.daily") == 1)
+        rw = ev.reflect("weekly", now=NOW, repo=repo, state_path=sp)
+        rm = ev.reflect("monthly", now=NOW, repo=repo, state_path=sp)
+        check("evolution: weekly + monthly drafts and keys",
+              rw.created and rm.created
+              and ev.load_state(sp) == {"daily": "2026-10-20",
+                                        "weekly": "2026-10-18",
+                                        "monthly": "2026-10"},
+              str(ev.load_state(sp)))
+        try:
+            ev.reflect("yearly", now=NOW, repo=repo, state_path=sp)
+            check("evolution: unknown period refused", False)
+        except ValueError:
+            check("evolution: unknown period refused", True)
+
+        # --- cron: is_due ---
+        cfg = dict(ev.DEFAULT_SETTINGS, enabled=True)
+        check("evolution: is_due empty when disabled (default)",
+              ev.is_due(ev.DEFAULT_SETTINGS, NOW, {}) == [])
+        due = ev.is_due(cfg, NOW, {"daily": "2026-10-20"})
+        check("evolution: daily window done -> only weekly/monthly due",
+              "daily" not in due and "weekly" in due and "monthly" in due,
+              str(due))
+        t08 = datetime(2026, 10, 21, 8, 0, tzinfo=ev.BEIJING).timestamp()
+        done = {"daily": "2026-10-20", "weekly": "2026-10-18",
+                "monthly": "2026-10"}
+        check("evolution: daily waits until daily_at",
+              "daily" not in ev.is_due(cfg, t08, done))
+        t0911 = datetime(2026, 10, 21, 9, 11, tzinfo=ev.BEIJING).timestamp()
+        check("evolution: daily fires next day after daily_at (catch-up)",
+              "daily" in ev.is_due(cfg, t0911, done))
+        check("evolution: invalid daily_at fails closed",
+              ev.is_due({"enabled": True, "daily_at": "99:99"}, NOW, {}) == [])
+
+        # --- settings partition ---
+        clean, errs = ev.validate_evolution_settings(
+            {"enabled": True, "daily_at": "08:30", "weekly_day": "mon",
+             "monthly_day": 5})
+        check("evolution: settings partition validates",
+              clean == {"enabled": True, "daily_at": "08:30",
+                        "weekly_day": "mon", "monthly_day": 5}
+              and not errs, str(errs))
+        clean2, errs2 = ev.validate_evolution_settings(
+            {"enabled": "yes", "daily_at": "25:00", "weekly_day": "nope",
+             "monthly_day": 32, "zz": 1})
+        check("evolution: settings partition rejects every bad field",
+              len(errs2) == 5 and not clean2, str(errs2))
+        check("evolution: settings partition refuses non-object",
+              bool(ev.validate_evolution_settings("x")[1]))
+        merged = ev.evolution_settings({"evolution": {"enabled": True}})
+        check("evolution: defaults merged over partial config",
+              merged["daily_at"] == "09:10" and merged["weekly_day"] == "sun"
+              and merged["monthly_day"] == 1)
+
+        # --- status + lint tree ---
+        summ = ev.status_summary(repo=repo, now=NOW, cfg=ev.evolution_settings({}),
+                                 state_path=sp)
+        check("evolution: status shape + relative log summaries",
+              summ["skills"] >= 1 and summ["log_entries"] >= 4
+              and isinstance(summ["due_now"], list)
+              and all(not e["summary"].startswith("/")
+                      for e in summ["log_tail"]), str(summ)[:200])
+        check("evolution: lint_tree clean after accepted learns",
+              ev.lint_tree(repo) == [], str(ev.lint_tree(repo)))
+        learned.write_text("- ok\n<HOME_DIR>/id_rsa leaked\n", encoding="utf-8")
+        hits = ev.lint_tree(repo)
+        check("evolution: lint_tree catches a poisoned artifact",
+              any("EVOLUTION_learned" in h and "machine-path" in h
+                  for h in hits), str(hits))
+        # log survives hand-editing (append-only, tolerant parse)
+        ev.append_log("learn.memory", "manual line\nsecond line folded? no",
+                      now=NOW, repo=repo)
+        kinds = [e["kind"] for e in ev.read_log(repo=repo)]
+        check("evolution: log line folds to one record",
+              kinds.count("learn.memory") >= 1 and kinds[-1] == "learn.memory")
+
+
 def main() -> int:
     test_model()
     test_registry_and_tools()
@@ -1168,6 +1470,7 @@ def main() -> int:
     test_tg()
     test_watchdog()
     test_service()
+    test_evolution()
     print(f"\n{len(PASS)} pass · {len(FAIL)} fail")
     if FAIL:
         print("failed: " + ", ".join(FAIL))

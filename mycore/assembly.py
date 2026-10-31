@@ -5,6 +5,10 @@ This module builds the SYSTEM message stack that `run_turn` receives:
 
   1. constitution  -> <repo>/overlay/constitution/SOUL.md   (never dropped)
   2. curated memory-> <repo>/overlay/memory/{MEMORY,USER}_curated.md (never dropped)
+  2b. learned slot-> <repo>/overlay/memory/EVOLUTION_learned.md — OPTIONAL:
+                      appended only when present, silently skipped when absent
+                      (the institutional learn loop owns the file; a missing
+                      one is the normal fresh-install state, never an error)
   3. skill hints   -> skill descriptions stay OUT of the prompt by design; the
                       loop calls the skill_route tool instead (lazy bodies,
                       docs/features/memory_and_routing.md)
@@ -23,6 +27,7 @@ REPO = Path(__file__).resolve().parent.parent
 CONSTITUTION = REPO / "overlay" / "constitution" / "SOUL.md"
 MEMORY_SLOTS = (REPO / "overlay" / "memory" / "MEMORY_curated.md",
                 REPO / "overlay" / "memory" / "USER_curated.md")
+LEARNED_MEMORY = REPO / "overlay" / "memory" / "EVOLUTION_learned.md"
 MAX_SLOT_CHARS = 8000        # per-file cap (budget discipline, honest truncation)
 
 
@@ -38,8 +43,10 @@ def _read_slot(path: Path, cap: int = MAX_SLOT_CHARS) -> str | None:
 
 
 def build_system_stack(constitution_path: Path = CONSTITUTION,
-                       memory_paths: tuple[Path, ...] = MEMORY_SLOTS) -> list[dict]:
-    """-> system messages ready for the loop. Absent files become notices."""
+                       memory_paths: tuple[Path, ...] = MEMORY_SLOTS,
+                       learned_path: Path | None = LEARNED_MEMORY) -> list[dict]:
+    """-> system messages ready for the loop. Absent files become notices
+    (the optional learned slot is the silent exception — see module doc)."""
     stack: list[dict] = []
 
     cons = _read_slot(constitution_path)
@@ -58,6 +65,11 @@ def build_system_stack(constitution_path: Path = CONSTITUTION,
                                      "treat personal context as unknown, ask instead of guessing."})
         else:
             stack.append({"role": "system", "content": text})
+
+    if learned_path is not None:
+        learned = _read_slot(learned_path)
+        if learned is not None:                # present-only: absent = normal
+            stack.append({"role": "system", "content": learned})
 
     stack.append({"role": "system",
                   "content": "[body layer] Skills: call the skill_route tool BEFORE reading "

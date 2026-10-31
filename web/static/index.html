@@ -229,6 +229,33 @@
     <div class="gal-grid" id="galGrid"></div>
   </section>
 
+  <!-- evolution: institutional loop (learn -> reflect -> log; the Human
+       conclusion in every reflect draft belongs to the owner) -->
+  <section class="card evolution">
+    <h2><span data-i18n="sec.evolution">EVOLUTION</span><span class="evo-badge" id="evoBadge">–</span></h2>
+    <div class="evo-status" id="evoStatus">–</div>
+    <ul class="evo-log" id="evoLog"></ul>
+    <div class="evo-form">
+      <select id="evoKind" class="evo-input" aria-label="learn kind">
+        <option value="skill" data-i18n="evo.kind.skill">skill</option>
+        <option value="memory" data-i18n="evo.kind.memory">memory</option>
+      </select>
+      <input id="evoName" class="evo-input" maxlength="64" data-i18n-ph="evo.namePh" placeholder="skill slug (a-z0-9._-)">
+      <input id="evoDesc" class="evo-input" maxlength="200" data-i18n-ph="evo.descPh" placeholder="one-line description">
+      <textarea id="evoBody" class="evo-input evo-body" rows="3" data-i18n-ph="evo.bodyPh" placeholder="skill body or lesson text"></textarea>
+      <div class="evo-actions">
+        <button id="evoLearnBtn" class="btn primary" data-i18n="evo.learn">LEARN</button>
+        <select id="evoPeriod" class="evo-input" aria-label="reflect period">
+          <option value="daily" data-i18n="evo.period.daily">daily</option>
+          <option value="weekly" data-i18n="evo.period.weekly">weekly</option>
+          <option value="monthly" data-i18n="evo.period.monthly">monthly</option>
+        </select>
+        <button id="evoReflectBtn" class="btn" data-i18n="evo.reflect">REFLECT</button>
+        <span id="evoMsg" class="evo-msg" role="status"></span>
+      </div>
+    </div>
+  </section>
+
   <!-- BOTTOM: typewriter event stream -->
   <section class="card stream">
     <h2><span data-i18n="sec.stream">LIVE STREAM</span><span class="stream-caret" id="streamCaret"></span></h2>

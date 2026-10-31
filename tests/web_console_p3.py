@@ -159,6 +159,22 @@ def main() -> int:
     s, events = get("/api/events")
     check("GET /api/events shape", s == 200 and isinstance(events.get("events"), list))
 
+    # --- evolution loop endpoints (Phase A): read open, writes Bearer ---
+    s, evo = get("/api/evolution")
+    check("GET /api/evolution shape",
+          s == 200 and isinstance(evo, dict)
+          and isinstance(evo.get("enabled"), bool)
+          and isinstance(evo.get("schedule"), dict)
+          and isinstance(evo.get("state"), dict)
+          and isinstance(evo.get("due_now"), list)
+          and isinstance(evo.get("log_tail"), list)
+          and isinstance(evo.get("drafts"), list),
+          f"got {s} {str(evo)[:140]}")
+    s, body = post("/api/learn", {"kind": "memory", "text": "x"}, None)
+    check("POST /api/learn no token -> 401", s == 401, f"got {s}")
+    s, body = post("/api/evolution", {"action": "reflect", "period": "daily"}, None)
+    check("POST /api/evolution no token -> 401", s == 401, f"got {s}")
+
     # --- voice capability (Phase 2) ---
     s, voice = get("/api/voice")
     check("GET /api/voice shape", s == 200 and isinstance(voice, dict) and
@@ -231,6 +247,30 @@ def main() -> int:
     check("POST mycore non-http url -> 400", s == 400, f"got {s}")
     s, body = post("/api/settings", {"mycore": {"unknown": "x"}}, token)
     check("POST mycore unknown key -> 400", s == 400, f"got {s}")
+
+    # --- evolution settings partition: strict validation, all-or-nothing ---
+    if token:
+        s, body = post("/api/settings",
+                       {"evolution": {"enabled": "yes", "daily_at": "25:00",
+                                      "weekly_day": "someday", "monthly_day": 32,
+                                      "zz": 1}}, token)
+        check("POST evolution bad partition -> 400 (5 details)",
+              s == 400 and isinstance(body, dict)
+              and len(body.get("details", [])) == 5, f"got {s} {body}")
+        s, body = post("/api/settings", {"evolution": {"daily_at": "09:10"}},
+                       token)
+        check("POST evolution valid partition -> 200",
+              s == 200 and isinstance(body, dict)
+              and body.get("settings", {}).get("evolution", {}).get("daily_at")
+              == "09:10", f"got {s} {str(body)[:160]}")
+        s, body = post("/api/learn", {"kind": "wat"}, token)
+        check("POST /api/learn bad kind -> 400 (no write)",
+              s == 400 and isinstance(body, dict) and "details" in body,
+              f"got {s} {body}")
+        s, body = post("/api/evolution",
+                       {"action": "reflect", "period": "yearly"}, token)
+        check("POST /api/evolution bad period -> 400 (no write)",
+              s == 400, f"got {s} {body}")
 
     # --- valid write + idempotency ---
     if token:

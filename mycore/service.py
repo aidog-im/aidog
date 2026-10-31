@@ -31,6 +31,10 @@ State directory (default <repo>/data/mycore_service, env AIDOG_MC_STATE):
     sessions/<chat_id>.model  per-chat /model override (session.py writes meta
                               only at file creation, so the override lives in
                               a small sidecar file instead of the JSONL meta)
+    evolution_state.json      last run per reflect window (cron leg — fires
+                              only when web/settings.json evolution.enabled;
+                              the poll loop checks is_due() once a minute,
+                              catch-up after downtime, one run per window)
     sessions/archive/         sessions rotated by /reset
 
 Commands (parsed only when message text starts with "/", and only after the
@@ -44,6 +48,13 @@ allowlist gate — unauthenticated /commands are ignored like any message):
     /lang   show the reply language; /lang <code> switches it service-wide and
             persists to <state>/lang.json (packs discovered in
             overlay/locales/, default en)
+    /learn  one experience -> an institutional artifact (evolution loop):
+            /learn memory <text> | /learn skill <slug> :: <desc> :: <body>
+            the lint gate + skill_route pre-screen run BEFORE any write;
+            rejects change nothing and are logged to service.log only
+    /reflect [daily|weekly|monthly]  generate the period skeleton (facts only;
+            the Human conclusion section stays the owner's to write)
+    /evolution  loop status: schedule, last runs, counts, log tail
 
 Modes:
     --once    fetch at most ONE getUpdates batch (short poll), handle at most
@@ -76,6 +87,7 @@ import urllib.parse
 from pathlib import Path
 
 from . import cli
+from . import evolution
 from .assembly import build_system_stack
 from .loop import run_turn
 from .model import ChatClient
@@ -106,6 +118,7 @@ LOG_MAX_BYTES = 1_000_000              # size-rotate threshold, keep 1 backup
 DENY_WARN_THROTTLE = 60.0              # seconds between WARN lines per chat
 MAX_POLL_ERRORS = 20                   # bounded backoff, then give up (tg.py parity)
 DEFAULT_POLL_TIMEOUT = 30              # long-poll seconds (0 in --once mode)
+REFLECT_CHECK_SEC = 60.0               # evolution cron evaluation cadence
 
 # Honest one-line replies. The English constants stay importable (tests and
 # tooling compare against them); live replies resolve the SAME keys through
@@ -327,6 +340,7 @@ class ChatService:
         self._started = now()
         self._stop = False
         self._deny_stamp: dict[str, float] = {}
+        self._reflect_check = 0.0       # last evolution cron evaluation (clock)
         self.log = ServiceLog(self.state / LOG_NAME, now=now)
         self.lang = self._load_lang()
         # HARD token gate (tg.py): dedicated MYCORE_TG_TOKEN required here too.
@@ -412,6 +426,7 @@ class ChatService:
                     self._sleep(min(30.0, 1.5 ** min(errors, 10)))
                     continue
                 errors = 0
+                self._maybe_reflect()          # evolution cron leg (no-op when off)
                 if once and not updates:
                     break                          # nothing pending: exit 0
                 for upd in updates:
@@ -606,6 +621,12 @@ class ChatService:
                            uptime=up)
         if name == "lang":
             return self._lang_command(chat_id, arg)
+        if name == "learn":
+            return self._learn_command(arg)
+        if name == "reflect":
+            return self._reflect_command(arg)
+        if name == "evolution":
+            return self._evolution_command()
         return self._t("cmd.unknown")
 
     def _lang_command(self, chat_id: int, arg: str) -> str:
@@ -631,6 +652,146 @@ class ChatService:
         self.log.write("LANG_SET", f"chat={redact_chat(chat_id)}",
                        f"lang={code}")
         return self._t("cmd.lang.set", lang=code)
+
+    # ---------------------------------------------------------- evolution ---
+    def _rel_path(self, path: object) -> str:
+        """Repo-relative POSIX path for chat replies (machine paths never
+        appear in a reply — observation scrubbing rule)."""
+        p = Path(str(path))
+        try:
+            return p.resolve().relative_to(self.repo.resolve()).as_posix()
+        except (OSError, ValueError):
+            return p.name
+
+    def _rule_labels(self, rules: list[str]) -> str:
+        return ", ".join(i18n.fmt(self.lang, f"rule.{r}", r) for r in rules)
+
+    def _evolution_cfg(self) -> dict:
+        """Effective evolution settings (fail-closed: absent/invalid = off)."""
+        try:
+            doc = json.loads((self.repo / "web" / "settings.json").read_text(
+                encoding="utf-8"))
+        except (OSError, ValueError):
+            doc = {}
+        return evolution.evolution_settings(doc if isinstance(doc, dict) else {})
+
+    def _evo_state_path(self) -> Path:
+        return self.state / evolution.STATE_FILE_NAME
+
+    def _learn_command(self, arg: str) -> str:
+        """`/learn memory <text>` and `/learn skill <slug> :: <desc> :: <body>`.
+        Everything runs through the evolution gate — no write without lint +
+        pre-screen, no log line for a reject (service.log carries that)."""
+        usage = self._t("cmd.learn.usage")
+        words = arg.strip().split(None, 1)
+        if not words:
+            return usage
+        kind = words[0].lower()
+        rest = words[1].strip() if len(words) > 1 else ""
+        if kind == "memory":
+            if not rest:
+                return usage
+            res = evolution.learn_memory(rest, repo=self.repo)
+        elif kind == "skill":
+            segs = rest.split("::", 2)
+            if len(segs) < 3 or not all(s.strip() for s in segs):
+                return usage
+            res = evolution.learn_skill(segs[0].strip(), segs[1].strip(),
+                                        segs[2].strip(), repo=self.repo)
+        else:
+            return usage
+        if not res.ok:
+            self.log.write("LEARN_REJECT", f"kind={kind}",
+                           "rules=" + ",".join(res.errors))
+            return self._t("cmd.learn.rejected",
+                           details=self._rule_labels(res.errors))
+        self.log.write("LEARN_OK", f"kind={kind}",
+                       f"path={self._rel_path(res.path)}")
+        key = "cmd.learn.ok_mem" if kind == "memory" else "cmd.learn.ok_skill"
+        msg = self._t(key, path=self._rel_path(res.path))
+        if res.prescreen:
+            msg += "\n" + self._t("cmd.learn.prescreen",
+                                  notes="; ".join(res.prescreen))
+        return msg
+
+    def _reflect_command(self, arg: str) -> str:
+        """`/reflect [daily|weekly|monthly]` — explicit trigger, same code
+        path as the cron leg (the window key is marked done either way)."""
+        period = (arg.strip() or "daily").lower()
+        if period not in evolution.PERIODS:
+            return self._t("cmd.reflect.bad")
+        try:
+            res = evolution.reflect(period, now=self._now(), repo=self.repo,
+                                     state_path=self._evo_state_path())
+        except (OSError, ValueError):
+            self.log.write("REFLECT_ERR", f"period={period}",
+                           "trigger=command")
+            return self._t("cmd.reflect.fail")
+        self.log.write("REFLECT", f"period={period}",
+                       f"created={int(res.created)}", f"file={res.path.name}",
+                       "trigger=command")
+        if res.created:
+            return self._t("cmd.reflect.ok", period=period,
+                           path=self._rel_path(res.path),
+                           skills=len(res.facts.get("skills") or []),
+                           entries=sum((res.facts.get("entries") or {}).values()))
+        return self._t("cmd.reflect.exists", period=period,
+                       path=self._rel_path(res.path))
+
+    def _evolution_command(self) -> str:
+        """`/evolution` — loop status (observed facts only)."""
+        cfg = self._evolution_cfg()
+        sp = self._evo_state_path()
+        st = evolution.load_state(sp)
+        summ = evolution.status_summary(repo=self.repo, cfg=cfg,
+                                        state_path=sp, now=self._now())
+        onoff = self._t("common.on") if cfg.get("enabled") else self._t("common.off")
+        lines = [self._t("cmd.evolution.head", enabled=onoff,
+                         daily_at=cfg["daily_at"],
+                         weekly_day=cfg["weekly_day"],
+                         monthly_day=cfg["monthly_day"])]
+        if summ.get("due_now"):
+            lines.append(self._t("cmd.evolution.due",
+                                 periods=", ".join(summ["due_now"])))
+        runs = " ".join(f"{p}={st.get(p) or '-'}" for p in evolution.PERIODS)
+        lines.append(self._t("cmd.evolution.last", runs=runs))
+        lines.append(self._t("cmd.evolution.counts",
+                             skills=summ["skills"],
+                             learned=f"{summ['learned_bytes']} B",
+                             entries=summ["log_entries"],
+                             drafts=len(summ["drafts"])))
+        tail = summ["log_tail"][-5:]
+        if tail:
+            lines.append(self._t("cmd.evolution.log"))
+            lines += [f"  {e['ts'][:16]} {e['kind']} {e['summary']}"
+                      for e in tail]
+        else:
+            lines.append(self._t("cmd.evolution.log_empty"))
+        return "\n".join(lines)
+
+    def _maybe_reflect(self) -> None:
+        """Evolution cron leg (dual-driven loop, design differentiation #3): evaluation is
+        throttled to REFLECT_CHECK_SEC; off unless evolution.enabled (fail
+        closed); each reflect() marks its window, so a period fires once per
+        window — with catch-up after downtime."""
+        nowt = self._now()
+        if nowt - self._reflect_check < REFLECT_CHECK_SEC:
+            return
+        self._reflect_check = nowt
+        try:
+            cfg = self._evolution_cfg()
+            if not cfg.get("enabled"):
+                return
+            sp = self._evo_state_path()
+            due = evolution.is_due(cfg, nowt, evolution.load_state(sp))
+            for period in due:
+                res = evolution.reflect(period, now=nowt, repo=self.repo,
+                                        state_path=sp)
+                self.log.write("REFLECT", f"period={period}",
+                               f"created={int(res.created)}",
+                               f"file={res.path.name}", "trigger=cron")
+        except Exception as e:  # noqa: BLE001 — a reflect failure never kills the loop
+            self.log.write("REFLECT_ERR", f"err={type(e).__name__}")
 
     # ------------------------------------------------------------ turn ------
     def _pipeline(self, chat_id: int, text: str) -> str:

@@ -14,5 +14,11 @@
   "mycore": {
     "base_url": "http://127.0.0.1:3460/v1",
     "model": "mimo-v2.6-flash"
+  },
+  "evolution": {
+    "enabled": false,
+    "daily_at": "09:10",
+    "weekly_day": "sun",
+    "monthly_day": 1
   }
 }

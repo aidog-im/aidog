@@ -581,6 +581,89 @@ async function refreshSkills() {
   } catch (e) { /* keep last render */ }
 }
 
+/* ------------------------------------------------------------ evolution -- */
+let evoData = null;
+
+async function refreshEvolution() {
+  try {
+    evoData = await fetch("/api/evolution").then(r => r.json());
+    renderEvolution();
+  } catch (e) { /* keep last render */ }
+}
+
+function renderEvolution() {
+  if (!evoData) return;
+  const sc = evoData.schedule || {};
+  const badge = document.getElementById("evoBadge");
+  badge.textContent = evoData.enabled ? t("common.on", "enabled") : t("common.off", "off");
+  badge.className = "evo-badge " + (evoData.enabled ? "on" : "off");
+  let line = t("evo.status", "cron daily {d} · weekly {w} · monthly day {m}")
+    .replace("{d}", escapeHtml(sc.daily_at || "-"))
+    .replace("{w}", escapeHtml(sc.weekly_day || "-"))
+    .replace("{m}", escapeHtml(String(sc.monthly_day === undefined ? "-" : sc.monthly_day)));
+  if ((evoData.due_now || []).length) {
+    line += " · " + t("evo.due", "due now: {p}").replace("{p}",
+      escapeHtml(evoData.due_now.join(", ")));
+  }
+  document.getElementById("evoStatus").innerHTML = line;
+  const tail = (evoData.log_tail || []).slice(-5).reverse();
+  document.getElementById("evoLog").innerHTML = tail.length
+    ? tail.map(e => `<li><span class="evo-ts">${escapeHtml(String(e.ts).slice(0, 16).replace("T", " "))}</span>` +
+        ` <span class="evo-kind">${escapeHtml(e.kind)}</span>` +
+        ` <span class="evo-sum">${escapeHtml(e.summary)}</span></li>`).join("")
+    : `<li class="evo-empty">${escapeHtml(t("evo.logEmpty", "no evolution entries yet"))}</li>`;
+}
+
+function evoMsg(kind, text) {
+  const el = document.getElementById("evoMsg");
+  el.className = "evo-msg " + kind;
+  el.textContent = text;
+}
+
+async function evoPost(url, payload) {
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) { evoMsg("err", t("save.needToken", "token required")); return null; }
+  try {
+    const res = await fetch(url, { method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+      body: JSON.stringify(payload) });
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 401) { evoMsg("err", t("save.badToken", "401 · unauthorized")); return null; }
+    if (!res.ok) {
+      const details = (body.details || [body.error || "error"]).map(d => t("rule." + d, d));
+      evoMsg("err", details.join("; ").slice(0, 90));
+      return null;
+    }
+    return body;
+  } catch (e) { evoMsg("err", String(e).slice(0, 60)); return null; }
+}
+
+async function evoLearn() {
+  const kind = document.getElementById("evoKind").value;
+  const content = document.getElementById("evoBody").value;
+  const payload = { kind,
+    name: document.getElementById("evoName").value,
+    description: document.getElementById("evoDesc").value,
+    body: content, text: content };
+  const body = await evoPost("/api/learn", payload);
+  if (!body) return;
+  let msg = t("evo.learned", "learned → {p}").replace("{p}", body.path);
+  if ((body.prescreen || []).length) msg += " · " + body.prescreen.join("; ");
+  evoMsg("ok", msg.slice(0, 120));
+  document.getElementById("evoBody").value = "";
+  refreshEvolution(); refreshSkills();   // new skill shows up in the armory
+}
+
+async function evoReflect() {
+  const period = document.getElementById("evoPeriod").value;
+  const body = await evoPost("/api/evolution", { action: "reflect", period });
+  if (!body) return;
+  const key = body.created ? "evo.reflectOk" : "evo.reflectExists";
+  const fb = body.created ? "draft → {p}" : "already drafted → {p}";
+  evoMsg("ok", t(key, fb).replace("{p}", body.path));
+  refreshEvolution();
+}
+
 /* ------------------------------------------------------------ tool strip -- */
 function pad(n) { return String(n).padStart(2, "0"); }
 
@@ -788,6 +871,13 @@ if (voiceVolEl) voiceVolEl.addEventListener("input", e => {
 const voiceOrbEl = document.getElementById("voiceOrb");
 if (voiceOrbEl) voiceOrbEl.addEventListener("click", () => armVoice());
 document.getElementById("saveBtn").addEventListener("click", saveSettings);
+document.getElementById("evoLearnBtn").addEventListener("click", evoLearn);
+document.getElementById("evoReflectBtn").addEventListener("click", evoReflect);
+document.getElementById("evoKind").addEventListener("change", e => {
+  const mem = e.target.value === "memory";
+  document.getElementById("evoName").style.display = mem ? "none" : "";
+  document.getElementById("evoDesc").style.display = mem ? "none" : "";
+});
 document.getElementById("refreshSelect").addEventListener("change", scheduleRefresh);
 document.getElementById("updateDismiss").addEventListener("click", () => {
   if (versionData && versionData.latest) sessionStorage.setItem("aidog_upd_dismiss", versionData.latest);
@@ -803,8 +893,10 @@ runBoot();
 loadLang(startLang);
 loadSettings().then(() => { scheduleRefresh(); renderVoice(); });
 refreshStatus(); refreshUsage(); refreshEvents(); refreshVersion(); refreshSkills();
+refreshEvolution();
 refreshVoiceCap();   // engine status visible before the first orb tap (#4)
 setInterval(tickClock, 1000); tickClock();
 setInterval(refreshUsage, 60000);
+setInterval(refreshEvolution, 60000);
 setInterval(refreshEvents, 10000);
 setInterval(refreshVersion, 300000);
